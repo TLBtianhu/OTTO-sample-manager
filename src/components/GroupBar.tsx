@@ -4,6 +4,7 @@ import { useSampleStore } from '@/store/sampleStore'
 import { v4 as uuidv4 } from 'uuid'
 
 export const GroupBar: React.FC = () => {
+  const groupBarRef = React.useRef<HTMLDivElement>(null)
   const groups = useSampleStore((state) => state.groups)
   const groupOrder = useSampleStore((state) => state.groupOrder)
   const activeGroupId = useSampleStore((state) => state.activeGroupId)
@@ -19,6 +20,15 @@ export const GroupBar: React.FC = () => {
   const [editingGroupName, setEditingGroupName] = useState('')
   const [contextMenu, setContextMenu] = useState<{groupId: string; x: number; y: number} | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
+  const pointerDragRef = React.useRef<{
+    pointerId: number
+    groupId: string
+    startX: number
+    startY: number
+    active: boolean
+  } | null>(null)
+  const suppressClickRef = React.useRef(false)
+  const suppressClickTimerRef = React.useRef<number | null>(null)
 
   const orderedGroups = React.useMemo(() => {
     const seen = new Set<string>()
@@ -39,6 +49,10 @@ export const GroupBar: React.FC = () => {
   }, [groupOrder, groups])
 
   const handleSelectGroup = (groupId: string | null) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
     setActiveGroupId(groupId)
   }
 
@@ -101,32 +115,94 @@ export const GroupBar: React.FC = () => {
     })
   }
 
-  const handleGroupDragStart = (e: React.DragEvent, groupId: string) => {
-    if (editingGroupId === groupId) {
-      e.preventDefault()
-      return
+  const handleGroupPointerDown = (e: React.PointerEvent, groupId: string) => {
+    if (e.button !== 0 || editingGroupId === groupId) return
+    pointerDragRef.current = {
+      pointerId: e.pointerId,
+      groupId,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
     }
-    e.dataTransfer.setData('application/group-id', groupId)
-    e.dataTransfer.effectAllowed = 'move'
   }
 
-  const handleGroupDragOver = (e: React.DragEvent, groupId: string) => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
-    setDragOverGroupId(groupId)
+  const updateGroupPointerDrag = (e: React.PointerEvent, targetGroupId: string) => {
+    const drag = pointerDragRef.current
+    if (!drag || drag.pointerId !== e.pointerId) return false
+
+    if (!drag.active && (
+      targetGroupId !== drag.groupId
+      || Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) >= 6
+    )) {
+      drag.active = true
+    }
+    if (drag.active) {
+      e.preventDefault()
+      setDragOverGroupId(targetGroupId)
+    }
+    return drag.active
   }
 
-  const handleGroupDragLeave = (groupId: string) => {
-    setDragOverGroupId((current) => current === groupId ? null : current)
-  }
+  const handleGroupPointerUp = (e: React.PointerEvent, targetGroupId: string) => {
+    const drag = pointerDragRef.current
+    if (!drag || drag.pointerId !== e.pointerId) return
 
-  const handleGroupDrop = (e: React.DragEvent, targetGroupId: string) => {
-    e.preventDefault()
-    const draggedGroupId = e.dataTransfer.getData('application/group-id')
+    const wasDragging = updateGroupPointerDrag(e, targetGroupId)
+    pointerDragRef.current = null
     setDragOverGroupId(null)
-    if (!draggedGroupId || draggedGroupId === targetGroupId) return
-    moveGroup(draggedGroupId, targetGroupId)
+    if (!wasDragging) return
+
+    suppressClickRef.current = true
+    if (suppressClickTimerRef.current !== null) window.clearTimeout(suppressClickTimerRef.current)
+    suppressClickTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false
+      suppressClickTimerRef.current = null
+    }, 0)
+    if (drag.groupId !== targetGroupId) {
+      moveGroup(drag.groupId, targetGroupId)
+    }
   }
+
+  React.useEffect(() => {
+    const cancelPointerDrag = () => {
+      pointerDragRef.current = null
+      setDragOverGroupId(null)
+    }
+    const handleWindowPointerMove = (event: PointerEvent) => {
+      const drag = pointerDragRef.current
+      if (!drag || drag.pointerId !== event.pointerId) return
+      if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 6) {
+        drag.active = true
+      }
+      if (!drag.active) return
+
+      const container = groupBarRef.current
+      const bounds = container?.getBoundingClientRect()
+      if (container && bounds && bounds.width > 0 && typeof container.scrollBy === 'function') {
+        if (event.clientX < bounds.left + 32) container.scrollBy({ left: -24 })
+        if (event.clientX > bounds.right - 32) container.scrollBy({ left: 24 })
+      }
+
+      const target = document.elementFromPoint?.(event.clientX, event.clientY)
+        ?.closest<HTMLElement>('[data-group-id]')
+      if (target?.dataset.groupId) setDragOverGroupId(target.dataset.groupId)
+    }
+    const handleWindowPointerUp = (event: PointerEvent) => {
+      const drag = pointerDragRef.current
+      if (drag && drag.pointerId === event.pointerId) cancelPointerDrag()
+    }
+    window.addEventListener('pointermove', handleWindowPointerMove)
+    window.addEventListener('pointerup', handleWindowPointerUp)
+    window.addEventListener('pointercancel', cancelPointerDrag)
+    window.addEventListener('blur', cancelPointerDrag)
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove)
+      window.removeEventListener('pointerup', handleWindowPointerUp)
+      window.removeEventListener('pointercancel', cancelPointerDrag)
+      window.removeEventListener('blur', cancelPointerDrag)
+      if (suppressClickTimerRef.current !== null) window.clearTimeout(suppressClickTimerRef.current)
+    }
+  }, [])
 
   const handleEditFromContextMenu = (groupId: string) => {
     const group = groups.get(groupId)
@@ -153,7 +229,7 @@ export const GroupBar: React.FC = () => {
   }, [])
 
   return (
-    <div className="border-b border-white/5 bg-zinc-950 px-3 py-2 overflow-x-auto overflow-y-hidden">
+    <div ref={groupBarRef} className="border-b border-white/5 bg-zinc-950 px-3 py-2 overflow-x-auto overflow-y-hidden">
       <div className="flex min-w-max items-center gap-2 whitespace-nowrap">
         <button
           onClick={() => handleSelectGroup(null)}
@@ -169,12 +245,12 @@ export const GroupBar: React.FC = () => {
         {orderedGroups.map((group) => (
           <div
             key={group.id}
-            className={`relative shrink-0 transition-opacity ${dragOverGroupId === group.id ? 'opacity-70' : 'opacity-100'}`}
-            draggable={editingGroupId !== group.id}
-            onDragStart={(e) => handleGroupDragStart(e, group.id)}
-            onDragOver={(e) => handleGroupDragOver(e, group.id)}
-            onDragLeave={() => handleGroupDragLeave(group.id)}
-            onDrop={(e) => handleGroupDrop(e, group.id)}
+            data-group-id={group.id}
+            className={`relative shrink-0 select-none transition-opacity ${dragOverGroupId === group.id ? 'opacity-70' : 'opacity-100'}`}
+            onPointerDown={(e) => handleGroupPointerDown(e, group.id)}
+            onPointerMove={(e) => updateGroupPointerDrag(e, group.id)}
+            onPointerEnter={(e) => updateGroupPointerDrag(e, group.id)}
+            onPointerUp={(e) => handleGroupPointerUp(e, group.id)}
           >
             {editingGroupId === group.id ? (
               <div className="flex shrink-0 items-center gap-1">

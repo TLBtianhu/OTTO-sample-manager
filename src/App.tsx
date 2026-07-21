@@ -33,6 +33,7 @@ import type {
 } from '@/types'
 import { reconcileLibraryState } from '@/services/libraryImport'
 import { buildLyricsSourceSampleIndex, planLyricsAssembly } from '@/services/lyricsSampleAssembler'
+import { buildLyricsLibraryMutation, loadTauriGroupSamples } from '@/services/lyricsLibrary'
 import { decodeLyricsText, getDefaultLyricsGroupName, tokenizeLyricsText } from '@/services/lyricsPinyinService'
 import { getDesktopBridge } from '@/services/desktopBridge'
 import type { DesktopBridge, ImportProgress, LibraryBootstrap, LibrarySampleRecord } from '@/services/desktopBridge'
@@ -1018,18 +1019,22 @@ export default function App() {
   }, [isAssemblingLyrics])
 
   const handlePickLyricsFile = useCallback(async () => {
-    const filePath = await desktop.dialogs.openLyricsFile()
-    if (!filePath) return
+    try {
+      const filePath = await desktop.dialogs.openLyricsFile()
+      if (!filePath) return
+      const buffer = await desktop.files.readAsBuffer(filePath)
+      const text = decodeLyricsText(buffer)
+      const tokens = tokenizeLyricsText(text)
 
-    const buffer = await desktop.files.readAsBuffer(filePath)
-    const text = decodeLyricsText(buffer)
-    const tokens = tokenizeLyricsText(text)
-
-    setLyricsFilePath(filePath)
-    setLyricsTokens(tokens)
-    setLyricsTargetGroupName(getDefaultLyricsGroupName(filePath))
-    setLyricsResult(null)
-  }, [])
+      setLyricsFilePath(filePath)
+      setLyricsTokens(tokens)
+      setLyricsTargetGroupName(getDefaultLyricsGroupName(filePath))
+      setLyricsResult(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.alert(`读取歌词文件失败：${message}`)
+    }
+  }, [desktop])
 
   const handleAssembleLyrics = useCallback(async () => {
     if (!lyricsFilePath || !lyricsSourceGroupId || !lyricsTargetGroupName.trim() || isAssemblingLyrics || isUpdateBlocking || isLibraryReadOnly) {
@@ -1047,19 +1052,23 @@ export default function App() {
       return
     }
 
-    const sourceSamples = sourceGroup.sampleIds
-      .map((sampleId) => samples.get(sampleId))
-      .filter((sample): sample is Sample => Boolean(sample && sample.isFileValid))
-
-    if (sourceSamples.length === 0) {
-      window.alert('所选源声库分组没有可用素材。')
-      return
-    }
-
     setIsAssemblingLyrics(true)
     setLyricsResult(null)
+    let copiedOutputDir: string | null = null
+    let tauriLibraryCommitted = false
 
     try {
+      const sourceSamples = desktop.runtime === 'tauri'
+        ? await loadTauriGroupSamples(desktop, sourceGroup.id)
+        : sourceGroup.sampleIds
+          .map((sampleId) => samples.get(sampleId))
+          .filter((sample): sample is Sample => Boolean(sample && sample.isFileValid))
+
+      if (sourceSamples.length === 0) {
+        window.alert('所选源声库分组没有可用素材。')
+        return
+      }
+
       const sourceIndex = buildLyricsSourceSampleIndex(sourceSamples)
       const plan = planLyricsAssembly(lyricsTokens, sourceIndex)
 
@@ -1076,6 +1085,7 @@ export default function App() {
           fileName: item.targetFileName,
         })),
       })
+      copiedOutputDir = copyResult.targetDir
 
       const targetGroupId = uuidv4()
       const matchedMap = new Map(plan.matched.map((item) => [item.id, item]))
@@ -1113,13 +1123,41 @@ export default function App() {
         return
       }
 
-      addGroup({
+      const targetGroup = {
         id: targetGroupId,
         name: lyricsTargetGroupName.trim(),
         color: `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')}`,
         sampleIds: assembledSamples.map((sample) => sample.id),
-      })
-      addSamples(assembledSamples)
+      }
+
+      if (desktop.runtime === 'tauri') {
+        const libraryState = useSampleStore.getState()
+        const batch = buildLyricsLibraryMutation({
+          group: targetGroup,
+          samples: assembledSamples,
+          targetDir: copyResult.targetDir ?? '',
+          groupOrder: libraryState.groupOrder,
+          folderOrder: libraryState.folderOrder,
+        })
+        await desktop.library.applyMutations(batch)
+        tauriLibraryCommitted = true
+        try {
+          await hydrateTauriLibrary(desktop)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          window.alert([
+            `活字印刷已生成并保存 ${assembledSamples.length} 个素材，但界面刷新失败。`,
+            '请重启软件查看新分组，不要重复生成。',
+            `错误：${message}`,
+          ].join('\n'))
+          setShowLyricsAssembler(false)
+          resetLyricsAssemblerState()
+          return
+        }
+      } else {
+        addGroup(targetGroup)
+        addSamples(assembledSamples)
+      }
       setActiveGroupId(targetGroupId)
 
       setLyricsResult({
@@ -1140,11 +1178,17 @@ export default function App() {
       setShowLyricsAssembler(false)
       resetLyricsAssemblerState()
     } catch (error) {
-      window.alert('活字印刷生成失败，请检查歌词文件和源声库分组。')
+      const message = error instanceof Error ? error.message : String(error)
+      const recovery = desktop.runtime === 'tauri' && copiedOutputDir
+        ? tauriLibraryCommitted
+          ? '\n素材已写入声库；请重启软件查看，不要重复生成。'
+          : `\n已复制的文件保留在：${copiedOutputDir}\n尚未写入声库，可通过“导入整个文件夹”恢复，不要重复生成。`
+        : ''
+      window.alert(`活字印刷生成失败：${message}${recovery}`)
     } finally {
       setIsAssemblingLyrics(false)
     }
-  }, [addGroup, addSamples, groups, isAssemblingLyrics, isLibraryReadOnly, isUpdateBlocking, lyricsFilePath, lyricsSourceGroupId, lyricsTargetGroupName, lyricsTokens, resetLyricsAssemblerState, samples, setActiveGroupId])
+  }, [addGroup, addSamples, desktop, groups, isAssemblingLyrics, isLibraryReadOnly, isUpdateBlocking, lyricsFilePath, lyricsSourceGroupId, lyricsTargetGroupName, lyricsTokens, resetLyricsAssemblerState, samples, setActiveGroupId])
 
   // 拖文件到窗口导入
   const handleWindowDrop = useCallback((e: React.DragEvent) => {

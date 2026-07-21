@@ -474,17 +474,27 @@ export function createTauriDesktopBridge(): DesktopBridge {
         if (!pendingUpdate) return
         let downloaded = 0
         let total = 0
-        publishUpdate({ phase: 'downloading', progressPercent: 0 })
-        await pendingUpdate.downloadAndInstall((event) => {
-          if (event.event === 'Started') total = event.data.contentLength ?? 0
-          if (event.event === 'Progress') downloaded += event.data.chunkLength
-          publishUpdate({
-            phase: event.event === 'Finished' ? 'installing' : 'downloading',
-            progressPercent: total > 0 ? Math.min(100, downloaded / total * 100) : null,
+        publishUpdate({ phase: 'downloading', progressPercent: 0, message: null })
+        try {
+          await pendingUpdate.downloadAndInstall((event) => {
+            if (event.event === 'Started') total = event.data.contentLength ?? 0
+            if (event.event === 'Progress') downloaded += event.data.chunkLength
+            publishUpdate({
+              phase: event.event === 'Finished' ? 'installing' : 'downloading',
+              progressPercent: total > 0 ? Math.min(100, downloaded / total * 100) : null,
+            })
           })
-        })
-        publishUpdate({ phase: 'installing', progressPercent: 100 })
-        await invoke('app_restart')
+          publishUpdate({ phase: 'installing', progressPercent: 100 })
+          await invoke('app_restart')
+        } catch (error) {
+          publishUpdate({
+            phase: 'error',
+            progressPercent: null,
+            message: error instanceof Error ? error.message : String(error),
+            action: 'download-and-restart',
+          })
+          throw error
+        }
       },
       onState: (listener) => {
         updateListeners.add(listener)
