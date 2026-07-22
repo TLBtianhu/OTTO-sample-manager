@@ -22,6 +22,7 @@
     "tauri:build": "tauri build",
     "tauri:build:release": "tauri build --config src-tauri/tauri.release.conf.json",
     "tauri:verify:release": "node scripts/verify-tauri-release.mjs --exe src-tauri/target/release/otto-sample-manager.exe --installer src-tauri/target/release/bundle/nsis/采样管理器_2.6.3_x64-setup.exe --expected-version 2.6.3",
+    "tauri:verify:update-artifacts": "node scripts/verify-tauri-update-artifacts.mjs --installer release/2.6.3/_2.6.3_x64-setup.exe --signature release/2.6.3/_2.6.3_x64-setup.exe.sig --latest-json release/2.6.3/latest.json --latest-yml release/2.6.3/latest.yml --tauri-config src-tauri/tauri.conf.json --expected-version 2.6.3",
     "tauri:manifests:release": "node scripts/generate-tauri-update-manifests.mjs --installer src-tauri/target/release/bundle/nsis/采样管理器_2.6.3_x64-setup.exe --signature src-tauri/target/release/bundle/nsis/采样管理器_2.6.3_x64-setup.exe.sig --version 2.6.3 --asset-name _2.6.3_x64-setup.exe --repository ywb2164/OTTO-sample-manager --notes \"OTTO Sample Manager 2.6.3：修复跨 Electron/Tauri 更新发布与 Windows 系统代理检查。\" --output-dir release/2.6.3",
     "tauri:renderer:dev": "vite --config vite.tauri.config.ts --host 127.0.0.1 --port 1420",
     "tauri:renderer:build": "vite build --config vite.tauri.config.ts"

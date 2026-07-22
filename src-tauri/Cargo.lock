@@ -2479,6 +2479,8 @@ dependencies = [
 name = "otto-sample-manager"
 version = "2.6.3"
 dependencies = [
+ "base64 0.22.1",
+ "minisign-verify",
  "reqwest",
  "rusqlite",
  "serde",
