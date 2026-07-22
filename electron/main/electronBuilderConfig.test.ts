@@ -8,13 +8,12 @@ describe('electron-builder runtime dependency files', () => {
     expect(config).not.toContain("'!**/node_modules/**/src/**'")
   })
 
-  it('keeps the release private until every update artifact has uploaded', () => {
-    const config = readFileSync('electron-builder.yml', 'utf8')
-    const workflow = readFileSync('.github/workflows/publish-windows.yml', 'utf8')
-    const uploadStep = workflow.indexOf('npm run pack -- --publish always')
-    const publishStep = workflow.indexOf('gh release edit "${{ github.ref_name }}" --draft=false --latest')
+  it('keeps the Tauri release private until every update artifact has uploaded', () => {
+    const workflow = readFileSync('.github/workflows/tauri-windows.yml', 'utf8')
+    const uploadStep = workflow.indexOf('gh release upload')
+    const publishStep = workflow.indexOf('gh release edit')
 
-    expect(config).toContain('releaseType: draft')
+    expect(workflow).toContain('releaseDraft: true')
     expect(uploadStep).toBeGreaterThan(-1)
     expect(publishStep).toBeGreaterThan(uploadStep)
   })
