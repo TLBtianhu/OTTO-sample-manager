@@ -493,7 +493,6 @@ export function createTauriDesktopBridge(): DesktopBridge {
             message: error instanceof Error ? error.message : String(error),
             action: 'download-and-restart',
           })
-          throw error
         }
       },
       onState: (listener) => {

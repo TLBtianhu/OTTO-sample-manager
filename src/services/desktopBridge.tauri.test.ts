@@ -25,7 +25,7 @@ describe('createTauriDesktopBridge updater', () => {
     mocks.check.mockReset()
   })
 
-  it('leaves the blocking phase and exposes a retry when installation fails', async () => {
+  it('reports installation failures through state without rejecting the UI action', async () => {
     const failure = new Error('signature download failed')
     const update = {
       version: '2.6.2',
@@ -38,7 +38,7 @@ describe('createTauriDesktopBridge updater', () => {
     bridge.updater.onState((state) => states.push({ ...state }))
 
     await bridge.updater.check()
-    await expect(bridge.updater.start()).rejects.toThrow('signature download failed')
+    await expect(bridge.updater.start()).resolves.toBeUndefined()
 
     expect(states.at(-1)).toMatchObject({
       phase: 'error',
