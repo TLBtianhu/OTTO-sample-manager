@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "otto-sample-manager"
-version = "2.6.2"
+version = "2.6.3"
 dependencies = [
  "reqwest",
  "rusqlite",
