@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - tauri
       - codex/tauri-windows-migration
     tags:
       - 'v*'
@@ -90,3 +91,27 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --config src-tauri/tauri.release.conf.json --ci
+
+      - name: Generate Electron and Tauri update manifests
+        run: npm run tauri:manifests:release
+
+      - name: Verify final update artifacts
+        run: npm run tauri:verify:update-artifacts
+
+      - name: Upload compatibility release files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" `
+            release/2.6.3/_2.6.3_x64-setup.exe `
+            release/2.6.3/_2.6.3_x64-setup.exe.sig `
+            release/2.6.3/latest.json `
+            release/2.6.3/latest.yml `
+            --clobber
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false --latest

@@ -1,13 +1,10 @@
 name: Publish Windows release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   publish:
@@ -20,25 +17,15 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Verify tag version
-        if: github.event_name == 'push'
-        shell: pwsh
-        run: |
-          $version = node -p "require('./package.json').version"
-          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag must equal v$version" }
       - name: Test
         run: npm test
       - name: Type check main
         run: npx tsc --noEmit -p tsconfig.node.json
       - name: Type check renderer
         run: npx tsc --noEmit -p tsconfig.web.json
-      - name: Publish Windows artifacts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Future signing: configure WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD in repository secrets.
-        run: npm run pack -- --publish always
-      - name: Publish complete release
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false --latest
+      - name: Build legacy Electron artifacts
+        run: npm run pack -- --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otto-electron-legacy-${{ github.sha }}
+          path: ../sample-manager-release/*
