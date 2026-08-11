@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, nativeImage, screen, shell } from 'electron'
+import { spawn } from 'child_process'
 import { dirname, join } from 'path'
 import { copyFileSync, existsSync, mkdirSync, statSync } from 'fs'
 import Store from 'electron-store'
@@ -9,6 +10,12 @@ import { UpdateService } from './services/updateService'
 import { scanAudioFolder } from './folderScanner'
 import { getFilesInfo } from './fileInfo'
 import { calculatePrimarySidebarBounds } from './windowPlacement'
+
+type CopySettings = {
+  enableAutoCopy?: boolean
+  keepCopies?: boolean
+  melodyneCompatibilityMode?: boolean
+}
 
 const isolatedUserDataDir = process.env.OTTO_USER_DATA_DIR
 if (isolatedUserDataDir) {
@@ -29,6 +36,7 @@ const store = new Store({
     copySettings: {
       enableAutoCopy: true,
       keepCopies: false,
+      melodyneCompatibilityMode: false,
     },
     settings: {
       windowAlwaysOnTop: true,
@@ -121,6 +129,38 @@ function resolveDragIcon() {
     console.debug('[drag icon] size=', fallbackIcon.getSize())
   }
   return fallbackIcon
+}
+
+function startMelodyneCompatibleDrag(filePath: string): boolean {
+  if (process.platform !== 'win32') return false
+
+  const helperPath = app.isPackaged
+    ? join(process.resourcesPath, 'native/otto-drag-helper.exe')
+    : join(app.getAppPath(), 'native/otto-drag-helper.exe')
+  if (!existsSync(helperPath)) {
+    console.error('[drag-out][native] helper missing, falling back to Electron:', helperPath)
+    return false
+  }
+
+  try {
+    const helper = spawn(helperPath, [filePath], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    helper.once('error', error => {
+      console.error('[drag-out][native] helper failed', error)
+    })
+    if (import.meta.env.DEV) {
+      helper.once('exit', code => {
+        console.debug('[drag-out][native] helper exitCode=', code)
+      })
+    }
+    helper.unref()
+    return true
+  } catch (error) {
+    console.error('[drag-out][native] helper launch failed', error)
+    return false
+  }
 }
 
 // ------------------------------
@@ -233,7 +273,7 @@ if (!hasSingleInstanceLock) {
   })
 
   app.on('before-quit', () => {
-    const copySettings = (store.get('copySettings') as { enableAutoCopy?: boolean; keepCopies?: boolean } | undefined) ?? {}
+    const copySettings = (store.get('copySettings') as CopySettings | undefined) ?? {}
     console.debug('[cleanup] copySettings=', copySettings)
     if (copySettings.keepCopies) {
       console.debug('[cleanup] preserveCopies=true, skip drag-copies cleanup')
@@ -366,7 +406,7 @@ ipcMain.on('drag-out-files', (event, filePaths: string[]) => {
     if (validPaths.length === 0) return
 
     const originalPath = validPaths[0]
-    const copySettings = (store.get('copySettings') as { enableAutoCopy?: boolean; keepCopies?: boolean } | undefined) ?? {}
+    const copySettings = (store.get('copySettings') as CopySettings | undefined) ?? {}
     const enableAutoCopy = copySettings.enableAutoCopy ?? true
     const dragCounts = {
       ...((store.get('dragCounts') as Record<string, number> | undefined) ?? {})
@@ -397,12 +437,18 @@ ipcMain.on('drag-out-files', (event, filePaths: string[]) => {
       console.debug('[drag policy] draggedCount=1')
     }
 
-    const dragIcon = resolveDragIcon()
-    const startDragOptions = {
-      file: targetPath,
-      icon: dragIcon,
+    const melodyneCompatibilityMode = copySettings.melodyneCompatibilityMode ?? false
+    if (melodyneCompatibilityMode && startMelodyneCompatibleDrag(targetPath)) {
+      if (import.meta.env.DEV) {
+        console.debug('[drag-out][main] started x86 native helper', targetPath)
+      }
+      return
     }
 
+    const startDragOptions = {
+      file: targetPath,
+      icon: resolveDragIcon(),
+    }
     if (import.meta.env.DEV) {
       console.debug('[drag-out][main] startDrag', startDragOptions)
     }

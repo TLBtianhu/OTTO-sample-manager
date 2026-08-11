@@ -1,6 +1,6 @@
 {
   "name": "sample-manager",
-  "version": "2.5.0",
+  "version": "2.6.4",
   "description": "鬼畜采样管理工具",
   "author": "ywb2164",
   "license": "MIT",
@@ -14,7 +14,8 @@
     "dev": "electron-vite dev",
     "test": "vitest run",
     "build": "electron-vite build",
-    "pack": "npm run build && electron-builder --win --x64",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
+    "pack": "npm run build:native && npm run build && electron-builder --win --x64",
     "preview": "electron-vite preview"
   },
   "dependencies": {

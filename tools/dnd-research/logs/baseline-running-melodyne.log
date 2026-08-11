@@ -1,0 +1,23 @@
+Collected: 2026-08-11T16:49:13.6175991+08:00
+OS: Microsoft Windows NT 10.0.26100.0
+64-bit OS: True
+Melodyne: D:\melodyne3\Melodyne.exe
+Melodyne file version: 3, 2, 2, 2
+Melodyne product version: 3, 2, 2, 2
+Melodyne size: 6881280
+
+Running process integrity:
+  Melodyne pid=9844 integrity=Medium (0x2000) path=D:\melodyne3\Melodyne.exe
+  sample-manager: not running
+  electron: not running
+
+Relevant static imports:
+  480290	  538  RegisterClipboardFormatA
+  4802ac	  258  GetClipboardFormatNameA
+  480ab6	   30  DragAcceptFiles
+  480a82	   33  DragQueryFileA
+  480a70	   35  DragQueryFileW
+  480bb4	  137  DoDragDrop
+  480bc2	  275  RegisterDragDrop
+  480bd6	  277  RevokeDragDrop
+  47f2fc	  238  OleInitialize

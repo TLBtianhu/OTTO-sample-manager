@@ -1,0 +1,16 @@
+[2026-08-11 16:50:18.108] DragProbe starting pid=43712 commandLine="D:\sample-manager\sample-manager\tools\dnd-research\bin\x86\DragProbe.exe" --file C:\otto-dnd-test\ascii\a.wav --preset A --log "D:\sample-manager\sample-manager\tools\dnd-research\logs\melodyne-preset-A-20260811-165017.log"
+[2026-08-11 16:50:18.181] OleInitialize -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:50:18.184] file="C:\otto-dnd-test\ascii\a.wav" preset=A formats=hdrop hdrop=unicode
+[2026-08-11 16:50:18.188] offer[0] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:50:19.145] DoDragDrop begin file="C:\otto-dnd-test\ascii\a.wav" formats=hdrop hdrop=unicode
+[2026-08-11 16:50:19.161] IDataObject::EnumFormatEtc direction=1
+[2026-08-11 16:50:19.163] IDataObject::EnumFormatEtc -> S_OK count=1
+[2026-08-11 16:50:19.166] IDataObject::QueryGetData request: cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000 -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:50:19.169] IDropSource::QueryContinueDrag escape=0 keyState=0x00000001 -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:50:19.173] IDropSource::GiveFeedback effect=0 -> DRAGDROP_S_USEDEFAULTCURSORS
+[2026-08-11 16:50:19.777] IDropSource::GiveFeedback effect=COPY|MOVE|LINK -> DRAGDROP_S_USEDEFAULTCURSORS
+[2026-08-11 16:50:19.780] IDropSource::GiveFeedback effect=COPY -> DRAGDROP_S_USEDEFAULTCURSORS
+[2026-08-11 16:50:21.519] IDropSource::QueryContinueDrag escape=0 keyState=0x00000000 -> 0x00040100 (拖放成功)
+[2026-08-11 16:50:21.523] IDataObject::GetData request: cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:50:21.525] IDataObject::GetData result: 0x00000000 (操作成功完成。) medium.tymed=0x00000001
+[2026-08-11 16:50:21.527] DoDragDrop end -> 0x00040100 (拖放成功) finalEffect=COPY

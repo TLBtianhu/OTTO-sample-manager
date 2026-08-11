@@ -1,0 +1,37 @@
+[2026-08-11 16:52:49.744] DropInspector starting pid=40640 mode=ole
+[2026-08-11 16:52:49.747] commandLine="D:\sample-manager\sample-manager\tools\dnd-research\bin\x86\DropInspector.exe" --mode ole --inspect-shell-file C:\otto-dnd-test\ascii\a.wav --log "D:\sample-manager\sample-manager\tools\dnd-research\logs\shell-dataobject-x86-20260811-165249.log"
+[2026-08-11 16:52:49.821] OleInitialize -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.117] RegisterDragDrop -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.140] ShellFolder::GetUIObjectOf("C:\otto-dnd-test\ascii\a.wav") -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.141] === IDataObject snapshot: ShellFolder.GetUIObjectOf baseline ===
+[2026-08-11 16:52:50.146]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.149]   [0] cf=49456 (Shell IDList Array) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:52:50.151]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.152]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 16:52:50.154]     Shell IDList Array: children=1 bytes=321
+[2026-08-11 16:52:50.156]       parent="C:\otto-dnd-test\ascii"
+[2026-08-11 16:52:50.158]       [0] offset=239 path="C:\otto-dnd-test\ascii\a.wav" resolved=1
+[2026-08-11 16:52:50.160]   [1] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:52:50.162]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.164]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 16:52:50.165]     CF_HDROP: bytes=80 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 16:52:50.167]     CF_HDROP: fileCount=1
+[2026-08-11 16:52:50.168]       [0] W="C:\otto-dnd-test\ascii\a.wav" ANSI view="C:\otto-dnd-test\ascii\a.wav"
+[2026-08-11 16:52:50.170]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 43 00 3A 00 5C 00 6F 00 74 00 74 00 6F 00 2D 00 64 00 6E 00 64 00 2D 00 74 00 65 00 73 00 74 00 5C 00 61 00 73 00 63 00 69 00 69 00 5C 00 61 00 2E 00 77 00 61 00 76 00 00 00 00 00
+[2026-08-11 16:52:50.171]   [2] cf=49158 (FileName) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:52:50.172]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.173]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 16:52:50.174]     value(A)="C:\OTTO-D~1\ascii\a.wav"
+[2026-08-11 16:52:50.175]   [3] cf=49374 (FileContents) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:52:50.177]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.179]     GetData -> 0x80040068 (无效的 lindex); medium.tymed=0
+[2026-08-11 16:52:50.179]   [4] cf=49159 (FileNameW) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:52:50.181]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.182]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 16:52:50.183]     value(W)="C:\otto-dnd-test\ascii\a.wav"
+[2026-08-11 16:52:50.184]   [5] cf=49460 (FileGroupDescriptorW) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 16:52:50.185]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 16:52:50.202]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 16:52:50.204]     FileGroupDescriptorW: items=1 bytes=596 required=596
+[2026-08-11 16:52:50.206]       [0] name="a.wav" flags=0x8000006C size=88244
+[2026-08-11 16:52:50.209]   formatCount=6

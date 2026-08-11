@@ -1,0 +1,64 @@
+[2026-08-11 23:04:53.946] DropInspector starting pid=43456 mode=both
+[2026-08-11 23:04:53.950] commandLine="D:\sample-manager\sample-manager\tools\dnd-research\bin\x64\DropInspector.exe" --mode both --log D:\sample-manager\sample-manager\tools\dnd-research\logs\default-electron-path-20260811-230453.log
+[2026-08-11 23:04:54.019] OleInitialize -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:04:54.296] RegisterDragDrop -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:04:54.302] DragAcceptFiles(TRUE)
+[2026-08-11 23:05:50.823] DragEnter keyState=0x00000001 point=(1896,504) incomingEffect=COPY|LINK
+[2026-08-11 23:05:50.827] === IDataObject snapshot: DragEnter ===
+[2026-08-11 23:05:50.829]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.832]   [0] cf=49513 (DragContext) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:50.838]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.844]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=ISTREAM
+[2026-08-11 23:05:50.846]     IStream::Stat=0x00000000 (操作成功完成。) size=16
+[2026-08-11 23:05:50.849]   [1] cf=50134 (DragImageBits) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:50.855]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.857]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 23:05:50.860]     HGLOBAL bytes=24552 raw=92 00 00 00 2A 00 00 00 49 00 00 00 15 00 00 00 54 31 05 AE FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ...
+[2026-08-11 23:05:50.863]   [2] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:50.865]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.868]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 23:05:50.870]     CF_HDROP: bytes=80 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 23:05:50.873]     CF_HDROP: fileCount=1
+[2026-08-11 23:05:50.875]       [0] W="C:\otto-dnd-test\ascii\a.wav" ANSI view="C:\otto-dnd-test\ascii\a.wav"
+[2026-08-11 23:05:50.877]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 43 00 3A 00 5C 00 6F 00 74 00 74 00 6F 00 2D 00 64 00 6E 00 64 00 2D 00 74 00 65 00 73 00 74 00 5C 00 61 00 73 00 63 00 69 00 69 00 5C 00 61 00 2E 00 77 00 61 00 76 00 00 00 00 00
+[2026-08-11 23:05:50.879]   formatCount=3
+[2026-08-11 23:05:50.881] DragEnter returnedEffect=COPY
+[2026-08-11 23:05:50.883] DragOver keyState=0x00000001 point=(1896,504) incomingEffect=COPY|LINK
+[2026-08-11 23:05:50.886] === IDataObject snapshot: first DragOver ===
+[2026-08-11 23:05:50.888]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.891]   [0] cf=49513 (DragContext) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:50.894]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.896]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=ISTREAM
+[2026-08-11 23:05:50.897]     IStream::Stat=0x00000000 (操作成功完成。) size=16
+[2026-08-11 23:05:50.900]   [1] cf=50134 (DragImageBits) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:50.902]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.904]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 23:05:50.906]     HGLOBAL bytes=24552 raw=92 00 00 00 2A 00 00 00 49 00 00 00 15 00 00 00 54 31 05 AE FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ...
+[2026-08-11 23:05:50.907]   [2] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:50.910]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:50.912]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 23:05:50.914]     CF_HDROP: bytes=80 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 23:05:50.916]     CF_HDROP: fileCount=1
+[2026-08-11 23:05:50.918]       [0] W="C:\otto-dnd-test\ascii\a.wav" ANSI view="C:\otto-dnd-test\ascii\a.wav"
+[2026-08-11 23:05:50.920]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 43 00 3A 00 5C 00 6F 00 74 00 74 00 6F 00 2D 00 64 00 6E 00 64 00 2D 00 74 00 65 00 73 00 74 00 5C 00 61 00 73 00 63 00 69 00 69 00 5C 00 61 00 2E 00 77 00 61 00 76 00 00 00 00 00
+[2026-08-11 23:05:50.922]   formatCount=3
+[2026-08-11 23:05:51.887] Drop keyState=0x00000000 point=(1500,450) incomingEffect=COPY|LINK
+[2026-08-11 23:05:51.890] === IDataObject snapshot: Drop ===
+[2026-08-11 23:05:51.892]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:51.894]   [0] cf=49513 (DragContext) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:51.896]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:51.899]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=ISTREAM
+[2026-08-11 23:05:51.901]     IStream::Stat=0x00000000 (操作成功完成。) size=16
+[2026-08-11 23:05:51.904]   [1] cf=50134 (DragImageBits) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:51.906]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:51.908]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 23:05:51.910]     HGLOBAL bytes=24552 raw=92 00 00 00 2A 00 00 00 49 00 00 00 15 00 00 00 54 31 05 AE FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ...
+[2026-08-11 23:05:51.913]   [2] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=0000000000000000
+[2026-08-11 23:05:51.915]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 23:05:51.917]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 23:05:51.918]     CF_HDROP: bytes=80 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 23:05:51.920]     CF_HDROP: fileCount=1
+[2026-08-11 23:05:51.923]       [0] W="C:\otto-dnd-test\ascii\a.wav" ANSI view="C:\otto-dnd-test\ascii\a.wav"
+[2026-08-11 23:05:51.925]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 43 00 3A 00 5C 00 6F 00 74 00 74 00 6F 00 2D 00 64 00 6E 00 64 00 2D 00 74 00 65 00 73 00 74 00 5C 00 61 00 73 00 63 00 69 00 69 00 5C 00 61 00 2E 00 77 00 61 00 76 00 00 00 00 00
+[2026-08-11 23:05:51.927]   formatCount=3
+[2026-08-11 23:05:51.930] Drop returnedEffect=COPY

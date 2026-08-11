@@ -1,0 +1,63 @@
+[2026-08-11 17:07:18.339] DropInspector starting pid=44876 mode=ole
+[2026-08-11 17:07:18.343] commandLine="D:\sample-manager\sample-manager\tools\dnd-research\bin\x86\DropInspector.exe" --mode ole --log "D:\sample-manager\sample-manager\tools\dnd-research\logs\otto-to-dropinspector-20260811-170718.log"
+[2026-08-11 17:07:18.421] OleInitialize -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:18.478] RegisterDragDrop -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.222] DragEnter keyState=0x00000001 point=(732,432) incomingEffect=COPY|LINK
+[2026-08-11 17:07:21.225] === IDataObject snapshot: DragEnter ===
+[2026-08-11 17:07:21.228]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.230]   [0] cf=49471 (DragContext) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:21.234]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.237]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=ISTREAM
+[2026-08-11 17:07:21.241]     IStream::Stat=0x00000000 (操作成功完成。) size=16
+[2026-08-11 17:07:21.243]   [1] cf=50017 (DragImageBits) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:21.246]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.248]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 17:07:21.251]     HGLOBAL bytes=56472 raw=E0 00 00 00 3F 00 00 00 4A 00 00 00 15 00 00 00 9A 39 05 04 FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ...
+[2026-08-11 17:07:21.253]   [2] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:21.255]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.257]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 17:07:21.259]     CF_HDROP: bytes=216 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 17:07:21.262]     CF_HDROP: fileCount=1
+[2026-08-11 17:07:21.265]       [0] W="D:\sample-manager\sample-manager-release\win-unpacked\Copy\drag-copies\sample_Dottoott_copy1.wav" ANSI view="D:\sample-manager\sample-manager-release\win-unpacked\Copy\drag-copies\sample_Dottoott_copy1.wav"
+[2026-08-11 17:07:21.267]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 44 00 3A 00 5C 00 73 00 61 00 6D 00 70 00 6C 00 65 00 2D 00 6D 00 61 00 6E 00 61 00 67 00 65 00 72 00 5C 00 73 00 61 00 6D 00 70 00 6C 00 65 00 2D 00 6D 00 61 00 6E 00 61 00 67 00 65 00 72 00 2D 00 72 00 65 00 6C 00 65 00 61 00 ...
+[2026-08-11 17:07:21.269]   formatCount=3
+[2026-08-11 17:07:21.270] DragEnter returnedEffect=COPY
+[2026-08-11 17:07:21.273] DragOver keyState=0x00000001 point=(732,432) incomingEffect=COPY|LINK
+[2026-08-11 17:07:21.276] === IDataObject snapshot: first DragOver ===
+[2026-08-11 17:07:21.278]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.280]   [0] cf=49471 (DragContext) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:21.283]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.285]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=ISTREAM
+[2026-08-11 17:07:21.286]     IStream::Stat=0x00000000 (操作成功完成。) size=16
+[2026-08-11 17:07:21.288]   [1] cf=50017 (DragImageBits) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:21.291]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.294]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 17:07:21.296]     HGLOBAL bytes=56472 raw=E0 00 00 00 3F 00 00 00 4A 00 00 00 15 00 00 00 9A 39 05 04 FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ...
+[2026-08-11 17:07:21.298]   [2] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:21.300]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:21.302]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 17:07:21.304]     CF_HDROP: bytes=216 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 17:07:21.306]     CF_HDROP: fileCount=1
+[2026-08-11 17:07:21.308]       [0] W="D:\sample-manager\sample-manager-release\win-unpacked\Copy\drag-copies\sample_Dottoott_copy1.wav" ANSI view="D:\sample-manager\sample-manager-release\win-unpacked\Copy\drag-copies\sample_Dottoott_copy1.wav"
+[2026-08-11 17:07:21.310]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 44 00 3A 00 5C 00 73 00 61 00 6D 00 70 00 6C 00 65 00 2D 00 6D 00 61 00 6E 00 61 00 67 00 65 00 72 00 5C 00 73 00 61 00 6D 00 70 00 6C 00 65 00 2D 00 6D 00 61 00 6E 00 61 00 67 00 65 00 72 00 2D 00 72 00 65 00 6C 00 65 00 61 00 ...
+[2026-08-11 17:07:21.312]   formatCount=3
+[2026-08-11 17:07:22.091] Drop keyState=0x00000000 point=(400,300) incomingEffect=COPY|LINK
+[2026-08-11 17:07:22.093] === IDataObject snapshot: Drop ===
+[2026-08-11 17:07:22.095]   EnumFormatEtc(DATADIR_GET) -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:22.097]   [0] cf=49471 (DragContext) tymed=0x00000004 (ISTREAM) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:22.099]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:22.101]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=ISTREAM
+[2026-08-11 17:07:22.104]     IStream::Stat=0x00000000 (操作成功完成。) size=16
+[2026-08-11 17:07:22.107]   [1] cf=50017 (DragImageBits) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:22.109]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:22.112]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 17:07:22.114]     HGLOBAL bytes=56472 raw=E0 00 00 00 3F 00 00 00 4A 00 00 00 15 00 00 00 9A 39 05 04 FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ...
+[2026-08-11 17:07:22.116]   [2] cf=15 (CF_HDROP) tymed=0x00000001 (HGLOBAL) aspect=0x00000001 (CONTENT) lindex=-1 ptd=00000000
+[2026-08-11 17:07:22.119]     QueryGetData -> 0x00000000 (操作成功完成。)
+[2026-08-11 17:07:22.123]     GetData -> 0x00000000 (操作成功完成。); medium.tymed=HGLOBAL
+[2026-08-11 17:07:22.125]     CF_HDROP: bytes=216 pFiles=20 pt=(0,0) fNC=0 fWide=1
+[2026-08-11 17:07:22.127]     CF_HDROP: fileCount=1
+[2026-08-11 17:07:22.129]       [0] W="D:\sample-manager\sample-manager-release\win-unpacked\Copy\drag-copies\sample_Dottoott_copy1.wav" ANSI view="D:\sample-manager\sample-manager-release\win-unpacked\Copy\drag-copies\sample_Dottoott_copy1.wav"
+[2026-08-11 17:07:22.130]     CF_HDROP raw: 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 44 00 3A 00 5C 00 73 00 61 00 6D 00 70 00 6C 00 65 00 2D 00 6D 00 61 00 6E 00 61 00 67 00 65 00 72 00 5C 00 73 00 61 00 6D 00 70 00 6C 00 65 00 2D 00 6D 00 61 00 6E 00 61 00 67 00 65 00 72 00 2D 00 72 00 65 00 6C 00 65 00 61 00 ...
+[2026-08-11 17:07:22.132]   formatCount=3
+[2026-08-11 17:07:22.134] Drop returnedEffect=COPY

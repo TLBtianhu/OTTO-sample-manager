@@ -1,0 +1,42 @@
+Collected: 2026-08-11T23:03:15+08:00
+Source revision: origin/main 8e541f0
+OS: Microsoft Windows NT 10.0.26100.0, 64-bit
+Melodyne: 3.2.2.2, x86, Medium integrity
+OTTO: packaged x64 build, isolated userData profile
+Helper: resources\native\otto-drag-helper.exe, PE machine 0x014C (x86)
+
+Final helper contract:
+  CF_HDROP
+  TYMED_HGLOBAL
+  DVASPECT_CONTENT
+  lindex=-1
+  DROPFILES.pFiles=20
+  DROPFILES.fWide=TRUE
+  DROPEFFECT_COPY
+
+Acceptance results:
+  ASCII helper integration: exit=0, Melodyne responding=true, Bug Reporter=false
+    screenshot=verified-helper-exit-ascii-20260811-225701.png
+  Repeat original: exit=0, source .mdd=true, Bug Reporter=false
+    screenshot=verified-repeat-original-20260811-230243.png
+  Repeat managed copy: exit=0, copied WAV=true, copied .mdd=true, Bug Reporter=false
+    screenshot=verified-repeat-copy-20260811-230254.png
+  Chinese path: C:\otto-dnd-test\中文路径\中文采样.wav
+    code points include U+4E2D U+6587 U+8DEF U+5F84 / U+4E2D U+6587 U+91C7 U+6837
+    exit=0, source .mdd=true, Melodyne responding=true, Bug Reporter=false
+    screenshot=verified-chinese-20260811-230304.png
+  Long path: 199 characters, nested five segment directories
+    exit=0, source .mdd=true, Melodyne responding=true, Bug Reporter=false
+    screenshot=verified-long-path-20260811-230315.png
+  Compatibility off:
+    helper process count=0
+    DropInspector formats=DragContext, DragImageBits, CF_HDROP
+    Drop returnedEffect=COPY
+    log=default-electron-path-20260811-230453.log
+
+Automated verification:
+  npm test: 13 files, 66 tests passed
+  tsc --noEmit -p tsconfig.node.json: passed
+  tsc --noEmit -p tsconfig.web.json: passed
+  npm run build: passed
+  npm run pack: passed

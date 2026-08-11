@@ -37,8 +37,42 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Future signing: configure WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD in repository secrets.
         run: npm run pack -- --publish always
+      - name: Publish signed updater metadata
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $releaseDir = Resolve-Path ../sample-manager-release
+          $installer = Join-Path $releaseDir "sample-manager-$version-setup.exe"
+          if (-not (Test-Path -LiteralPath $installer)) { throw "Missing installer: $installer" }
+
+          npm exec --yes --package @tauri-apps/cli@2.11.4 -- tauri signer sign "$installer"
+          $signaturePath = "$installer.sig"
+          if (-not (Test-Path -LiteralPath $signaturePath)) { throw "Missing signature: $signaturePath" }
+
+          $assetName = Split-Path -Leaf $installer
+          $assetUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$assetName"
+          $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          $platform = @{ signature = $signature; url = $assetUrl }
+          $metadata = @{
+            version = $version
+            notes = "OTTO Sample Manager $version"
+            pub_date = [DateTime]::UtcNow.ToString('o')
+            platforms = @{
+              'windows-x86_64-nsis' = $platform
+              'windows-x86_64' = $platform
+            }
+          } | ConvertTo-Json -Depth 5
+          $jsonPath = Join-Path $releaseDir 'latest.json'
+          [IO.File]::WriteAllText($jsonPath, $metadata, [Text.UTF8Encoding]::new($false))
+
+          gh release upload "${{ github.ref_name }}" "$signaturePath" "$jsonPath" --clobber
       - name: Publish complete release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false --latest
+        run: gh release edit "${{ github.ref_name }}" --title "OTTO Sample Manager ${{ github.ref_name }}" --draft=false --latest

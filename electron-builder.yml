@@ -31,6 +31,8 @@ files:
 extraResources:
   - from: resources/drag-icon.png
     to: resources/drag-icon.png
+  - from: native/otto-drag-helper.exe
+    to: native/otto-drag-helper.exe
 win:
   executableName: sample-manager
   icon: icon.ico

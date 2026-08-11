@@ -44,6 +44,7 @@ export const TitleBar: React.FC<Props> = ({
   const [appVersion, setAppVersion] = useState('')
   const [enableAutoCopy, setEnableAutoCopy] = useState(true)
   const [keepCopies, setKeepCopies] = useState(false)
+  const [melodyneCompatibilityMode, setMelodyneCompatibilityMode] = useState(false)
   const [showImportMenu, setShowImportMenu] = useState(false)
   const [showSettingsMenu, setShowSettingsMenu] = useState(false)
   const {
@@ -65,10 +66,12 @@ export const TitleBar: React.FC<Props> = ({
       const storedCopySettings = await window.electronAPI.storeGet('copySettings') as {
         enableAutoCopy?: boolean
         keepCopies?: boolean
+        melodyneCompatibilityMode?: boolean
       } | null
       if (!storedCopySettings) return
       setEnableAutoCopy(storedCopySettings.enableAutoCopy ?? true)
       setKeepCopies(storedCopySettings.keepCopies ?? false)
+      setMelodyneCompatibilityMode(storedCopySettings.melodyneCompatibilityMode ?? false)
     }
 
     restoreCopySettings()
@@ -85,25 +88,35 @@ export const TitleBar: React.FC<Props> = ({
     window.electronAPI.setOpacity(value)
   }
 
-  const updateCopySettings = async (next: { enableAutoCopy?: boolean; keepCopies?: boolean }) => {
+  const updateCopySettings = async (next: {
+    enableAutoCopy?: boolean
+    keepCopies?: boolean
+    melodyneCompatibilityMode?: boolean
+  }) => {
     const previousSettings = {
       enableAutoCopy,
       keepCopies,
+      melodyneCompatibilityMode,
     }
     const nextSettings = {
       enableAutoCopy,
       keepCopies,
+      melodyneCompatibilityMode,
       ...next
     }
 
     try {
       if (next.enableAutoCopy !== undefined) setEnableAutoCopy(next.enableAutoCopy)
       if (next.keepCopies !== undefined) setKeepCopies(next.keepCopies)
+      if (next.melodyneCompatibilityMode !== undefined) {
+        setMelodyneCompatibilityMode(next.melodyneCompatibilityMode)
+      }
 
       await window.electronAPI.storeSet('copySettings', nextSettings)
     } catch {
       setEnableAutoCopy(previousSettings.enableAutoCopy)
       setKeepCopies(previousSettings.keepCopies)
+      setMelodyneCompatibilityMode(previousSettings.melodyneCompatibilityMode)
       window.alert('副本设置保存失败，请重试。')
     }
   }
@@ -236,6 +249,12 @@ export const TitleBar: React.FC<Props> = ({
                   label="保留自动副本"
                   note="关闭时清理拖拽生成的外部编辑副本。"
                   onChange={(value) => updateCopySettings({ keepCopies: value })}
+                />
+                <SettingCheckbox
+                  checked={melodyneCompatibilityMode}
+                  label="Melodyne 3 兼容模式"
+                  note="使用 32 位原生拖放，其他目标建议保持关闭。"
+                  onChange={(value) => updateCopySettings({ melodyneCompatibilityMode: value })}
                 />
                 <SettingCheckbox
                   checked={folderSettings.memoryOptimizationMode}

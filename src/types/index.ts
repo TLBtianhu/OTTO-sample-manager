@@ -152,6 +152,7 @@ export interface AppSettings {
 export interface CopySettings {
   enableAutoCopy: boolean
   keepCopies: boolean
+  melodyneCompatibilityMode: boolean
 }
 
 // IPC通信的类型
