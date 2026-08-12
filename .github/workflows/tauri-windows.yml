@@ -112,6 +112,11 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
             throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret is missing'
           }
+          try {
+            [void][Convert]::FromBase64String($env:TAURI_SIGNING_PRIVATE_KEY)
+          } catch {
+            throw 'TAURI_SIGNING_PRIVATE_KEY repository secret is not the raw Base64 key file content'
+          }
           npm run tauri:build:release -- --ci
 
       - name: Generate Electron and Tauri update manifests
