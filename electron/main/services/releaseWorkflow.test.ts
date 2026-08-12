@@ -11,7 +11,7 @@ describe('Windows release workflows', () => {
     expect(legacy).toMatch(/^\s*workflow_dispatch:\s*$/m)
     expect(tauri).toMatch(/^\s*workflow_dispatch:\s*$/m)
     expect(tauri).toContain('release_tag:')
-    expect(tauri).toContain("tags:\n      - 'v*'")
+    expect(tauri).toMatch(/tags:\r?\n\s+- 'v\*'/)
     expect(tauri).toContain("github.ref == 'refs/heads/tauri'")
     expect(tauri).toContain("startsWith(github.event.head_commit.message, 'release:')")
     expect(tauri).toContain('npm run tauri:build:release -- --ci')
