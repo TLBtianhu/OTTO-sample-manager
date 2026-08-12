@@ -103,27 +103,16 @@ jobs:
       - name: Build signed Tauri release
         shell: pwsh
         env:
-          TAURI_SIGNING_PRIVATE_KEY_BASE64: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          $buildExitCode = 0
-          try {
-            $decodedKey = [Text.Encoding]::UTF8.GetString(
-              [Convert]::FromBase64String($env:TAURI_SIGNING_PRIVATE_KEY_BASE64)
-            )
-            if (-not $decodedKey.StartsWith('untrusted comment:')) {
-              throw 'Decoded updater private key is not a minisign secret key'
-            }
-            $env:TAURI_SIGNING_PRIVATE_KEY = $decodedKey
-            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_BASE64
-            npm run tauri:build:release -- --ci
-            $buildExitCode = $LASTEXITCODE
-          } finally {
-            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
-            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_BASE64 -ErrorAction SilentlyContinue
-            $decodedKey = $null
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY repository secret is missing'
           }
-          if ($buildExitCode -ne 0) { exit $buildExitCode }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret is missing'
+          }
+          npm run tauri:build:release -- --ci
 
       - name: Generate Electron and Tauri update manifests
         run: npm run tauri:manifests:release
