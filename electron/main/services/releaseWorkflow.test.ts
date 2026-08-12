@@ -17,6 +17,7 @@ describe('Windows release workflows', () => {
     expect(tauri).toContain('TAURI_SIGNING_PRIVATE_KEY:')
     expect(tauri).toContain('TAURI_SIGNING_PRIVATE_KEY repository secret is missing')
     expect(tauri).toContain('TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret is missing')
+    expect(tauri).toContain('TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret contains a trailing newline')
     expect(tauri).toContain('[Convert]::FromBase64String($env:TAURI_SIGNING_PRIVATE_KEY)')
     expect(tauri).toContain('npm run tauri:build:release -- --ci')
     expect(tauri).toContain('npm run tauri:manifests:release')

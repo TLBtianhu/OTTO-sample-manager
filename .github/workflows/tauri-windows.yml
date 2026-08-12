@@ -112,6 +112,9 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
             throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret is missing'
           }
+          if ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -match '[\r\n]') {
+            throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret contains a trailing newline'
+          }
           try {
             [void][Convert]::FromBase64String($env:TAURI_SIGNING_PRIVATE_KEY)
           } catch {
