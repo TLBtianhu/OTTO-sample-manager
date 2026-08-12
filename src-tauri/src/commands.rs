@@ -742,7 +742,7 @@ fn folder_records_for_paths(
                 root_id: root_id.clone(),
                 depth,
                 order: 0,
-                is_expanded: depth == 0,
+                is_expanded: false,
                 imported_at,
             }
         })
@@ -855,4 +855,21 @@ pub(crate) fn set_native_window_opacity(
     _opacity: f64,
 ) -> Result<(), String> {
     Err("窗口透明度目前仅支持 Windows".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::folder_records_for_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn imported_folder_tree_starts_collapsed() {
+        let root = PathBuf::from(r"D:\samples");
+        let paths = vec![root.join("root.wav"), root.join("child").join("nested.wav")];
+
+        let folders = folder_records_for_paths(&root, &paths, 1710000000000);
+
+        assert_eq!(folders.len(), 2);
+        assert!(folders.iter().all(|folder| !folder.is_expanded));
+    }
 }

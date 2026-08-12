@@ -1,6 +1,12 @@
 name: Tauri Windows
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to publish, for example v2.6.4
+        required: true
+        type: string
   pull_request:
   push:
     branches:
@@ -63,11 +69,16 @@ jobs:
           path: src-tauri/target/release/bundle/nsis/*.exe
 
   signed-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.ref == 'refs/heads/tauri' && startsWith(github.event.head_commit.message, 'release:'))
     needs: verify-windows
     runs-on: windows-2025
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || 'v2.6.4' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,17 +91,20 @@ jobs:
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Validate release tag and version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") {
+            throw "Release tag $env:RELEASE_TAG does not match package version $version"
+          }
+          git ls-remote --exit-code --tags origin "refs/tags/$env:RELEASE_TAG"
+
+      - name: Build signed Tauri release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: OTTO Sample Manager ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: false
-          args: --config src-tauri/tauri.release.conf.json --ci
+        run: npm run tauri:build:release -- --ci
 
       - name: Generate Electron and Tauri update manifests
         run: npm run tauri:manifests:release
@@ -103,15 +117,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.ref_name }}" `
-            release/2.6.3/_2.6.3_x64-setup.exe `
-            release/2.6.3/_2.6.3_x64-setup.exe.sig `
-            release/2.6.3/latest.json `
-            release/2.6.3/latest.yml `
+          if (-not (gh release view $env:RELEASE_TAG 2>$null)) {
+            gh release create $env:RELEASE_TAG `
+              --title "OTTO Sample Manager $env:RELEASE_TAG" `
+              --notes "修复文件夹导入后分类根目录消失、层级错位及默认展开全部音频的问题。" `
+              --draft
+          }
+          gh release upload $env:RELEASE_TAG `
+            release/2.6.4/_2.6.4_x64-setup.exe `
+            release/2.6.4/_2.6.4_x64-setup.exe.sig `
+            release/2.6.4/latest.json `
+            release/2.6.4/latest.yml `
             --clobber
 
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false --latest
+        run: gh release edit $env:RELEASE_TAG --draft=false --latest

@@ -235,6 +235,170 @@ fn new_sample(
 }
 
 #[test]
+fn committing_a_later_import_keeps_previous_root_folders_visible() {
+    let database = LibraryDatabase::open_in_memory().expect("open library database");
+    database.migrate().expect("migrate library database");
+
+    database
+        .create_import_session("session-1", "D:\\first", None)
+        .expect("create first import session");
+    database
+        .insert_import_folders("session-1", &[folder("folder-first", "D:/first")])
+        .expect("insert first root folder");
+    database
+        .insert_import_batch(
+            "session-1",
+            &[new_sample(
+                "sample-first",
+                "D:\\first\\one.wav",
+                "one",
+                Some("folder-first"),
+            )],
+        )
+        .expect("insert first sample");
+    database
+        .commit_import_session("session-1")
+        .expect("commit first import");
+
+    database
+        .create_import_session("session-2", "D:\\second", None)
+        .expect("create second import session");
+    database
+        .insert_import_folders("session-2", &[folder("folder-second", "D:/second")])
+        .expect("insert second root folder");
+    database
+        .insert_import_batch(
+            "session-2",
+            &[new_sample(
+                "sample-second",
+                "D:\\second\\two.wav",
+                "two",
+                Some("folder-second"),
+            )],
+        )
+        .expect("insert second sample");
+    database
+        .commit_import_session("session-2")
+        .expect("commit second import");
+
+    let bootstrap = database.bootstrap().expect("bootstrap after second import");
+    assert_eq!(
+        bootstrap
+            .folders
+            .iter()
+            .map(|folder| folder.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["folder-first", "folder-second"]
+    );
+    assert_eq!(
+        bootstrap.folder_order,
+        vec!["folder-first", "folder-second"]
+    );
+
+    let undo = database
+        .undo_last_import()
+        .expect("undo latest import")
+        .expect("latest import is undoable");
+    assert_eq!(undo.removed_samples, 1);
+    assert_eq!(undo.removed_folders, 1);
+    assert_eq!(
+        database
+            .query_page(&LibraryQuery::default())
+            .expect("query after undo")
+            .items
+            .iter()
+            .map(|sample| sample.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample-first"]
+    );
+    assert_eq!(
+        database
+            .bootstrap()
+            .expect("bootstrap after undo")
+            .folder_order,
+        vec!["folder-first"]
+    );
+    assert!(
+        database
+            .undo_last_import()
+            .expect("check older import is finalized")
+            .is_none()
+    );
+}
+
+#[test]
+fn extending_an_existing_import_root_keeps_the_root_and_new_child_connected() {
+    let database = LibraryDatabase::open_in_memory().expect("open library database");
+    database.migrate().expect("migrate library database");
+
+    let root = folder("folder-root", "D:/samples");
+    database
+        .create_import_session("session-1", "D:\\samples", None)
+        .expect("create first import session");
+    database
+        .insert_import_folders("session-1", std::slice::from_ref(&root))
+        .expect("insert original root");
+    database
+        .insert_import_batch(
+            "session-1",
+            &[new_sample(
+                "sample-root",
+                "D:\\samples\\root.wav",
+                "root",
+                Some("folder-root"),
+            )],
+        )
+        .expect("insert root sample");
+    database
+        .commit_import_session("session-1")
+        .expect("commit first import");
+
+    let child = LibraryFolderRecord {
+        id: "folder-child".to_owned(),
+        parent_id: Some("folder-root".to_owned()),
+        name: "child".to_owned(),
+        path: "D:/samples/child".to_owned(),
+        root_id: "folder-root".to_owned(),
+        depth: 1,
+        order: 0,
+        is_expanded: false,
+        imported_at: 1710000000001,
+    };
+    database
+        .create_import_session("session-2", "D:\\samples", None)
+        .expect("create repeated import session");
+    database
+        .insert_import_folders("session-2", &[root, child])
+        .expect("extend existing folder hierarchy");
+    database
+        .insert_import_batch(
+            "session-2",
+            &[new_sample(
+                "sample-child",
+                "D:\\samples\\child\\nested.wav",
+                "nested",
+                Some("folder-child"),
+            )],
+        )
+        .expect("insert nested sample");
+    database
+        .commit_import_session("session-2")
+        .expect("commit repeated import");
+
+    let bootstrap = database.bootstrap().expect("bootstrap extended hierarchy");
+    assert_eq!(bootstrap.folder_order, vec!["folder-root"]);
+    assert_eq!(bootstrap.folders.len(), 2);
+    assert_eq!(
+        bootstrap
+            .folders
+            .iter()
+            .find(|folder| folder.id == "folder-child")
+            .and_then(|folder| folder.parent_id.as_deref()),
+        Some("folder-root")
+    );
+}
+
+#[test]
 fn legacy_json_migration_is_backed_up_complete_and_idempotent() {
     let temp_dir = tempfile::tempdir().expect("create temporary migration directory");
     let database_path = temp_dir.path().join("library.sqlite3");

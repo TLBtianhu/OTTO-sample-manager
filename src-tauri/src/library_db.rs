@@ -1167,7 +1167,9 @@ impl LibraryDatabase {
                     f.sort_order, f.is_expanded, f.imported_at
              FROM folders f
              LEFT JOIN import_sessions i ON i.id = f.import_session_id
-             WHERE f.import_session_id IS NULL OR i.state = 'committed'
+             -- Older committed sessions become 'undone' when their one-level undo expires,
+             -- but their surviving library records remain valid and visible.
+             WHERE f.import_session_id IS NULL OR i.state IN ('committed', 'undone')
              ORDER BY f.sort_order, f.imported_at, f.id",
         )?;
         let folders = folder_statement

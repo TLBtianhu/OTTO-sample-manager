@@ -13,7 +13,7 @@ describe('electron-builder runtime dependency files', () => {
     const uploadStep = workflow.indexOf('gh release upload')
     const publishStep = workflow.indexOf('gh release edit')
 
-    expect(workflow).toContain('releaseDraft: true')
+    expect(workflow).toMatch(/gh release create[\s\S]*?--draft/)
     expect(uploadStep).toBeGreaterThan(-1)
     expect(publishStep).toBeGreaterThan(uploadStep)
   })
