@@ -13,6 +13,20 @@ b站 @_Candace_(https://space.bilibili.com/364700163)
 
 ---
 
+## 软件截图
+
+| 主界面 | 活字印刷 |
+| :---: | :---: |
+| <img src="docs/screenshots/main-interface.png" alt="OTTO Sample Manager 主界面" width="431"> | <img src="docs/screenshots/movable-type-printing.png" alt="活字印刷生成功能" width="431"> |
+| 素材分组、目录树、搜索与底部播放器 | 从歌词文本生成有序单字素材 |
+
+| 设置 | 导入 |
+| :---: | :---: |
+| <img src="docs/screenshots/settings.png" alt="OTTO Sample Manager 设置菜单" width="431"> | <img src="docs/screenshots/import-menu.png" alt="OTTO Sample Manager 导入菜单" width="431"> |
+| 搜索、文件夹、副本、内存与更新设置 | 导入文件、文件夹或移除全部导入 |
+
+---
+
 ## 项目特色
 
 制冰时对素材处理的常见问题：
