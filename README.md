@@ -9,10 +9,6 @@ b站 @_Candace_(https://space.bilibili.com/364700163)
 
 ---
 
-（目前并不能确认 Melodyne 3 是否兼容）
-
----
-
 ## 软件截图
 
 | 主界面 | 活字印刷 |
@@ -77,7 +73,7 @@ OTTO Sample Manager：
 ---
 
 ### 3. 拖拽到调音软件
-- 支持拖入 Melodyne、FL Studio 等软件
+- 支持拖入 Melodyne 3、FL Studio 等软件
 - 优化“试听 → 拖出”的连续操作体验
 
 ---
@@ -165,13 +161,17 @@ OTTO Sample Manager：
 
 ## 技术栈
 
-- Electron
+- Tauri 2 + Rust
 - React
 - TypeScript
 - Zustand
-- Web Audio API
-- electron-store
+- SQLite（WAL、增量写入、后台导入）
+- Web Audio API + `HTMLMediaElement` Range 流式播放
 - pinyin-pro（用于歌词转拼音）
+
+当前发布版以 Tauri 为主，Tauri 源码与发布流程位于 `tauri` 分支。Electron 仅保留为历史兼容实现，
+不再作为主要技术栈和发布入口。前端通过统一的 `DesktopBridge` 与 Rust 后端通信，不直接暴露
+原始文件系统或 SQL。
 
 ---
 
@@ -181,12 +181,19 @@ OTTO Sample Manager：
 
 - Node.js 18+
 - npm
+- Rust 1.85+
+- Windows 10/11 x64
+- Visual Studio 2022/2026 C++ Desktop Build Tools 与 Windows SDK
+- Microsoft Edge WebView2 Runtime（Windows 10/11 通常已安装）
 
 ---
 
 ### 安装依赖
 
+以下开发与构建命令以 `tauri` 分支为准：
+
 ```bash
+git switch tauri
 npm install
 ```
 
@@ -197,24 +204,30 @@ npm install
 ### 开发模式
 
 ```bash
-npm run dev
+npm run tauri:dev
 ```
 
 ---
 
 ### 构建
 
-```bash
-npm run build
-```
-
----
-
-### 打包
+类型、前端测试与 Rust 测试：
 
 ```bash
-npm run pack
+npm run check:types
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+生成 Tauri NSIS 安装包：
+
+```bash
+npm run tauri:build
+```
+
+若要把未安装的 Tauri exe 作为便携版运行，可在 exe 同目录创建
+`otto-portable.flag`。该模式会把 SQLite、缓存与 `Copy` 放在同目录的 `data` 下；没有标记的
+NSIS 安装版使用 `%APPDATA%/sample-manager`，并自动迁移旧版数据。
 
 ---
 
@@ -288,8 +301,8 @@ Windows NSIS 安装版支持两种更新检查方式：
 
 ### 更新来源与安全说明
 
-构建通过 `electron-builder` 的 GitHub provider 发布 NSIS setup、portable、`latest.yml` 与 blockmap。更新器会校验 GitHub 发布元数据中的 SHA-512。
+当前版本通过 Tauri updater 发布 Windows NSIS 安装包、对应的 `.sig` 签名和 `latest.json`。
+安装版下载更新后，会使用应用内置的 updater 公钥验证安装包签名；签名不匹配时不会安装。
 
-2.5.0 是应用内更新的基线，仍需要手动安装一次；从 2.5.1 开始，安装版才能在应用内完成更新。
-
-当前尚未配置 Windows Authenticode 签名：哈希校验能发现内容与 metadata 不一致，但不等同于验证发布者身份。取得 PFX 或 Azure Trusted Signing 后，应在 CI Secrets 配置 `WIN_CSC_LINK` 和 `WIN_CSC_KEY_PASSWORD`，再启用强制签名。
+安装包、签名和更新清单均由同一次 Tauri 构建生成，并在发布前校验版本、文件大小、SHA-512
+和 updater 签名。该签名用于保护应用内更新链路，与 Windows Authenticode 发布者签名不是同一机制。
