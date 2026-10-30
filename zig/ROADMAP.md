@@ -17,20 +17,55 @@
 
 ---
 
-## M1 · 能听（0.1.x）
+## M1 · 预览层：一个注册表，不是一堆 if（0.1.x）
 
-现在最大的洞：**点一行不会响**。没有试听，这个软件就还不是素材管理器。
+现状的根问题不是"没有试听"，是**预览被当成一个个特例**。试听、试看、视频抽帧、三维预览
+是同一层级的四件事，应该共享同一个契约；否则每加一种媒体，UI 就要多一个分支。
 
-- **音频输出**：WASAPI 直写（共享模式 + 事件驱动），约 600–900 行原生代码。
-  不用 miniaudio：它是 C 单头文件，会破坏"无 C shim / 无 @cImport"的规矩。
-- **解码**：
-  - WAV/PCM 自己解（简单、确定）；
-  - MP3/AAC 走系统 Media Foundation（`IMFSourceReader`），不引入第三方；
-  - FLAC/OGG 先明确标"暂不支持试听"，别假装支持。
-- **波形**：解码时顺带算峰值 → 进 L3 磁盘缓存；播放器读缓存画图。
-- **交互**：播放/暂停、进度、seek、当前行高亮。
+**契约**（`zig/app/src/preview.zig`）：
 
-验收：双击任意 wav 能出声；同一文件第二次播放 ≤5 ms 起播；波形在 50 ms 内出现。
+```zig
+pub const Kind = enum { audio, image, video, model, text, unknown };
+
+pub const Request = struct {
+    sample: *const model.Sample,
+    max_px: u32,
+    at_ms: ?i64 = null,        // 视频/音频要某个时间点；静态图忽略
+};
+
+pub const Outcome = union(enum) {
+    image:  Bitmap,            // BGRA，与缩略图同一形状
+    audio:  AudioSession,      // 可播放、可 seek 的句柄
+    frames: FrameSource,       // 可要第 t 帧（视频、将来的三维）
+    text:   []const u8,
+    none:   Reason,            // no_handler / unsupported / failed / file_missing
+};
+
+pub const Provider = struct {
+    name: []const u8,
+    kind: Kind,
+    supports: fn (*const model.Sample) bool,
+    open: fn (Allocator, Request) Error!Outcome,
+    isolation: enum { in_process, worker_process } = .in_process,
+};
+```
+
+注册表按顺序问，第一个 `supports` 为真的赢。**UI 只认识 `Outcome` 的五个分支，
+不认识"音频"或"视频"。**
+
+| provider | 做什么 | 阶段 |
+| --- | --- | --- |
+| 元数据卡 | 兜底：名字/大小/时长/路径 | M1 |
+| 波形 + 播放 | 音频试听（WASAPI + 解码） | M1 |
+| Shell 缩略图 | 静态图（`ports/thumb` 已是这个形状） | 已有 |
+| MF 抽帧 | 视频试看（拖 seek 要帧） | M2 |
+| 三维 | 先只有静态缩略图，旋转留到以后 | M3+ |
+
+**验收**：新增一个 provider（比如 MF 抽帧）时，`main.zig` 与视图代码**零改动**。
+
+音频输出仍用 WASAPI 直写（不用 miniaudio：C 单头文件会破"无 C shim"的规矩）；
+解码 WAV 自己做，MP3/AAC 走 Media Foundation，FLAC/OGG 先明说"不能试听"。
+波形在解码时顺带算峰值，进 L3 磁盘缓存。
 
 ## M2 · 能找到（0.2.x）
 

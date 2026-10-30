@@ -27,6 +27,10 @@ PR 里说明理由，而不是顺手做掉。
 | 三维 | blend / fbx | Windows Shell 缩略图（装了 Blender 就有） | 缩略图位图 |
 | 其它 | 任意有 shell handler 的文件 | Windows Shell 缩略图 | 缩略图位图 |
 
+**预览不是一大堆 if-else，而是一张注册表。** 试听、试看、视频抽帧、三维预览是同一层级的
+provider，共用一套契约（`Outcome` 只有 image / audio / frames / text / none 五个分支）；
+UI 不认识"音频"或"视频"，只认识这五个分支。新增一种媒体 = 新增一个 provider，视图零改动。
+
 **注意"缩略图"的真实性质：它是一个插件生态，不是我们的解码器。**
 
 - 能不能出图，取决于**这台机器上装了什么缩略图 handler**：PS 装 PSD/AI，codec pack
