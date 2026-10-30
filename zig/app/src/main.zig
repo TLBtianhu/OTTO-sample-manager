@@ -7,6 +7,7 @@
 //!   otto-lite --demo <dir>           文件监听自检（不取缩略图）
 //!   otto-lite --demo-thumbs <dir>    缩略图取图层自检（不开窗）
 //!   otto-lite --preview <file>       预览自检（不开窗，打印事实 + kind/outcome/摘要）
+//!   otto-lite --play-test <file>     音频试听自检（解码 + 播 300ms + 断言位置前进）
 //!   otto-lite --demo-transport       选择/路径/拖拽快照自检（不开窗、不碰剪贴板）
 //!   otto-lite --copy-now <file>      显式把 1 个文件写进剪贴板（CF_HDROP）
 //!
@@ -34,6 +35,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const demo_preview = @import("demo_preview.zig");
+const demo_play = @import("demo_play.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_watch = @import("demo_watch.zig");
@@ -356,6 +358,11 @@ const State = struct {
                 std.debug.print("otto-lite: preview {s}\n", .{s.preview.describe(&preview_line)});
                 if (s.window) |window| window.redraw();
             }
+            // 音频播放期间每拍重画一次，位置文字才会走；自然播完时
+            // `playbackChanged` 再补一帧，把按钮从"停止"换回"播放"。
+            if (s.preview.isPlaying() or s.preview.playbackChanged()) {
+                if (s.window) |window| window.redraw();
+            }
             if (s.flash_left > 0) {
                 s.flash_left -= 1;
                 if (s.flash_left == 0) if (s.window) |window| window.redraw();
@@ -449,7 +456,7 @@ pub fn main(init: std.process.Init) !void {
             "用法：otto-lite [library.json] [--watch <dir>] [--select=0,1]\n" ++
                 "      otto-lite --version\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
-                "      otto-lite --preview <file>\n" ++
+                "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n",
             .{},
         );
@@ -492,6 +499,13 @@ pub fn main(init: std.process.Init) !void {
     // 预览注册表自检：和 UI 走同一个 registry，但不开窗、不碰 nanoui。
     if (options.preview_path) |path| {
         const code = try demo_preview.run(init, init.gpa, path);
+        if (code != 0) std.process.exit(code);
+        return;
+    }
+
+    // 音频试听自检：真解码、真播放、真 sleep；没有端点时以 0 退出。
+    if (options.play_test_path) |path| {
+        const code = try demo_play.run(init, init.gpa, path);
         if (code != 0) std.process.exit(code);
         return;
     }

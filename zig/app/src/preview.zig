@@ -45,9 +45,11 @@
 //!   * `Outcome` 的载荷由**调用方传进 `open` 的那个 allocator** 分配，
 //!     并且必须用**同一个 allocator** 调 `Outcome.deinit` 释放；
 //!   * `image.pixels` 与 `text` 归 `Outcome` 所有；
-//!   * `audio` / `frames` 本阶段是占位，不持有任何系统句柄或内存；
-//!     `Outcome.deinit` 仍会走它们的 `deinit`，将来接上会话时不需要改调用方；
-//!   * `none` 不持有内存；
+//!   * `audio` 拥有解码后的 PCM（`pcm`，用同一个 allocator 释放）与一个
+//!     `audio/player.zig` 的 `Player`（设备句柄 + 播放线程）。`AudioSession.deinit`
+//!     负责停播、join、释放两者；`Outcome.deinit` 已经带 allocator，调用方不用改；
+//!   * `frames` 本阶段仍是占位，不持有任何系统句柄或内存；
+//!     `Outcome.deinit` 仍会走它的 `deinit`，将来接上会话时不需要改调用方；
 //!   * `Registry.open` **不复制** `sample`：调用期间它必须有效。`preview_panel`
 //!     为此把样本值拷贝 + 深拷贝三个字符串再交给工作线程。
 //!
@@ -58,17 +60,22 @@
 //! 工作线程上，视图只读一份已经落地的 `Outcome`（同一约定见 `thumbs.zig`）。
 //! `Provider.isolation` 目前只是声明，等 M4 的 helper 进程用它决定执行位置。
 //!
+//! 音频还有**第二条**线程：`audio/player.Player` 的播放线程由它自己拥有，
+//! 只通过 `std.atomic.Value(u64)` 把播放位置交给 UI；播放线程不碰任何视图对象。
+//!
 //! ## 注册顺序
 //!
 //! `Registry.providers` 的数组顺序是**偏好**：先问谁、谁的成功的答案先被采用。
-//! 具体顺序由 `providers/root.zig` 给出（当前只有 Shell 缩略图；音频/抽帧按偏好插入），
+//! 具体顺序由 `providers/root.zig` 给出（当前是 `[wasapi-pcm, shell-thumbnail]`），
 //! 本文件不认识任何具体 provider。`metadata` **不是** provider：名字/大小/时长/路径
 //! 是 `Sample` 自带的事实，无条件显示在预览区，不参与 `Outcome`。
 //!
-//! 只依赖 Zig 0.17 标准库与 `zig/core`，没有 @cImport、没有窗口、没有口岸。
+//! 只依赖 Zig 0.17 标准库、`zig/core`，以及 app 内的 `audio/player.zig`（设备句柄与
+//! 播放线程在那边，UI 只读原子位置）；没有 @cImport、没有窗口、没有口岸。
 
 const std = @import("std");
 const core = @import("otto_core");
+const audio_player = @import("audio/player.zig");
 
 /// provider 声明的"我产出的载荷是什么"。注意：这是 **provider 的属性**，不是
 /// 样本的媒体类型——同一个 Shell 缩略图 provider 可以服务图片、视频、三维文件，
@@ -110,13 +117,69 @@ pub const Bitmap = struct {
     }
 };
 
-/// 音频会话。**本阶段只有占位**：WASAPI 输出与解码是 M1 的下一块，先让 union 的
-/// 五个分支都在，视图才能按五分支写、之后接上时视图不用改。
+/// 音频会话：**能播的声音**，不是一个空壳。
+///
+/// 字段是解码后的 PCM（交错、`channels` 声道、`bits` 位、`sample_rate`）、时长，
+/// 以及一个 `audio/player.Player`——后者拥有 WASAPI 设备句柄与**播放线程**。
+///
+/// 所有权：
+///   * `pcm` 用创建这个 Outcome 的 allocator 分配，`deinit(allocator)` 释放；
+///   * `player` 由 `Player.create` 分配，`Player.deinit` 释放（内部停播 + join）；
+///   * `position_ms` 是 UI 线程最后一次读到的快照；跨线程的真值在 Player 的
+///     `std.atomic.Value(u64)` 里。UI **只读** `positionMs()`，不碰播放线程。
+///
+/// `play` / `stop` 可以在 UI 线程调用（只投递命令并等 ack，不碰设备句柄）；`seek` 在 M1 不支持。
 pub const AudioSession = struct {
-    /// 还没有可播放的东西。接上以后这里是 PCM 队列 + 设备句柄 + 播放头。
-    pending: void = {},
+    pcm: []const u8,
+    sample_rate: u32,
+    channels: u16,
+    bits: u16,
+    duration_ms: u64,
+    position_ms: u64 = 0,
+    player: ?*audio_player.Player = null,
 
-    pub fn deinit(_: AudioSession) void {}
+    pub fn play(self: *AudioSession) !void {
+        const player = self.player orelse return error.NoAudioPlayer;
+        try player.play();
+    }
+
+    /// 停播；位置保留在最后播到的地方（不是归零）。
+    pub fn stop(self: *AudioSession) void {
+        if (self.player) |player| player.stop();
+        self.position_ms = self.positionMs();
+    }
+
+    pub fn isPlaying(self: *const AudioSession) bool {
+        const player = self.player orelse return false;
+        return player.isPlaying();
+    }
+
+    /// UI 线程读取：来自 Player 的原子快照；没有设备时退回 `position_ms`。
+    pub fn positionMs(self: *const AudioSession) u64 {
+        const player = self.player orelse return self.position_ms;
+        return player.positionMs();
+    }
+
+    pub fn durationMs(self: *const AudioSession) u64 {
+        return self.duration_ms;
+    }
+
+    /// M1 不做 seek：接口先留在这里，调用方不用等 M2 再改签名。
+    pub fn seek(_: *AudioSession, _: u64) error{Unsupported}!void {
+        return error.Unsupported;
+    }
+
+    /// 停播 → join 播放线程 → 释放 Player 与 PCM。必须与 `open` 用同一个 allocator。
+    pub fn deinit(self: *AudioSession, allocator: std.mem.Allocator) void {
+        if (self.player) |player| {
+            player.stop();
+            player.deinit();
+            self.player = null;
+        }
+        if (self.pcm.len != 0) allocator.free(self.pcm);
+        self.pcm = &.{};
+        self.position_ms = 0;
+    }
 };
 
 /// 帧源（视频、将来的三维）。同样只有占位：`IMFSourceReader` 抽帧是 M2。
@@ -142,11 +205,15 @@ pub const Outcome = union(enum) {
 
     /// 释放本 outcome 持有的载荷。调用必须传 `open` 时的同一个 allocator；
     /// 每个 outcome 只调一次。
+    ///
+    /// 接收者是值：内部拷到 `copy` 再按指针 deinit 音频会话，调用方看不出差别
+    /// （Outcome 是 unique ownership，拷贝只为拿 `*AudioSession`）。
     pub fn deinit(self: Outcome, allocator: std.mem.Allocator) void {
-        switch (self) {
+        var copy = self;
+        switch (copy) {
             .image => |bitmap| bitmap.deinit(allocator),
             .text => |text| allocator.free(text),
-            .audio => |session| session.deinit(),
+            .audio => |*session| session.deinit(allocator),
             .frames => |source| source.deinit(),
             .none => {},
         }
