@@ -1,0 +1,292 @@
+# OTTO Lite 性能基线（M5 第一块）
+
+> 这份文件回答一个问题：**宪章第四节那张表，今天到底做到哪了。**
+>
+> 证据由 `zig/bench.ps1`（或直接 `otto-lite --bench <library>`）产出；本文件记录
+> 一次真实运行的环境、命令、六项数字、debug/release 差异，以及**哪些数字 headless
+> 根本测不出来**。数字不修饰：没达标的就写 FAIL。
+
+- 工作树：`C:\src\otto-bench`，分支 `feat/bench`，基线 commit `0575802`（本次改动未提交）
+- 运行日期：2026-10-31
+- 基准库：`C:\src\otto-testkit\library.json`（12 条真文件）与
+  `zig/app/fixtures/library.json`（2000 条合成库，路径不在本机）
+- 缩略图/音频素材：`C:\src\otto-testkit\samples`（4 张 BMP、4 张 PNG、3 个 WAV，
+  以及一个故意没有 handler 的 `mystery.xyz`）
+
+## 1. 环境
+
+| 项 | 值 |
+| --- | --- |
+| CPU | AMD Ryzen 9 9955HX（16 核 / 32 线程，标称 2.5 GHz） |
+| 内存 | 32,025 MiB |
+| 系统 | Windows 11 家庭版 中文版 25H2，10.0.26200，Build 26200.8457，x64 |
+| Zig | 0.17.0（`C:\Users\30680\zig\zig-x86_64-windows-0.17.0\zig.exe`） |
+| 构建 | 默认 `Debug`；release 用 `zig build -Drelease=true`（`build.zig` 的落点是 **ReleaseSafe**） |
+| 显示器/缩放 | 基准进程离屏；首帧子进程的 `nativeView()` 在无窗口时固定报 `scale=2`（HiDPI 口径） |
+
+> 这台机器装了系统缩略图 handler（BMP/PNG 都能出图），WASAPI 有默认渲染端点。
+> 换一台没有端点 / 没有 handler 的机器，对应两项会变成 SKIP，而不是 FAIL。
+
+## 2. 一条命令怎么跑
+
+```powershell
+# 默认：debug 构建 + 12 条 testkit 库
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\bench.ps1
+
+# 2000 条 fixture（同一张表）
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\bench.ps1 -Big
+
+# release 构建（package.ps1 用的就是它）
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\bench.ps1 -Big -Release
+
+# 不重新构建、只跑表（exe 已经在 zig-out\bin）
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\bench.ps1 -Big -NoBuild
+```
+
+也可以直接调 exe（`bench.ps1` 只是加上了构建与汇总）：
+
+```powershell
+zig-out\bin\otto-lite.exe --bench C:\src\otto-testkit\library.json --bench-samples C:\src\otto-testkit\samples
+zig-out\bin\otto-lite.exe --bench .\fixtures\library.json --bench-samples C:\src\otto-testkit\samples
+```
+
+退出码：六项里全部 PASS/SKIP 为 `0`，任何一项 FAIL 为 `1`。`bench.ps1` 原样转发。
+
+## 3. 结果总表（release，2000 条，权威口径）
+
+```
+指标          实测                          目标              结果   备注
+库加载         7.46 ms（中位）               ≤ 100 ms          PASS   library_io read+decode ×5
+冷启动→首帧   307.69 ms                     ≤ 100 ms          FAIL   含 CreateProcess；main 内 227.8 ms = setup 64.1 + frame 163.0
+常驻内存      35.20 MiB                     ≤ 50 MiB          PASS   WS 3 次最大；private 33.3 MiB；库 2000 条 + 100 图；完整 UI 首帧另测 70.3 MiB
+搜索延迟      p50 0.016 / p95 0.016 ms      p95 ≤ 20 ms       PASS   matchingIndices ×200，needle="wo"，命中 67/2000
+缩略图        冷 p95 20.27 / 热 p95 7.06 ms 冷 p95 ≤ 80 ms    PASS   冷 100 新路径（首张 132.29 ms 含 helper 启动）/ 热 100 同路径；L3 未启
+音频起播      p95 20.03 ms                  p95 ≤ 50 ms       PASS   play() → position>0 ×20，p50 15.07 ms，wav=tone_1320.wav
+```
+
+汇总：`PASS=5 FAIL=1 SKIP=0（共 6 项）退出码=1`。
+
+> 这是**单次运行**的数字。同一台机器重复跑，首帧与缩略图通常有 5–15% 的抖动
+> （系统缩略图缓存、字体缓存、Shell/helper 调度），搜索与库加载抖动小一个数量级；
+> 抖动不会改变本表的 PASS/FAIL 结论（FAIL 的那项差 3 倍，PASS 的几项都留了 2 倍
+> 以上余量）。
+
+**必须先说明的两件事**：
+
+1. **唯一 FAIL 是冷启动到首帧。** 这不是库加载慢（库本身 7.5 ms），而是
+   nanoui 的字体扫描/字形图集首次使用 + 进程启动本身。debug 与 release 都 FAIL，
+   12 条库与 2000 条库也几乎一样慢（见第 5 节），说明它和素材数量无关。
+2. **常驻内存这一行的 PASS 只对任务规定的 headless 口径成立**：`--bench` 进程里
+   有库（2000 条）+ 100 张缩略图，但没有 nanoui 窗口、字体图集和 D3D 表面。
+   同一个程序建完整 UI 后（首帧子进程）WorkingSet 是 **70.3 MiB**；一次手工的
+   隐藏窗口实例测到 **77–97 MiB**（见第 6 节）。**宪章「常驻内存 ≤ 50 MiB」在真实
+   界面形态下目前没有达成证据**，本表不能拿来宣称它达标。
+
+## 4. 六项分别怎么测
+
+所有代码在 `zig/app/src/bench*.zig`，计时都用 `std.Io.Clock.Timestamp.now(io, .awake)`
+（单调时钟，不受系统时间调整影响）；p50/p95 用 **nearest-rank**（升序第
+`ceil(q·n)` 个），报出来的数一定是真实测到过的一次。
+
+### 4.1 库加载（`bench.zig`）
+
+- 调 `library_io.loadWith(io, allocator, path)`：整文件读取（`ports/library_file.readAll`，
+  带上限）→ 按 magic 判断 JSON / OTTOLIB → `core.store.load` 或
+  `core.library_binary.decode`；
+- 重复 **5 次**，每次 `Library.deinit()`（库只持有一个 arena，一次释放），取中位数；
+- 5 次读到的是 OS 文件缓存；第一次的冷盘读只有一次，中位数按任务要求不取它。
+  2000 条 JSON 是 466 KB，5 次样本大约 7.4 ms（release）。
+
+### 4.2 冷启动到首帧（`bench.zig` + `bench_win.zig`）
+
+`--bench` 用 `std.process.executablePathAlloc` 找到自己，再用
+`std.process.spawn`（`create_no_window=true`）起一个全新子进程：
+
+```
+otto-lite.exe <library> --bench-first-frame
+```
+
+子进程走**和正常启动完全相同**的初始化：`library_io.load` → `Live.init`（文件监听）
+→ `Thumbs.init`（取图工作线程）→ `Preview.Panel.init`（预览工作线程）→
+`nanoui.App.create` → `newWindow`。区别只在两点：
+
+- `app.gui = false`：不建 HWND、不 show、不抢焦点（`--nanoui-snapshot` 同一条路径）；
+- 窗口建好后用 `nanoui.ui.Tester` 在 **380×700、scale=2** 的离屏尺寸上跑一次
+  `tester.init`（它内部正好调用一次 `frame()`），打印后 `std.process.exit(0)`——
+  不再 join 缩略图/预览工作线程，避免把"关窗收尾"算进"首帧"。
+
+父进程量的是 **CreateProcess → 子进程退出** 的墙钟（3 次取中位）；子进程自己再报
+`first_frame_ms`（main 入口 → 第一帧建完）、`setup_ms`（入口 → 窗口建好）与
+`frame_ms`（Tester 初始化 + 一帧）。
+
+为什么不是任务示例里的 1×1：1 点高的窗口一行列表都排不出来，量到的是空树；380×700
+才是用户实际看到的第一帧。而且这次 FAIL 与尺寸无关——setup(64 ms) + 进程
+启动/退出（约 80 ms）已经超过 100 ms，把 frame 压到 0 也不够。
+
+这里量的是**视图构建**：`Tester.frame()` 只跑到 layout + 绘制指令（display list），
+不做 CPU 光栅化，也不做 D3D 上屏/垂直同步。所以 307.69 ms 是**用户可见首帧的下界**，
+真实窗口的首帧只会更高。
+
+### 4.3 常驻内存（`bench_win.zig`）
+
+- Win32 API：`kernel32!K32GetProcessMemoryInfo`（Windows 7+ 由 kernel32 导出，
+  不必额外链接 psapi），结构 `PROCESS_MEMORY_COUNTERS_EX` 按 Win64 ABI 手写
+  （80 字节：`DWORD cb; DWORD PageFaultCount;` + 9 个 `SIZE_T`），`cb = 80`；
+  `GetCurrentProcess()` 拿伪句柄；
+- **判据是 `WorkingSetSize`**；同时打印 `PrivateUsage` 供解释「WS 为什么大」；
+- 测 3 次取**最大**（工作集只会随时间长大，取最大代表这一刻真的驻留过）；
+- 测量时的状态：2000 条库已常驻 + 已用 `thumb_host.get` 取到并**持有** 100 张
+  64px 缩略图（Shell 实际回 96×96 BGRA，100 张共 3.52 MiB）；
+- **顺序有讲究**：内存必须在"5 次加载/释放"的基准**之前**测。Windows 的 WorkingSet
+  不会因为 free 立刻缩回；先跑 5 次加载，分配器把页留在工作集里，同一个库会从
+  35 MiB 虚高到 62 MiB。本文件第一版就踩过这个坑，现在的顺序是修正后的；
+- 局限见第 6 节：这个进程没有窗口/字体/GPU。
+
+### 4.4 搜索延迟（`bench.zig`）
+
+- 库已在内存里（2000 条），搜索是纯内存过滤，不碰磁盘；
+- 先热身 1 次，再跑 **200 次** `core.query.matchingIndices(allocator, samples, "wo")`，
+  每次释放结果切片；
+- 报 p50/p95。`wo` 在 2000 条 fixture 里命中 67 条（`我_wo_0.wav` 这类名字），
+  在 12 条 testkit 里命中 0 条；两种都是整表扫描，延迟可比；
+- 目标 20 ms 来自 ROADMAP M2 的验收（「2000 条里 20 ms 内出结果」），**不在宪章
+  第四节那张表里**，备注里写清楚，不和宪章目标混为一谈。
+
+### 4.5 缩略图（`bench_thumbs.zig`，复用 `thumb_bench.zig`）
+
+- 造样本：从素材目录挑一张**真能出图**的文件（`thumb_bench.findSource`），读出字节，
+  用 `thumb_bench.Copies` 复制成 **100 个不同文件名**（`%TEMP%\otto-thumb-bench`）；
+  路径不同才会让 Shell 的按路径缩略图缓存失效；
+- **冷**：先 `thumb_host.deinit()` 把隔离 helper 收掉，再逐张
+  `thumb_host.get(path, 64)`，每张用单调时钟夹一次；第一张包含
+  `CreateProcessW` + helper 里的 Shell 初始化，所以单独报「首张」；
+- **热**：同一批 100 个路径再跑一遍（helper 常驻、Shell 系统缓存命中）；
+- 每轮 100 次，成功才进样本，失败计数单独报；p50/p95 用 nearest-rank；
+- 计时方式与 `--thumb-bench` 完全一致（同一套 `Copies` / `collectFiles` / 时钟），
+  没有第二套计时器；
+- **L3 没在这条测量里**：dev 形态不写数据目录（宪章第九节），`--bench` 也不碰用户
+  目录，所以 OTTO 自己的磁盘缩略图缓存是关闭的。这里量的是「Shell 冷/热 + helper
+  隔离」的真实链路；要量 L3 命中率，需要带文件身份的 `Sample` 和临时数据目录，
+  留给下一轮真实窗口脚本（见第 7 节）。
+
+### 4.6 音频起播（`bench_audio.zig`）
+
+- 在素材目录里找第一个能解码的 `.wav`，用 `providers/audio.zig` 的 `load`
+  （自己的 WAV 解码器）+ `sessionFromWav`（WASAPI 初始化 + 波形），**只做一次**；
+- 然后 20 次：`play()` 前取时间戳 → 忙等 `positionMs() > 0`（最长 500 ms）→
+  停表 → `stop()` → 睡 20 ms 再下一轮；
+- 报 p95。忙等而不是 `sleep(1ms)`，因为位置精度就是毫秒，1 ms 的睡眠会把 p95
+  直接抬高；
+- 设备初始化不计入：那是「第一次选中音频行」的一次性成本，不是起播；
+- `NoAudioEndpoint` / 没有可解码 wav / 20 次都起不来 → **SKIP**，不算 FAIL（任务
+  约定：环境限制不是产品失败）。
+
+## 5. debug vs release：四组实测
+
+同一台机器、同一份素材，`zig build`（Debug）与 `zig build -Drelease=true`
+（ReleaseSafe）各跑 12 条与 2000 条两次。
+
+| 指标 | Debug·12 | Release·12 | Debug·2000 | Release·2000 |
+| --- | --- | --- | --- | --- |
+| 库加载（中位） | 0.30 ms | 0.09 ms | 39.49 ms | **7.46 ms** |
+| 首帧墙钟 | 317.96 ms | 296.51 ms | 349.17 ms | **307.69 ms** |
+| └ main 内 | 234.8 ms | 215.6 ms | 265.8 ms | 227.8 ms |
+| └ setup / frame | 69.8 / 167.3 | 58.3 / 157.0 | 95.4 / 170.4 | 64.1 / 163.0 |
+| 常驻内存（WS 最大） | 25.59 MiB | 24.05 MiB | 36.74 MiB | **35.20 MiB** |
+| └ 完整 UI 首帧 WS | 64.60 MiB | 61.91 MiB | 72.98 MiB | **70.28 MiB** |
+| 搜索 p50 / p95 | 0.001 / 0.001 | 0.000 / 0.000 | 0.171 / 0.357 | **0.016 / 0.016** |
+| 缩略图冷 p95 | 20.45 ms | 20.80 ms | 20.38 ms | **20.27 ms** |
+| 缩略图热 p95 | 6.99 ms | 7.25 ms | 7.42 ms | **7.06 ms** |
+| └ 冷首张 | 137.53 ms | 147.44 ms | 139.30 ms | 132.29 ms |
+| 音频 p95 | 19.33 ms | 19.75 ms | 19.42 ms | **20.03 ms** |
+
+release 相对 debug（2000 条）：
+
+| 项 | 变化 | 解读 |
+| --- | --- | --- |
+| 库加载 | 39.49 → 7.46 ms（**5.3×**） | JSON 解析 / 分配 / 哈希表是纯 CPU，优化器最有效 |
+| 搜索 p95 | 0.357 → 0.016 ms（**约 22×**） | 同上；绝对值本来就远低于目标 |
+| 首帧墙钟 | 349.17 → 307.69 ms（**1.13×**） | 大头是进程启动 + 字体扫描/图集，优化器管不着 |
+| └ frame | 170.4 → 163.0 ms（1.05×） | 字体/图集成本与优化级别几乎无关 |
+| 常驻内存 | 36.74 → 35.20 MiB（1.04×） | 分配器不同，但驻留主体是库与系统页 |
+| 缩略图冷 p95 | 20.38 → 20.27 ms（≈1×） | 时间花在 Shell / helper 进程边界，不是我们的代码 |
+| 音频 p95 | 19.42 → 20.03 ms（≈1×） | 时间花在 WASAPI 缓冲周期 / 设备，不是我们的代码 |
+
+结论：**release 值得开**（库加载与搜索提升一个数量级），但**它救不了首帧和内存**。
+这两项要靠减少首次字体工作量、延后/拆分首帧、以及真实的窗口内存剖析，属于 M5
+下一块的优化，不是本基线块的范围。
+
+## 6. headless 到底测不出什么（不要假装测到）
+
+| 想要 | 为什么 `--bench` 测不到 | 现在能给的替代证据 |
+| --- | --- | --- |
+| **滚动 60 fps** | `ui.Tester` 没有 surface / D3D / DWM / vsync；`frame()` 只做 view+layout+display list，不做光栅化与上屏。测一帧循环只能得到 CPU 布局成本，不是 fps | 无。必须真实窗口（见第 7 节） |
+| **真实首帧（用户看见）** | 同上：`frame_ms` 不含 CPU 光栅化、D3D 上传、present、DWM 合成；`307.69 ms` 是下界 | `first_frame_ms` 的 setup/frame 拆分 |
+| **真·冷启动（重启后第一次）** | 子进程反复起，exe/DLL/字体/库都在 OS 文件缓存里；5 次库加载也是热盘 | 首样可看冷盘影响，但中位数按任务要求不取它 |
+| **真实常驻内存** | `--bench` 进程没有窗口/字体图集/D3D 表面；内存行只覆盖「库 + 100 缩略图」 | 首帧子进程 WS：release 2000 = **70.28 MiB**、12 条 = 61.91 MiB（同一 API）；手工隐藏窗口实例 77–97 MiB（PowerShell `Get-Process`，仅旁证） |
+| **L3 磁盘缩略图命中** | dev 形态按宪章不写用户目录；`--bench` 也不建临时数据目录 | 冷/热量的是 Shell 系统缓存 + helper 隔离 |
+| **安装包 ≤ 5 MiB** | `--bench` 不构建分发物 | `zig/package.ps1 -Version 0.1.1 -NoSign` 实测：便携 zip **1.19 MiB**、NSIS setup **1.46 MiB**（release exe 2.12 MiB + helper 0.97 MiB） |
+| **真实音频设备差异** | 只测本机默认端点的 shared mode；换设备/独占模式结论会变 | p50/p95 与 wav 名；无端点时 SKIP |
+| **拖出到宿主（Melodyne/FL）** | 不是性能项，且需要真实宿主 | 人工验收清单（`otto-testkit/README.md`） |
+
+### 内存这条要单独再说一次
+
+任务给的内存口径（加载 2000 条 + 取 100 张缩略图后读 `WorkingSetSize`）是在
+**没有 UI 的基准进程**里执行的，得到 35.20 MiB，PASS。但同一个程序把完整 UI
+建起来（首帧子进程，同一 Win32 API）就是 **70.28 MiB**；再用真实的隐藏窗口跑
+1.5 秒（`--nanoui-hidden`，仍会创建 D3D11 交换链）读到 **77–97 MiB**。
+
+两个数字都真实，差别是**测量对象不同**：
+
+- 35.20 MiB = 「库 + 缩略图」的底价，用来守住"数据层不许膨胀"；
+- 70.28 / 77–97 MiB = 用户真正会看到的常驻，**已经超过 50 MiB 目标**。
+
+所以本文件的结论是：**50 MiB 目标暂未达成**，下一轮必须把内存测量搬进真实窗口
+形态（`GetProcessMemoryInfo` 直接在主进程读，或由一个带窗口的探针进程读），并把
+字体图集 / D3D 表面 / 缩略图 L2 分开记账。`--bench` 的内存行保留任务口径，但在
+表里同时打印完整 UI 的 70.28 MiB，避免被误读成"整机 50 MiB 达标"。
+
+## 7. 滚动帧率为什么 headless 测不了，下一轮怎么测
+
+**为什么不行**：帧率不是「一帧代码跑多快」，而是
+`min(CPU 构帧, CPU/GPU 光栅化, D3D present, DWM 合成, 显示器刷新)` 的倒数。
+headless 的 `ui.Tester` 只做第一项的一部分（view + layout + display list），
+没有窗口、没有交换链、没有 vsync；在它上面循环 `frame()` 得到的毫秒数既不能
+换算成 fps，也发现不了「GPU 上传慢」「DWM 掉帧」「窗口被遮挡」这些真实原因。
+
+**下一轮的脚本（不在本块交付）**：
+
+1. 新增 `--bench-scroll <library>`：开一个 380×700 的真实 nanoui 窗口，
+   `visible=true` 但用 `SetWindowPos(SWP_NOACTIVATE)` + 屏幕外位置，避免抢焦点；
+2. 用 `nanoui.App.after` 或脚本注入滚轮事件，让列表在 2000 行上连续滚动
+   （例如每帧 delta 40 点，跑 300–600 帧），并分别在「缩略图未加载 / 已加载」
+   两种状态下跑；
+3. 在 present 路径上记 QPC：nanoui 已有 `ui.frame_log` 与 `ctx.frame_stats`，
+   优先用它们；不够就在 `windows/surface.zig` 加一个只读回调（保持补丁通用）；
+4. 报表：帧间隔 p50/p95、有效 fps、`CPU 构帧` 与 `present` 分列；目标按 60 Hz
+   的 16.7 ms 预算判 PASS/FAIL（有 vsync 时要同时报"被 60 封顶"与"真的超时"）；
+5. 同时把内存测量搬进这个真实窗口进程，用同一个 `K32GetProcessMemoryInfo`
+   读 UI + 字体 + D3D + 缩略图 L2 的总账。
+
+## 8. 验收快照
+
+```text
+三套单元测试（fresh cache）：
+  core  78/78  tests passed
+  ports 103/103 tests passed
+  app   125/125 tests passed
+
+zig build                     → 成功（debug）
+zig build -Drelease=true      → 成功（ReleaseSafe）
+
+--bench（release, 2000）      → PASS=5 FAIL=1 SKIP=0，退出码 1
+--bench（debug,   2000）      → PASS=5 FAIL=1 SKIP=0，退出码 1
+zig\bench.ps1                 → 汇总 PASS=5 FAIL=1 SKIP=0 exit=1
+zig\bench.ps1 -Big            → 汇总 PASS=5 FAIL=1 SKIP=0 exit=1
+zig\package.ps1 -Version 0.1.1 -NoSign
+                              → portable.zip 1.19 MiB / setup.exe 1.46 MiB
+```
+
+唯一 FAIL 是**冷启动到首帧**（target 100 ms，release 实测 307.69 ms）。这个数字
+在本机 debug/release、12 条/2000 条四种组合下都 FAIL，且与库大小无关；下一轮
+优化方向优先是「字体扫描/图集延迟到首帧之后」与「窗口出现前不建完整 UI」。

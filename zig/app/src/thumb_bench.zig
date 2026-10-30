@@ -75,7 +75,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
 
     var copies = Copies{};
     defer copies.deinit(io, allocator);
-    copies.build(io, allocator, init.environ_map, root, source, bytes) catch |err| {
+    copies.build(io, allocator, init.environ_map, root, source, bytes, copy_count) catch |err| {
         std.debug.print("thumb-bench: 准备 200 份拷贝失败（{s}）\n", .{@errorName(err)});
         return 1;
     };
@@ -182,7 +182,8 @@ fn compareOne(allocator: std.mem.Allocator, path: []const u8, ok: *bool) void {
     if (local_error != null and remote_error != null) {
         const same = std.mem.eql(u8, local_error.?, remote_error.?);
         std.debug.print("thumb-bench: 同错   {s:<16} 进程内={s} 隔离={s} {s}\n", .{
-            name, local_error.?, remote_error.?, if (same) "一致" else "不一致!",
+            name, local_error.?, remote_error.?,
+            if (same) "一致" else "不一致!",
         });
         if (!same) ok.* = false;
         return;
@@ -200,13 +201,15 @@ fn compareOne(allocator: std.mem.Allocator, path: []const u8, ok: *bool) void {
 // 200 份拷贝：临时目录 + 真图字节
 // ---------------------------------------------------------------------------
 
-const Copies = struct {
+pub const Copies = struct {
     parent: ?[]u8 = null,
     name: ?[]u8 = null,
     dir: ?[]u8 = null,
     paths: std.ArrayList([]u8) = .empty,
+    /// 拷贝多少份。`--thumb-bench` 用 200，`--bench` 用 100（同一套建目录/拷贝逻辑）。
+    count: usize = copy_count,
 
-    fn build(
+    pub fn build(
         self: *Copies,
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -214,7 +217,9 @@ const Copies = struct {
         root: []const u8,
         source: []const u8,
         bytes: []const u8,
+        count: usize,
     ) !void {
+        self.count = count;
         // 临时目录优先放系统 TEMP；拿不到就放在被测目录里的一个子目录（退出时删掉）。
         // 名字是固定的：上一次被强杀留下的同名目录会在下面先清掉，不会越积越多。
         const parent_owned = if (environ_map.get("TEMP")) |temp|
@@ -240,7 +245,7 @@ const Copies = struct {
         defer handle.close(io);
 
         const extension = std.fs.path.extension(source);
-        for (0..copy_count) |index| {
+        for (0..self.count) |index| {
             const file_name = try std.fmt.allocPrint(allocator, "bench{d:0>3}{s}", .{ index, extension });
             defer allocator.free(file_name);
             try handle.writeFile(io, .{ .sub_path = file_name, .data = bytes });
@@ -248,7 +253,7 @@ const Copies = struct {
         }
     }
 
-    fn deinit(self: *Copies, io: std.Io, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Copies, io: std.Io, allocator: std.mem.Allocator) void {
         for (self.paths.items) |path| allocator.free(path);
         self.paths.deinit(allocator);
 
@@ -266,9 +271,9 @@ const Copies = struct {
     }
 };
 
-/// 找一张"进程内真的能取到图"的文件当样本：拷贝出来的 200 张必须都能出图，
+/// 找一张"进程内真的能取到图"的文件当样本：拷贝出来的 100/200 张必须都能出图，
 /// 否则计时里混进失败分支就不好看了。
-fn findSource(allocator: std.mem.Allocator, files: []const []u8) ?[]u8 {
+pub fn findSource(allocator: std.mem.Allocator, files: []const []u8) ?[]u8 {
     for (files) |path| {
         if (thumb.get(allocator, path, 16)) |image| {
             var owned = image;
@@ -279,13 +284,13 @@ fn findSource(allocator: std.mem.Allocator, files: []const []u8) ?[]u8 {
     return null;
 }
 
-fn readAlongside(io: std.Io, allocator: std.mem.Allocator, root: []const u8, path: []const u8) ![]u8 {
+pub fn readAlongside(io: std.Io, allocator: std.mem.Allocator, root: []const u8, path: []const u8) ![]u8 {
     const dir = try std.Io.Dir.openDirAbsolute(io, root, .{});
     defer dir.close(io);
     return dir.readFileAlloc(io, std.fs.path.basename(path), allocator, .limited(64 * 1024 * 1024));
 }
 
-fn collectFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8, files: *std.ArrayList([]u8)) !void {
+pub fn collectFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8, files: *std.ArrayList([]u8)) !void {
     var dir = try std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true });
     defer dir.close(io);
 
@@ -352,4 +357,3 @@ fn timeMany(io: std.Io, allocator: std.mem.Allocator, paths: []const []u8, mode:
     timing.total_ms = elapsedMs(io, started);
     return timing;
 }
-

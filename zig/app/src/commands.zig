@@ -9,6 +9,7 @@
 //! 失败信息由各 `run` 自己打印具名错误，这里不做二次包装。
 
 const std = @import("std");
+const bench = @import("bench.zig");
 const demo_filter = @import("demo_filter.zig");
 const demo_play = @import("demo_play.zig");
 const demo_preview = @import("demo_preview.zig");
@@ -41,6 +42,12 @@ pub fn run(
 
     // 选择/拖拽快照/参数校验自检：不开窗，也不碰剪贴板。
     if (options.demo_transport) return try demo_transport.run(init, allocator);
+
+    // 性能基准（M5）：六项指标 + 一张表；退出码 0 = 全 PASS/SKIP。
+    // 放在其它自检前面：它是"一条命令出证据"的入口，不依赖任何 UI 状态。
+    if (options.bench) |path| {
+        return try bench.run(init, allocator, .{ .library = path, .samples = options.bench_samples });
+    }
 
     // 真正写剪贴板只走这条显式命令（用户点名的文件）。
     if (options.copy_now) |path| return transport_mod.copyNow(init.gpa, path);
