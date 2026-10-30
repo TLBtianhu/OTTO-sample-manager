@@ -50,12 +50,17 @@ pub const Provider = struct {
 };
 ```
 
-注册表按顺序问，第一个 `supports` 为真的赢。**UI 只认识 `Outcome` 的五个分支，
-不认识"音频"或"视频"。**
+注册表按顺序问，第一个 `supports` 为真的赢；**但 `none.*` 是"谢绝"，不是最终答案**——继续问下一个
+provider，只有成功分支才终止。全部谢绝时按 `failed` > `no_handler` > `unsupported` 取最具体的原因。
+
+这条不是细节：`supports()` 只能做廉价声明，真正的能力要到 `open()` 才知道（本机 `.wav` 在注册表里
+有影子 handler，实际取图却返回 no_handler）。用"谢绝后可继续"换掉"provider 必须排对顺序"的隐性纪律。
+
+**元数据（名字/大小/时长/路径）不是 provider。** 它永远成立，若做成 provider 就会把 `none` 分支
+整个吃掉。预览区只由 Outcome 驱动，事实行无条件显示在下面。
 
 | provider | 做什么 | 阶段 |
 | --- | --- | --- |
-| 元数据卡 | 兜底：名字/大小/时长/路径 | M1 |
 | 波形 + 播放 | 音频试听（WASAPI + 解码） | M1 |
 | Shell 缩略图 | 静态图（`ports/thumb` 已是这个形状） | 已有 |
 | MF 抽帧 | 视频试看（拖 seek 要帧） | M2 |
