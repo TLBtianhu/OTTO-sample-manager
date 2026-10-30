@@ -47,11 +47,14 @@ pub const Options = struct {
     save_path: ?[]const u8 = null,
     /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
     no_isolation: bool = false,
+    /// L3 缩略图磁盘缓存的预算（字节）。默认 256 MiB；`--cache-budget-kib=<n>`
+    /// 按 KiB 调小，用于验证淘汰（正常用户不需要碰它）。
+    disk_cache_budget_bytes: u64 = 256 * 1024 * 1024,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,
 };
 
-pub fn parse(args: anytype) error{MissingValue}!Options {
+pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
     var options = Options{};
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -146,6 +149,12 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.save_path = arg["--save=".len..];
         } else if (std.mem.eql(u8, arg, "--no-isolation")) {
             options.no_isolation = true;
+        } else if (std.mem.eql(u8, arg, "--cache-budget-kib")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.disk_cache_budget_bytes = try kibToBytes(args[index]);
+        } else if (std.mem.startsWith(u8, arg, "--cache-budget-kib=")) {
+            options.disk_cache_budget_bytes = try kibToBytes(arg["--cache-budget-kib=".len..]);
         } else if (std.mem.eql(u8, arg, "--thumb-bench")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -157,6 +166,13 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
         }
     }
     return options;
+}
+
+/// `--cache-budget-kib` 的值：非负 KiB → 字节。溢出按 u64 饱和（预算没有上限语义，
+/// 饱和到天文数字等价于「不淘汰」，不会回绕成 0 把缓存删光）。
+fn kibToBytes(text: []const u8) error{InvalidValue}!u64 {
+    const kib = std.fmt.parseInt(u64, text, 10) catch return error.InvalidValue;
+    return kib *| 1024;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,4 +347,18 @@ test "--no-isolation 是开关；--thumb-bench 两种写法都收" {
     try testing.expect(joined.no_isolation);
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--thumb-bench" }));
+}
+
+test "--cache-budget-kib：两种写法、KiB → 字节、默认 256 MiB、非数字报 InvalidValue" {
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=100" });
+    try testing.expectEqual(@as(u64, 100 * 1024), joined.disk_cache_budget_bytes);
+
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib", "256" });
+    try testing.expectEqual(@as(u64, 256 * 1024), spaced.disk_cache_budget_bytes);
+
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expectEqual(@as(u64, 256 * 1024 * 1024), plain.disk_cache_budget_bytes);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib" }));
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=x" }));
 }

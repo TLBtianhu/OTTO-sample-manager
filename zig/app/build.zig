@@ -55,6 +55,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
         // 库文件口岸：原子写 / 整读（容器格式在 core 的 library_binary）。
         .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
+        // L3 缩略图磁盘缓存（M4 第二块）：条目格式、原子替换、预算裁剪。
+        .{ .name = "otto_diskcache", .module = ports_dep.module("otto_diskcache") },
         // 文件夹选择口岸：IFileOpenDialog（UI 的「导入文件夹」按钮）。
         .{ .name = "otto_folder_picker", .module = ports_dep.module("otto_folder_picker") },
         // 导入流水线的两个口岸：L0 扫描（真 Win32 属性/身份）与 L1 头部探测。
@@ -114,6 +116,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_caps", .module = caps_dep.module("otto_caps") },
             .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
             .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
+            .{ .name = "otto_diskcache", .module = ports_dep.module("otto_diskcache") },
             .{ .name = "otto_folder_picker", .module = ports_dep.module("otto_folder_picker") },
             .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
             .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },

@@ -137,6 +137,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(library_file_library);
 
+    // L3 缩略图磁盘缓存（M4）：条目格式、原子替换、预算裁剪都在这个口岸里。
+    // 只收发字节，不认识 `thumbs`；调用方（app）把像素与摘要交进来。
+    const diskcache_module = b.addModule("otto_diskcache", .{
+        .root_source_file = b.path("src/diskcache.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const diskcache_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_diskcache",
+        .root_module = diskcache_module,
+    });
+    b.installArtifact(diskcache_library);
+
     // L0 扫描口岸：递归遍历 + 文件身份（GetFileInformationByHandle）+ 排序去重。
     // 只产出目录项事实，不打开内容；平台限定 Windows（见 src/scan.zig）。
     _ = b.addModule("otto_scan", .{
@@ -161,7 +175,7 @@ pub fn build(b: *std.Build) void {
     });
     probe_module.addImport("otto_wav_header", wav_header_module);
 
-    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件 / 扫描 / 探测 / 文件夹选择口岸的单元与集成测试（真 Win32 + 真 Shell）");
+    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件 / 磁盘缓存 / 扫描 / 探测 / 文件夹选择口岸的单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/watch_test.zig"),
@@ -226,6 +240,16 @@ pub fn build(b: *std.Build) void {
     run_library_file_tests.step.dependOn(&run_drag_tests.step);
     test_step.dependOn(&run_library_file_tests.step);
 
+    // L3 磁盘缓存：真临时目录 + 真 MoveFileExW；不需要 COM / Shell，串在库文件之后。
+    const diskcache_test_module = b.createModule(.{
+        .root_source_file = b.path("src/diskcache_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_diskcache_tests = b.addRunArtifact(b.addTest(.{ .root_module = diskcache_test_module }));
+    run_diskcache_tests.step.dependOn(&run_library_file_tests.step);
+    test_step.dependOn(&run_diskcache_tests.step);
+
     // 扫描口岸：只碰文件系统（建树 / 隐藏位 / 真句柄），同样串行。
     const scan_test_module = b.createModule(.{
         .root_source_file = b.path("src/scan_test.zig"),
@@ -233,7 +257,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const run_scan_tests = b.addRunArtifact(b.addTest(.{ .root_module = scan_test_module }));
-    run_scan_tests.step.dependOn(&run_library_file_tests.step);
+    run_scan_tests.step.dependOn(&run_diskcache_tests.step);
     test_step.dependOn(&run_scan_tests.step);
 
     // 探测口岸：probe.zig 自己就是测试根（真临时文件 + 内存里造的 WAV）。
