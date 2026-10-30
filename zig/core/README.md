@@ -37,13 +37,15 @@ zig build test
 | `src/store.zig` | `Library`、`load` / `loadFile`，解析 map 形式的样本 / 分组 / 目录并装配索引 |
 | `src/query.zig` | 目录递归过滤、分组过滤、文件名子串过滤、排序、子树枚举 |
 | `src/annotations.zig` | 以 `StableKey`（身份优先）为键的注释表：`AnnotationTable` / `resolve` 旧库迁移 |
+| `src/index.zig` | 可变索引层：在不可变 `Library` 之上滚动应用 created / removed / renamed / modified / overflow |
 | `src/tests.zig` | 集成测试（4 个 fixture + 1000 条合成数据耗时打印） |
 | `src/store_test.zig` | `store` 的单元测试（内联 JSON） |
 | `src/annotations_test.zig` | 身份 / 注释表的集成测试（改名不丢、fallback、`resolve` 迁移、identity 加载） |
+| `src/index_test.zig` | 索引层的集成测试（顺序 / 身份 / 注释 / 脏标记 / 降级 / 覆盖） |
 | `fixtures/*.json` | 全部为手工构造的合成数据，**不含任何真实用户数据** |
 | `fixtures/fixtures.zig` | 以 `@embedFile` 暴露 fixture 文本 |
 
-单文件均小于 600 行；`zig build test` 当前为 **37 个测试**。
+单文件均小于 600 行；`zig build test` 当前为 **58 个测试**。
 
 ## 公共 API 草图
 
@@ -89,6 +91,7 @@ pub const Sample = struct {
     imported_at: i64 = 0,
     mtime: i64 = 0,                       // L0 目录项，0 = 未知
     identity: ?FileIdentity = null,       // 口岸填；null 时注释键退回 fallback
+    pending_metadata: bool = false,       // L1 元数据待补；Index 的 created 样本为 true
     pub fn inGroup(self: Sample, group_id: []const u8) bool;
     pub fn stableKey(self: Sample) StableKey;
 };
@@ -176,6 +179,37 @@ pub const AnnotationTable = struct {
 
 pub fn merge(allocator: std.mem.Allocator, base: Annotations, extra: Annotations) error{OutOfMemory}!Annotations;
 pub fn resolve(table: *AnnotationTable, samples: []const Sample) error{OutOfMemory}!ResolveReport;
+
+// index.zig
+pub const Change = union(enum) {
+    created: []const u8,
+    removed: []const u8,
+    renamed: Renamed,                       // { from, to }
+    modified: Modified,                     // { path, mtime: ?i64 = null }
+    overflow: u32,                          // 丢了 N 条（0 = 未知）
+
+    pub const Renamed = struct { from: []const u8, to: []const u8 };
+    pub const Modified = struct { path: []const u8, mtime: ?i64 = null };
+};
+
+pub const ApplyReport = struct {
+    added: usize,
+    removed: usize,
+    renamed: usize,
+    modified: usize,
+    overflowed: bool,
+    overflow_lost: u32,                     // 本批 overflow 声称丢失的条数之和
+    invalidated: []const StableKey,         // modified 的那些（更新前的键）
+};
+
+pub const Index = struct {
+    pub fn init(allocator: std.mem.Allocator, library: *const store.Library) error{OutOfMemory}!Index;
+    pub fn deinit(self: *Index) void;
+    pub fn apply(self: *Index, changes: []const Change) error{OutOfMemory}!ApplyReport;
+    pub fn samples(self: *const Index) []const Sample;
+    pub fn isDirty(self: *const Index) bool;
+    pub fn clearDirty(self: *Index) void;
+};
 ```
 
 所有权约定：
@@ -232,6 +266,50 @@ identity 未评分（0）时才继承旧 fallback 的评分。`size` / `mtime` �
   UI 应据此提示「此素材的身份不稳定」；
 - 注释表本身还没有持久化格式（见「还没做的」）；换机 / 换卷时的导出导入不在本块。
 
+## 可变索引层（`Index`）
+
+`Library` 是「加载一次」的不可变真源；`Index` 是它之上的工作视图，把文件监听口岸的
+变更事件按到达顺序滚到样本行上：
+
+```
+Library  加载一次的不可变真源快照（只读）
+Index    事件流上滚动的工作视图（单线程）
+```
+
+`zig/core` **不认识 `zig/ports`**：`Change` 是数据层自己的事件类型，由 `zig/app`
+把监听口岸的 `watch.Event` 适配进来（定长路径槽 -> 切片，`lost` -> `overflow`）。
+适配器不在这里，两边各自定义事件类型，`core` 里没有平台代码。
+
+| 事件 | 处理 | 报告字段 |
+| --- | --- | --- |
+| `created` | 追加一条只有路径的样本：`file_name` / `file_ext` 从路径推导，`identity = null`、`pending_metadata = true`、`imported_at = 0`，不查磁盘 | `added` |
+| `removed` | 从视图移除；**不碰注释表**（注释键在身份上，删文件不删用户标签） | `removed` |
+| `renamed` | 只改路径与派生名；身份、id、顺序、分组、目录、mtime 全部保留，`stableKey()` 不变 | `renamed` |
+| `modified` | 更新 `mtime`（事件带了才更新），并把**更新前**的 `StableKey` 放进 `invalidated` | `modified` |
+| `overflow` | `isDirty = true`，不逐条处理 | `overflowed` / `overflow_lost` |
+
+几条容易踩的规则：
+
+- **视图顺序**：保持 `Library` 原顺序，新样本追加到末尾；删除用有序删除，不留空洞。
+- **`renamed` 找不到 `from`**：降级成 `created`（计入 `added`、不计 `renamed`），
+  新路径至少以样本形式出现在视图里；用户注释仍按身份命中。
+- **重复的 `created`**（同一路径已在视图里）：不产生第二条样本，按 `modified` 记账并作废缓存。
+- **改名覆盖同名目标**：目标路径上的陈旧条目按 `removed` 丢弃，保证一条路径只有一个样本。
+- **空路径事件**直接忽略：路径是定位样本的唯一键，空串什么都定位不了。
+- **`overflow` 之后仍然照常应用后续事件**：每条事件本身仍是有效事实，`dirty` 只表示
+  「中间可能有缺口」。重新加载 / 重建之后调 `clearDirty()`——它只清标志，不负责重建。
+
+所有权与有效期：
+
+- `Index` 借用 `Library`，`Library` 必须比 `Index` 活得久；
+- created / renamed 产生的路径与合成 id 由 `Index` 复制并持有，移除 / 改名 / `deinit`
+  时释放；`deinit` 之后 `samples()` 全部失效；
+- `ApplyReport.invalidated` 指向 `Index` 内部缓冲，有效期到下一次 `apply` 或 `deinit`；
+  退化键里的路径复制进本次 `apply` 专属的 arena，所以同一批里先 `modified` 后 `removed`
+  也不会悬空；
+- 路径查找是线性扫描：`Library` 的 `file_path` 不保证唯一，哈希表要么丢掉重复路径、
+  要么多一层下标维护。2000 条素材、每批几十条事件是微秒级；真到十万条再换索引。
+
 ## 兼容性决策
 
 规则参考 `electron/main/index.ts` 的 store defaults、`src/types/index.ts`、
@@ -283,7 +361,7 @@ identity 未评分（0）时才继承旧 fallback 的评分。`size` / `mtime` �
 
 ## 测试覆盖
 
-`zig build test` 共 37 个测试，其中：
+`zig build test` 共 58 个测试，其中：
 
 - `legacy_v1.json`：没有 `folderId` / `groupIds` 的旧数据补默认值、路径推导、扁平目录归位；
 - `dangling_refs.json`：目录 / 分组 / 父目录 / 排序表里的悬空引用全部清理并计数；
@@ -293,6 +371,10 @@ identity 未评分（0）时才继承旧 fallback 的评分。`size` / `mtime` �
 - 身份 / 注释：同一身份跨路径共用注释、无身份走 fallback 三元组、`resolve` 迁移与保留分支、
   `AnnotationTable` 的 put / 替换 / remove / 下标对齐、`merge` 并集与评分继承、
   JSON 有 / 没有 `identity` 都能加载、老 fixture 加载后 `identity` 全为 null；
+- 索引层：created 追加与派生名、removed 不动注释表、renamed 保身份 / id / 顺序 / `stableKey`、
+  modified 的 `invalidated`（更新前的键）、overflow 脏标记与 `clearDirty` 恢复、
+  混合批次计数与顺序、renamed 找不到来源的降级、重复 created、改名覆盖同名目标、
+  批内先 modified 后 removed 的键有效期；
 - 1000 条合成数据：只打印加载耗时，不做性能断言。
 
 ## 性能粗测
@@ -309,7 +391,12 @@ identity 未评分（0）时才继承旧 fallback 的评分。`size` / `mtime` �
 
 - **拼音 / 中文模糊搜索**：`src/utils/sampleSearch.ts` 的拼音与首字母匹配尚未移植。
 - **SQLite 持久化**：现在是「读 JSON → 内存模型」，写回与迁移留给后续。
-- **增量更新**：每次 `load` 都全量解析；没有 diff / 脏标记 / 局部重载。
+- **增量更新**：`Index` 已经能在事件流上滚动，但变更不落盘；每次启动仍是全量 `load`，
+  没有 diff / 局部重载。
+- **`Index` 与查询 / 目录的接线**：`query.*` 仍只吃 `Library` 快照；created 样本的
+  `folder_id` 为 null，也不会进入 `SampleFolder.sample_ids`，分组 / 目录关系不增量维护。
+- **`mtime` 的加载**：`store.load` 目前不解析 JSON 里的 `mtime`（字段保持 0），
+  `Index` 的 `modified` 能把它更新到视图里，但重启后又会回到 0。
 - **C ABI 查询接口**：静态库目前只导出 `otto_core_version` 冒烟符号，还没有面向
   Electron / Tauri 的句柄式查询 ABI。
 - **目录环修复**：环不会被检测并打断，只保证查询有界。

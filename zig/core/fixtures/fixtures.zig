@@ -7,3 +7,4 @@ pub const legacy_v1 = @embedFile("legacy_v1.json");
 pub const dangling_refs = @embedFile("dangling_refs.json");
 pub const duplicate_ids = @embedFile("duplicate_ids.json");
 pub const subfolders = @embedFile("subfolders.json");
+pub const index_events = @embedFile("index_events.json");
