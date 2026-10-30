@@ -69,7 +69,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(drag_library);
 
-    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出口岸单元与集成测试（真 Win32 + 真 Shell）");
+    // 库文件口岸：原子写（同目录 .tmp → sync → MoveFileExW）与带上限的整读。
+    // 容器格式在 core 的 library_binary.zig；本口岸只收发字节，所以不依赖 core。
+    const library_file_module = b.addModule("otto_library_file", .{
+        .root_source_file = b.path("src/library_file.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const library_file_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_library_file",
+        .root_module = library_file_module,
+    });
+    b.installArtifact(library_file_library);
+
+    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件口岸单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/watch_test.zig"),
@@ -122,4 +136,15 @@ pub fn build(b: *std.Build) void {
     const run_drag_tests = b.addRunArtifact(b.addTest(.{ .root_module = drag_test_module }));
     run_drag_tests.step.dependOn(&run_caps_tests.step);
     test_step.dependOn(&run_drag_tests.step);
+
+    // 库文件口岸最后跑：它只碰文件系统，不需要 COM / Shell，串行只是为了
+    // `--summary all` 的输出能直接贴。
+    const library_file_test_module = b.createModule(.{
+        .root_source_file = b.path("src/library_file_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_library_file_tests = b.addRunArtifact(b.addTest(.{ .root_module = library_file_test_module }));
+    run_library_file_tests.step.dependOn(&run_drag_tests.step);
+    test_step.dependOn(&run_library_file_tests.step);
 }

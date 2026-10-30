@@ -28,6 +28,7 @@ test {
     _ = @import("filter.zig");
     _ = @import("transport.zig");
     _ = @import("options.zig");
+    _ = @import("library_io.zig");
     _ = @import("mode.zig");
     _ = @import("version.zig");
     // 预览契约与注册表顺序；`providers/root.zig` 里的 comptime 检查也会在这里跑。

@@ -10,6 +10,8 @@
 //!   otto-lite --play-test <file>     音频试听自检（解码 + 播 300ms + 断言位置前进）
 //!   otto-lite --demo-transport       选择/路径/拖拽快照自检（不开窗、不碰剪贴板）
 //!   otto-lite --copy-now <file>      显式把 1 个文件写进剪贴板（CF_HDROP）
+//!   otto-lite --convert <in> <out>   旧 JSON → OTTOLIB v1（原子写，打印条数/字节数）
+//!   otto-lite --library-info <file>  按 magic 打印 format=json|otto 与条数/字节数
 //!
 //! 列表下方是一条固定高度的预览区（`preview_panel.zig`）：选中行变化时把样本交给
 //! 注册表，按 `Outcome` 的五个分支画图/文字/占位/原因；名称/大小/时长/路径是样本
@@ -42,12 +44,8 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
-const demo_preview = @import("demo_preview.zig");
-const demo_play = @import("demo_play.zig");
-const demo_filter = @import("demo_filter.zig");
-const demo_transport = @import("demo_transport.zig");
-const demo_thumbs = @import("demo_thumbs.zig");
-const demo_watch = @import("demo_watch.zig");
+const commands = @import("commands.zig");
+const library_io = @import("library_io.zig");
 const list_header = @import("list_header.zig");
 const live_mod = @import("live.zig");
 const mode_mod = @import("mode.zig");
@@ -462,75 +460,35 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
     const options = options_mod.parse(args) catch {
         std.debug.print(
-            "用法：otto-lite [library.json] [--watch <dir>] [--select=0,1]\n" ++
+            "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
                 "      otto-lite --version\n" ++
-                "      otto-lite [library.json] --filter=<text>\n" ++
+                "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
-                "      otto-lite --copy-now <file>\n",
+                "      otto-lite --copy-now <file>\n" ++
+                "      otto-lite --convert <in.json> <out.otto>\n" ++
+                "      otto-lite --library-info <file>\n",
             .{},
         );
         return error.InvalidArguments;
     };
 
-    // `--version` 不能碰库文件：便携版解压出来还没有 data\，安装版第一次启动也一样。
-    if (options.version_requested) {
-        const exe_path = try std.process.executablePathAlloc(init.io, allocator);
-        const mode = try mode_mod.detect(allocator, init.io, exe_path);
-        var line_buffer: [128]u8 = undefined;
-        const line = try version_mod.versionLine(&line_buffer, mode.label());
-        try std.Io.File.stdout().writeStreamingAll(init.io, line);
-        return;
-    }
-
-    // 选择/拖拽快照/参数校验自检：不开窗，也不碰剪贴板。
-    if (options.demo_transport) {
-        const code = try demo_transport.run(init, allocator);
-        if (code != 0) std.process.exit(code);
-        return;
-    }
-
-    // 真正写剪贴板只走这条显式命令（用户点名的文件）。
-    if (options.copy_now) |path| {
-        const code = transport_mod.copyNow(init.gpa, path);
-        if (code != 0) std.process.exit(code);
-        return;
-    }
-
-    // 取图自检：完全不开窗，也不碰 nanoui。
-    if (options.demo_thumbs_dir) |dir_path| {
-        const code = try demo_thumbs.run(init, init.gpa, dir_path);
-        if (code != 0) std.process.exit(code);
-        return;
-    }
-
-    if (options.demo_dir) |dir_path| return demo_watch.run(init, allocator, dir_path);
-
-    // 预览注册表自检：和 UI 走同一个 registry，但不开窗、不碰 nanoui。
-    if (options.preview_path) |path| {
-        const code = try demo_preview.run(init, init.gpa, path);
-        if (code != 0) std.process.exit(code);
-        return;
-    }
-
-    // 音频试听自检：真解码、真播放、真 sleep；没有端点时以 0 退出。
-    if (options.play_test_path) |path| {
-        const code = try demo_play.run(init, init.gpa, path);
-        if (code != 0) std.process.exit(code);
-        return;
-    }
-
-    // 过滤自检：不开窗，载入库 → 用 UI 同一条匹配规则过滤 → 打印命中数。
-    if (options.filter) |needle| {
-        const path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
-        const code = try demo_filter.run(init, allocator, path, needle);
+    // 所有不开窗的模式（--version / 自检 / 转换 / 查库）都在这里返回；
+    // null 才继续走 UI。顺序与实现见 `commands.zig`。
+    if (try commands.run(init, allocator, options)) |code| {
         if (code != 0) std.process.exit(code);
         return;
     }
 
     // 位置参数优先；没有就按运行形态给默认库（见文件头）。
+    // 格式按文件头判断：`.otto` 走 OTTOLIB，其余走 electron-store JSON。
     const library_path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
-    const library = try core.store.loadCwdFile(allocator, init.io, library_path);
+    const library = library_io.load(init, allocator, library_path) catch |err| {
+        // 损坏的库（BadMagic / UnknownVersion / Truncated / ChecksumMismatch）在
+        // 这里给一行具名错误，而不是把 Zig 调用栈甩给用户。
+        std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ library_path, @errorName(err) });
+        std.process.exit(1);
+    };
     const root = try watchRoot(init, allocator, options, library_path);
 
     // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。

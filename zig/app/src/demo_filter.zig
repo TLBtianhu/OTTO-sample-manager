@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const core = @import("otto_core");
+const library_io = @import("library_io.zig");
 
 pub fn run(
     init: std.process.Init,
@@ -15,7 +16,8 @@ pub fn run(
     library_path: []const u8,
     needle: []const u8,
 ) !u8 {
-    var library = try core.store.loadCwdFile(allocator, init.io, library_path);
+    // 与 UI 用同一个打开入口：按文件头判断 JSON / OTTOLIB，不看扩展名。
+    var library = try library_io.load(init, allocator, library_path);
     defer library.deinit();
 
     const rows = try core.query.matchingIndices(allocator, library.samples, needle);
