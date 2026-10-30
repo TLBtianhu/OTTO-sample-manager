@@ -32,3 +32,8 @@ tools/dnd-research/logs/*.png
 zig/keys/*.key
 *.key.enc
 zig/dist/
+
+# 第三方库的构建缓存不属于仓库（vendor 现在是普通文件）
+zig/vendor/**/.zig-cache/
+zig/vendor/**/zig-out/
+zig/vendor/**/zig-pkg/
