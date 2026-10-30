@@ -29,3 +29,5 @@ tools/dnd-research/logs/*.png
 !tools/dnd-research/logs/melodyne-x64-preset-A-20260811-171905.log
 !tools/dnd-research/logs/default-electron-path-20260811-230453.log
 !tools/dnd-research/logs/verified-fix-20260811.log
+zig/keys/*.key
+*.key.enc
