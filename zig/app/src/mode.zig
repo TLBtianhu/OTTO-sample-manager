@@ -155,6 +155,23 @@ pub fn cacheDirFor(allocator: std.mem.Allocator, data_dir: ?[]const u8) !?[]u8 {
     return try std.fs.path.join(allocator, &.{ base, "cache", "thumbs" });
 }
 
+/// 文件监听根：`--watch` 优先，否则用解析后的库文件所在目录；都解析成绝对路径，
+/// 保证 join 出来的路径能和库里的 `filePath` 按字节比较。
+///
+/// 从 `main.zig` 挪到这里：`main` 要保持 ≤600 行（`--bench-first-frame` 的接线
+/// 也要占几行），而"库路径 → 监听根"本来就是运行形态的一部分。
+pub fn watchRoot(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    watch_dir: ?[]const u8,
+    library_path: []const u8,
+) ![]const u8 {
+    const cwd = std.Io.Dir.cwd();
+    if (watch_dir) |dir| return try cwd.realPathFileAlloc(io, dir, allocator);
+    const parent = std.fs.path.dirname(library_path) orelse ".";
+    return try cwd.realPathFileAlloc(io, parent, allocator);
+}
+
 /// 启动时的 L3 缓存目录：按运行形态取 dataDir 再拼 `cache/thumbs`。
 /// dev 返回 null；其它形态拿不到 dataDir（例如 installed 没有 %APPDATA%）也返回
 /// null——缓存只是加速层，不值得让启动失败。

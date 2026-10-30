@@ -54,6 +54,13 @@ pub const Options = struct {
     disk_cache_budget_bytes: u64 = 256 * 1024 * 1024,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,
+    /// `--bench <library>`：宪章六项性能基准，打印一张表后退出（不开窗）。
+    bench: ?[]const u8 = null,
+    /// `--bench-samples <dir>`：缩略图 / 音频基准用的真实素材目录。
+    bench_samples: ?[]const u8 = null,
+    /// `--bench-first-frame`：只建一次离屏首帧并打印耗时（由 `--bench` 起的
+    /// 子进程使用；用户一般不用直接调）。
+    bench_first_frame: bool = false,
 };
 
 pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
@@ -169,6 +176,20 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.thumb_bench_dir = args[index];
         } else if (std.mem.startsWith(u8, arg, "--thumb-bench=")) {
             options.thumb_bench_dir = arg["--thumb-bench=".len..];
+        } else if (std.mem.eql(u8, arg, "--bench")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.bench = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--bench=")) {
+            options.bench = arg["--bench=".len..];
+        } else if (std.mem.eql(u8, arg, "--bench-samples")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.bench_samples = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--bench-samples=")) {
+            options.bench_samples = arg["--bench-samples=".len..];
+        } else if (std.mem.eql(u8, arg, "--bench-first-frame")) {
+            options.bench_first_frame = true;
         } else if (!std.mem.startsWith(u8, arg, "--")) {
             options.library_path = arg;
         }

@@ -46,6 +46,7 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
+const bench_mod = @import("bench.zig");
 const commands = @import("commands.zig");
 const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
@@ -494,6 +495,9 @@ const State = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    // `--bench` 的子进程用这个时间戳量"main 入口 → 第一帧建完"；普通启动只多一次
+    // 单调时钟读取。
+    const started = std.Io.Clock.Timestamp.now(init.io, .awake);
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     const options = options_mod.parse(args) catch {
@@ -503,6 +507,7 @@ pub fn main(init: std.process.Init) !void {
                 "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
                 "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
                 "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
+                "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n" ++
                 "      otto-lite --convert <in.json> <out.otto>\n" ++
@@ -535,7 +540,7 @@ pub fn main(init: std.process.Init) !void {
         library.deinit();
         init.gpa.destroy(library);
     }
-    const root = try watchRoot(init, allocator, options, library_path);
+    const root = try mode_mod.watchRoot(allocator, init.io, options.watch_dir, library_path);
     // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。
     var live = try init.gpa.create(live_mod.Live);
     errdefer init.gpa.destroy(live);
@@ -573,28 +578,23 @@ pub fn main(init: std.process.Init) !void {
     if (options.select) |text| state.seedSelection(text);
     var title_buffer: [96]u8 = undefined;
     const title = version_mod.windowTitle(&title_buffer, state.samples.len);
+    // `--bench-first-frame` 是离屏探针：不建真实 HWND，也不 show。
+    if (options.bench_first_frame) app.gui = false;
     state.window = try app.newWindow(.{
         .title = title,
         .width = 380,
         .height = 700,
         .content = .{ .view = .init(&state, State.view) },
     });
+    if (options.bench_first_frame) {
+        try bench_mod.firstFrame(init, app, started);
+        // 一次性探针：打印完就退出，不 join 缩略图/预览工作线程。它们可能正在
+        // Shell 里做冷启动的第一次取图；收尾时间不能算进"首帧墙钟"，否则量到的
+        // 是"首帧 + 关窗"。
+        std.process.exit(0);
+    }
     // snapshot 模式没有消息循环，定时器不会跑到；离屏出图只画初始视图。
     // 想看到后台取到的图，加 `--nanoui-wait=<秒>`：事件循环会跑、tick 会重画。
     nanoui.App.after(tick_ms, &state, State.tick);
     try app.run();
-}
-
-/// 监听根：`--watch` 优先，否则用解析后的库文件所在目录；都解析成绝对路径，保证
-/// join 出来的路径能和库里的 `filePath` 按字节比较。
-fn watchRoot(
-    init: std.process.Init,
-    allocator: std.mem.Allocator,
-    options: options_mod.Options,
-    library_path: []const u8,
-) ![]const u8 {
-    const cwd = std.Io.Dir.cwd();
-    if (options.watch_dir) |dir| return try cwd.realPathFileAlloc(init.io, dir, allocator);
-    const parent = std.fs.path.dirname(library_path) orelse ".";
-    return try cwd.realPathFileAlloc(init.io, parent, allocator);
 }
