@@ -1,0 +1,96 @@
+{
+  "samples": {
+    "s1": {
+      "id": "s1",
+      "fileName": "Kick",
+      "fileExt": ".wav",
+      "filePath": "D:/a/Kick.wav",
+      "folderId": "f_missing",
+      "groupIds": [
+        "g_ok",
+        "g_missing"
+      ],
+      "importedAt": 10
+    },
+    "s2": {
+      "id": "s2",
+      "fileName": "Snare",
+      "fileExt": ".wav",
+      "filePath": "D:/a/b/Snare.wav",
+      "folderId": "f_root",
+      "groupIds": [],
+      "importedAt": 20
+    }
+  },
+  "groups": {
+    "g_ok": {
+      "id": "g_ok",
+      "name": "OK",
+      "color": "#ffffff",
+      "sampleIds": [
+        "s1",
+        "ghost_sample",
+        "s1"
+      ]
+    },
+    "g_empty": {
+      "id": "g_empty",
+      "name": "Empty",
+      "sampleIds": [
+        "ghost_sample"
+      ]
+    }
+  },
+  "folderState": {
+    "folders": {
+      "f_root": {
+        "id": "f_root",
+        "name": "Root",
+        "path": "D:/a",
+        "sampleIds": [
+          "s2",
+          "ghost_sample",
+          "s2"
+        ],
+        "childFolderIds": [
+          "f_child",
+          "f_missing"
+        ],
+        "parentId": null
+      },
+      "f_child": {
+        "id": "f_child",
+        "name": "Child",
+        "path": "D:/a/b",
+        "sampleIds": [
+          "s2"
+        ],
+        "childFolderIds": [],
+        "parentId": "f_root"
+      },
+      "f_orphan": {
+        "id": "f_orphan",
+        "name": "Orphan",
+        "path": "D:/x",
+        "parentId": "f_missing",
+        "rootId": "f_missing",
+        "depth": 3,
+        "sampleIds": [
+          "ghost_sample"
+        ]
+      }
+    },
+    "folderOrder": [
+      "f_root",
+      "f_missing",
+      "f_root",
+      "f_orphan",
+      "f_child"
+    ]
+  },
+  "groupOrder": [
+    "g_ok",
+    "g_missing",
+    "g_ok"
+  ]
+}
