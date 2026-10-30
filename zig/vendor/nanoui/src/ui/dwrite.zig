@@ -39,6 +39,44 @@ const GlyphRun = extern struct {
 const Key = struct { face: usize, simulations: u32 };
 pub const Bitmap = struct { bytes: []const u8, rgb: []const u8, w: u32, h: u32, stride: u32, x: f32, y: f32 };
 
+/// An `IUnknown` whose only job is to let DirectWrite use our font bytes **in
+/// place**: `CreateInMemoryFontFileReference` copies the whole file when its
+/// owner is null, and a CJK collection is ~20 MB — a copy of it is the single
+/// biggest avoidable private allocation a Windows window used to make.
+///
+/// Lifetime: the owner is a global that is never freed (it holds nothing); the
+/// byte slice DirectWrite borrows is a face in `fontdb`, which outlives every
+/// face here (`TextSystem.deinit` releases the atlas' faces before `db.deinit`).
+const Owner = extern struct {
+    vtable: [*]const *const anyopaque,
+    refs: u32 = 1,
+};
+
+var owner_vtable: [3]*const anyopaque = .{
+    @ptrCast(&ownerQuery),
+    @ptrCast(&ownerAddRef),
+    @ptrCast(&ownerRelease),
+};
+var font_owner: Owner = .{ .vtable = &owner_vtable };
+
+fn ownerQuery(self: *Owner, iid: *const Guid, out: *?*anyopaque) callconv(.winapi) i32 {
+    const unknown: Guid = .{ .a = 0, .b = 0, .c = 0, .d = .{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+    if (std.meta.eql(iid.*, unknown)) {
+        out.* = @ptrCast(self);
+        return 0;
+    }
+    out.* = null;
+    return @bitCast(@as(u32, 0x80004002)); // E_NOINTERFACE
+}
+
+fn ownerAddRef(self: *Owner) callconv(.winapi) u32 {
+    return @atomicRmw(u32, &self.refs, .Add, 1, .monotonic) + 1;
+}
+
+fn ownerRelease(self: *Owner) callconv(.winapi) u32 {
+    return @atomicRmw(u32, &self.refs, .Sub, 1, .monotonic) - 1;
+}
+
 pub const Cache = struct {
     unavailable: bool = false,
     factory: ?*Com = null,
@@ -126,9 +164,10 @@ pub const Cache = struct {
         const factory = self.factory.?;
         const loader = self.loader.?;
         var file: ?*Com = null;
-        // A null owner makes DirectWrite own a copy of the bytes, independent
-        // of the font database's lifetime. No GDI family-name substitution.
-        if (loader.method(4, *const fn (*Com, *Com, [*]const u8, u32, ?*Com, *?*Com) callconv(.winapi) i32)(loader, factory, rf.font.data.ptr, @intCast(rf.font.data.len), null, &file) < 0) return error.DirectWriteFontFile;
+        // A non-null owner is what stops DirectWrite copying the bytes: it
+        // borrows them for as long as the file (and its faces) live, which the
+        // owner below makes safe. No GDI family-name substitution either way.
+        if (loader.method(4, *const fn (*Com, *Com, [*]const u8, u32, ?*Com, *?*Com) callconv(.winapi) i32)(loader, factory, rf.font.data.ptr, @intCast(rf.font.data.len), @ptrCast(&font_owner), &file) < 0) return error.DirectWriteFontFile;
         const ff = file orelse return error.DirectWriteFontFile;
         defer ff.release();
         var supported: i32 = 0;

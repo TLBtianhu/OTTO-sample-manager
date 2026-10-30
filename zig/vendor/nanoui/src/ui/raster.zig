@@ -92,7 +92,7 @@ const Band = struct {
     region: [4]usize,
 
     const thread_limit = 16;
-    /// Fewer pixels than this a thread: not worth starting one.
+    /// Fewer pixels than this a thread: not worth its 512 KiB stack (std.Thread: 16 MiB).
     const min_pixels = 1 << 17;
 
     fn rows(job: Band, y0: usize, y1: usize) void {
@@ -113,7 +113,7 @@ const Band = struct {
         for (1..n) |k| {
             const y0 = job.region[1] + height * k / n;
             const y1 = job.region[1] + height * (k + 1) / n;
-            started[k] = std.Thread.spawn(.{}, Band.rows, .{ job, y0, y1 }) catch blk: {
+            started[k] = std.Thread.spawn(.{ .stack_size = 512 << 10 }, Band.rows, .{ job, y0, y1 }) catch blk: {
                 job.rows(y0, y1);
                 break :blk null;
             };

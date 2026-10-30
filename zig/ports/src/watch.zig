@@ -251,7 +251,10 @@ pub const Watcher = struct {
         if (!win.supported) return error.Unsupported;
         self.os.resetForStart();
         self.running.store(true, .release);
-        self.thread = std.Thread.spawn(.{}, threadMain, .{self}) catch |err| {
+        // 1 MiB of stack, not std.Thread's default 16 MiB: this thread only calls
+        // ReadDirectoryChangesW and copies a few paths, and the difference is
+        // commit charge (`memory: 线程栈` in PERF.md), not just reserve.
+        self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, threadMain, .{self}) catch |err| {
             self.running.store(false, .release);
             return err;
         };

@@ -58,6 +58,8 @@ pub const Surface = struct {
         const gpa = window.app.gpa;
         const self = try gpa.create(Surface);
         self.* = .{ .gpa = gpa, .window = window, .text = .init(gpa), .ctx = undefined, .view = view, .theme_override = theme_override, .start_time = clock.now() };
+        // `--gdi` (and hosts that ask for it): no D3D device, present through GDI.
+        self.no_d3d = window.app.options.gdi;
         self.text.db.cache_path = window.app.options.font_cache;
         self.text.db.fonts_dir = window.app.options.fonts_dir;
         self.ctx = .init(gpa, &self.text);

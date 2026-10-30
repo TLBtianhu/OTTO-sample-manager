@@ -61,6 +61,13 @@ pub const Options = struct {
     /// `--bench-first-frame`：只建一次离屏首帧并打印耗时（由 `--bench` 起的
     /// 子进程使用；用户一般不用直接调）。
     bench_first_frame: bool = false,
+    /// `--mem-probe`：真实窗口形态的常驻内存分解（隐藏窗口，见 `mem_probe.zig`）。
+    mem_probe: bool = false,
+    /// `--mem-probe-idle=<秒>`：探针最后一段"空闲"要观察多久（默认 10 秒）。
+    mem_probe_idle: f64 = 10,
+    /// `--d3d`：用 D3D11 翻转交换链上屏（旧行为：有 vsync，但设备 + 驱动 DLL 要
+    /// ~29 MiB 常驻）。默认走 GDI 直接上屏，见 `mem_probe.zig` 的实测与 PERF.md。
+    d3d: bool = false,
     /// `--check-update <url>`：无窗口检查一次 feed，打印结果并退出 0/1。
     check_update: ?[]const u8 = null,
     /// `--update-url <url>`：表头「检查更新」用的 feed 地址。
@@ -195,6 +202,12 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.bench_samples = arg["--bench-samples=".len..];
         } else if (std.mem.eql(u8, arg, "--bench-first-frame")) {
             options.bench_first_frame = true;
+        } else if (std.mem.eql(u8, arg, "--mem-probe")) {
+            options.mem_probe = true;
+        } else if (std.mem.eql(u8, arg, "--d3d")) {
+            options.d3d = true;
+        } else if (std.mem.startsWith(u8, arg, "--mem-probe-idle=")) {
+            options.mem_probe_idle = std.fmt.parseFloat(f64, arg["--mem-probe-idle=".len..]) catch 10;
         } else if (std.mem.eql(u8, arg, "--check-update")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -219,6 +232,28 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
 fn kibToBytes(text: []const u8) error{InvalidValue}!u64 {
     const kib = std.fmt.parseInt(u64, text, 10) catch return error.InvalidValue;
     return kib *| 1024;
+}
+
+/// 命令行用法。放在这里（而不是 `main.zig`）是为了让 `main` 保持在 600 行以内：
+/// 这段是纯数据，和解析器贴身放也不会漂移。
+pub fn printUsage() void {
+    std.debug.print(
+        "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
+            "      otto-lite --version\n" ++
+            "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
+            "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
+            "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
+            "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
+            "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
+            "      otto-lite --preview <file> | --play-test <file>\n" ++
+            "      otto-lite --copy-now <file>\n" ++
+            "      otto-lite --convert <in.json> <out.otto>\n" ++
+            "      otto-lite --library-info <file>\n" ++
+            "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n" ++
+            "      otto-lite --import-into <folder> [--save <file>]\n" ++
+            "      otto-lite --check-update <url> | <library> --update-url <url>\n",
+        .{},
+    );
 }
 
 // ---------------------------------------------------------------------------

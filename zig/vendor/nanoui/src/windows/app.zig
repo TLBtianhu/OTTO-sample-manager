@@ -17,6 +17,11 @@ pub const Options = struct {
     /// scan runs every start, as before.
     font_cache: ?[]const u8 = null,
     fonts_dir: ?[]const u8 = null,
+    /// Draw frames straight to the window with GDI instead of making a D3D11
+    /// device and flip swap chain. No vsync and no GPU uploads, but a D3D
+    /// device costs tens of megabytes (driver DLLs and threads) that a small
+    /// utility window may not want to pay. `--mem-probe --gdi` measures both.
+    gdi: bool = false,
     // The macOS app's hooks, accepted here and not called yet.
     ctx: ?*anyopaque = null,
     on_open_urls: ?*const fn (ctx: ?*anyopaque, urls: []const []const u8) void = null,

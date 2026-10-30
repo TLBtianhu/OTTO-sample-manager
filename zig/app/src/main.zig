@@ -29,6 +29,7 @@ const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
 const list_header = @import("list_header.zig");
 const live_mod = @import("live.zig");
+const mem_probe = @import("mem_probe.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
@@ -492,22 +493,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     const options = options_mod.parse(args) catch {
-        std.debug.print(
-            "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
-                "      otto-lite --version\n" ++
-                "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
-                "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
-                "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
-                "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
-                "      otto-lite --preview <file> | --play-test <file>\n" ++
-                "      otto-lite --copy-now <file>\n" ++
-                "      otto-lite --convert <in.json> <out.otto>\n" ++
-                "      otto-lite --library-info <file>\n" ++
-                "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n" ++
-                "      otto-lite --import-into <folder> [--save <file>]\n" ++
-                "      otto-lite --check-update <url> | <library> --update-url <url>\n",
-            .{},
-        );
+        options_mod.printUsage();
         return error.InvalidArguments;
     };
 
@@ -517,6 +503,9 @@ pub fn main(init: std.process.Init) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
+    // `--mem-probe`：真实窗口形态的内存分解（隐藏窗口，见 `mem_probe.zig`）。
+    // 没开时 `begin` / `mark` 都只是一次 bool 判断，不读内存。
+    var probe = mem_probe.Probe.begin(init, options);
 
     // 位置参数优先；没有就按运行形态给默认库（见文件头）。
     // 格式按文件头判断：`.otto` 走 OTTOLIB，其余走 electron-store JSON。
@@ -529,6 +518,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     trace.mark("setup.library");
+    probe.mark("library", .{});
     defer {
         library.deinit();
         init.gpa.destroy(library);
@@ -552,8 +542,13 @@ pub fn main(init: std.process.Init) !void {
     const panel = try preview_panel.Panel.init(init.gpa, init.io, &preview_providers.registry, .{});
     defer panel.deinit();
     // 字体索引只写进数据目录形态（portable/installed）；dev 传 null → 每次重扫。
-    const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null });
+    // 上屏：默认 GDI（`--mem-probe` 实测比 D3D11 翻转交换链少 29 MiB 常驻、
+    // present 便宜一个数量级）；`--d3d` 回到旧的 D3D 路径（要 vsync 时用）。
+    const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });
     trace.mark("setup.app");
+    // 探针窗口必须隐藏：不弹窗、不抢焦点、不进任务栏。
+    if (probe.active) app.flags.hidden = true;
+    probe.mark("app", .{});
     defer app.destroy();
     var state = State{
         .gpa = init.gpa,
@@ -585,6 +580,7 @@ pub fn main(init: std.process.Init) !void {
         .content = .{ .view = .init(&state, State.view) },
     });
     trace.mark("setup.window");
+    probe.mark("window", .{ .window = state.window, .thumbs = thumbs });
     if (options.bench_first_frame) {
         try bench_mod.firstFrame(init, app, started);
         // 一次性探针：打印完就退出，不 join 缩略图/预览工作线程。它们可能正在
@@ -595,5 +591,7 @@ pub fn main(init: std.process.Init) !void {
     // snapshot 模式没有消息循环，定时器不会跑到；离屏出图只画初始视图。
     // 想看到后台取到的图，加 `--nanoui-wait=<秒>`：事件循环会跑、tick 会重画。
     nanoui.App.after(tick_ms, &state, State.tick);
+    // 探针：D3D、8/50/100 张缩略图、空闲 10 秒，打完表就退出（不 join 工作线程）。
+    if (probe.active) probe.finish(state.window.?, thumbs);
     try app.run();
 }

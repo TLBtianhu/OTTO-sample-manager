@@ -145,7 +145,9 @@ pub const Panel = struct {
             .max_px = @max(1, options.max_px),
             .height = @max(80, options.height),
         };
-        self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch |err| {
+        // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：这个线程只做解码与文本布局，
+        // 少掉的 15 MiB 是**提交**，`--mem-probe` 的 private 列能看到。
+        self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, workerMain, .{self}) catch |err| {
             self.* = undefined;
             return err;
         };
