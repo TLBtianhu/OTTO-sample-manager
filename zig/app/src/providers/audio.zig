@@ -6,11 +6,12 @@
 //!      采样率/声道/位深在 L1 元数据里可能是 0/旧值，而解码层本来就支持任意采样率、
 //!      1/2/N 声道（N>2 下混）与 8/16/24/32 位 + float32——没有哪条元数据能让
 //!      "这个 wav 一定播不了"，所以不值得为它读文件。
-//!   2. `open`：读文件 → `wav.decode` → `Player.create`（设备初始化）→ `AudioSession`。
-//!      文件不在 → `none.file_missing`；解码失败 / 没有音频端点 / 设备初始化失败
-//!      → `none.failed`。**`none.*` 是谢绝**：注册表会继续问 Shell 缩略图兜底。
+//!   2. `open`：读文件 → `wav.decode` → 算波形峰值 → 渲染波形位图 → `Player.create`
+//!      （设备初始化）→ `AudioSession`。文件不在 → `none.file_missing`；解码失败 /
+//!      没有音频端点 / 设备初始化失败 → `none.failed`。**`none.*` 是谢绝**：
+//!      注册表会继续问 Shell 缩略图兜底。
 //!   3. 把 `AudioSession` 交给视图；播放/停止/position 都在 `preview.AudioSession`
-//!      的方法里，视图不认识 WASAPI。
+//!      的方法里，波形是会话里一张已经画好的位图，视图不认识 WASAPI，也不认识解码。
 //!
 //! 为什么排在 `shell-thumbnail` 前面（`providers/root.zig`）：顺序表达偏好——
 //! 能播就播；thumb 的静态图不该抢在"真的能试听"前面。谢绝语义保证音频失败时
@@ -23,9 +24,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("otto_core");
 const audio_file = @import("../audio/file.zig");
+const peaks_mod = @import("../audio/peaks.zig");
 const player = @import("../audio/player.zig");
 const wav = @import("../audio/wav.zig");
+const waveform = @import("../audio/waveform.zig");
 const preview = @import("../preview.zig");
+
+/// 波形位图尺寸（像素），默认值在 `audio/waveform.zig`：240 是预览条整条区域的
+/// 可用宽度，56 画得下包络又给播放键与两行事实留出纵向空间。
+const wave_width: u32 = waveform.default_width;
+const wave_height: u32 = waveform.default_height;
 
 /// 注册表里的这一项。`kind = .audio`：产出可播放的会话。
 pub const provider: preview.Provider = .{
@@ -47,12 +55,34 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) (audio_file.Error ||
     return wav.decode(allocator, bytes);
 }
 
-/// 解码结果 → 可播放会话。成功时 **PCM 的所有权转移** 给会话（`decoded.pcm` 置空），
-/// 播放线程在 `Player` 里；失败时 `decoded` 仍归调用方，可以安全 deinit。
+/// 解码结果 → 可播放会话（外加波形）。成功时 **PCM 的所有权转移** 给会话
+/// （`decoded.pcm` 置空），播放线程在 `Player` 里；失败时 `decoded` 仍归调用方，
+/// 可以安全 deinit。
+///
+/// 波形在**这里**算一次并存进会话：`--preview` / `--play-test` / UI 三条路径拿到
+/// 的是同一张位图，播放时每帧重画只读它，不重新解码、不重新算峰值。
 pub fn sessionFromWav(
     allocator: std.mem.Allocator,
     decoded: *wav.Wav,
 ) player.Error!preview.AudioSession {
+    const peaks = try peaks_mod.compute(
+        allocator,
+        decoded.pcm,
+        decoded.channels,
+        decoded.bits,
+        decoded.format,
+        peaks_mod.default_buckets,
+    );
+    errdefer peaks.deinit(allocator);
+    const bitmap = try waveform.render(
+        allocator,
+        peaks,
+        wave_width,
+        wave_height,
+        waveform.default_color,
+    );
+    errdefer bitmap.deinit(allocator);
+
     const created = try player.Player.create(
         allocator,
         decoded.pcm,
@@ -69,6 +99,8 @@ pub fn sessionFromWav(
         .duration_ms = decoded.duration_ms,
         .position_ms = 0,
         .player = created,
+        .peaks = peaks,
+        .waveform = bitmap,
     };
     // 所有权已经交给会话；调用方的 `decoded.deinit` 之后只会释放空切片。
     decoded.pcm = &.{};

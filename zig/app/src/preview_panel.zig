@@ -37,13 +37,14 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const preview = @import("preview.zig");
-const player_mod = @import("audio/player.zig");
+const preview_audio = @import("preview_audio.zig");
 const sample_facts = @import("sample_facts.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
 const ui = nanoui.ui;
 
-/// 预览条高度（点）。任务要求 120–160；150 = 96 图位 + 两行事实 + 内边距/间隔。
-pub const default_height: f32 = 150;
+/// 预览条高度（点）。任务要求 120–160；160 = 96 图位 + 两行事实 + 内边距/间隔，
+/// 再给音频分支的波形（56 点 + 两行格式）留出纵向空间——150 会差 10 点。
+pub const default_height: f32 = 160;
 
 /// 图位边长（点）。
 const slot_side: f32 = 96;
@@ -249,8 +250,17 @@ pub const Panel = struct {
             ) catch "?",
             .audio => |session| std.fmt.bufPrint(
                 buffer,
-                "provider={s} audio {d}Hz ch={d} bits={d} {d}ms",
-                .{ provider, session.sample_rate, session.channels, session.bits, session.duration_ms },
+                "provider={s} audio {d}Hz ch={d} bits={d} {d}ms peaks={d} wave={d}x{d}",
+                .{
+                    provider,
+                    session.sample_rate,
+                    session.channels,
+                    session.bits,
+                    session.duration_ms,
+                    session.peaks.len(),
+                    session.waveform.width,
+                    session.waveform.height,
+                },
             ) catch "?",
             .frames => std.fmt.bufPrint(buffer, "provider={s} frames(placeholder)", .{provider}) catch "?",
             .none => |reason| std.fmt.bufPrint(
@@ -338,7 +348,14 @@ pub const Panel = struct {
                     .leading = 1.1,
                 });
             },
-            .audio => |*session| self.drawAudio(c, session),
+            // 音频分支的全部内容（标题、播放键、格式/时长、波形图 + 进度线）在
+            // `preview_audio.zig`：这里只把会话递过去，视图仍然不认识媒体类型。
+            .audio => |*session| preview_audio.draw(c, session, self.current_provider, .{
+                // 位图的 key 来自当前选中行的指纹；播放时只动进度线，像素不重传。
+                .path = self.requested_path orelse "?",
+                .mtime = self.requested_mtime,
+                .size = self.requested_size,
+            }),
             .frames => {
                 self.caption(c, "帧预览");
                 ui.text(c, "帧预览待接入", .{ .size = 13, .color = c.theme.text });
@@ -349,47 +366,6 @@ pub const Panel = struct {
                 ui.text(c, reasonText(reason), .{ .size = 13, .color = c.theme.text });
                 ui.text(c, reasonDetail(reason), .{ .size = 10, .color = c.theme.muted, .wrap = true });
             },
-        }
-    }
-
-    /// 音频分支：格式 + 时长 + 播放/停止。视图只读会话的原子位置；`play()/stop()`
-    /// 由 UI 线程投递命令，设备与播放线程都在 `audio/player.zig` 里。
-    fn drawAudio(self: *Panel, c: *ui.Context, session: *preview.AudioSession) void {
-        self.caption(c, "音频预览");
-        ui.textf(c, .{ .size = 13 }, "{d} Hz · {d} 声道 · {d} 位", .{
-            session.sample_rate,
-            session.channels,
-            session.bits,
-        });
-        ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "时长 {d}.{d:0>3} 秒 · {d} 字节 PCM", .{
-            session.duration_ms / 1000,
-            session.duration_ms % 1000,
-            session.pcm.len,
-        });
-
-        const row = ui.div(c).row().gap(10).itemsCenter();
-        defer row.end();
-
-        const playing = session.isPlaying();
-        const button = ui.button(c, if (playing) "停止" else "播放", .{ .size = 11 });
-        if (button.clicked) {
-            if (playing) {
-                session.stop();
-            } else {
-                session.play() catch |err| {
-                    std.debug.print(
-                        "otto-lite: 音频播放失败（{s} hresult=0x{x:0>8}）\n",
-                        .{ @errorName(err), @as(u32, @bitCast(player_mod.lastHresult())) },
-                    );
-                };
-            }
-            c.changed = true;
-        }
-        if (playing) {
-            ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "{d} / {d} ms", .{
-                session.positionMs(),
-                session.duration_ms,
-            });
         }
     }
 

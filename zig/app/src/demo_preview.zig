@@ -78,9 +78,21 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u
             );
         },
         .audio => |session| {
+            // 波形也打出来：`peaks=` 是桶数，`waveform=` 是那张 BGRA 位图的尺寸，
+            // `bytes=` 是它的字节数——一行就能核对"解码后确实算了峰值、也渲染了"。
             std.debug.print(
-                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d}\n",
-                .{ session.sample_rate, session.channels, session.bits, session.duration_ms, session.pcm.len },
+                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} waveform={d}x{d} bytes={d}\n",
+                .{
+                    session.sample_rate,
+                    session.channels,
+                    session.bits,
+                    session.duration_ms,
+                    session.pcm.len,
+                    session.peaks.len(),
+                    session.waveform.width,
+                    session.waveform.height,
+                    session.waveform.byteLen(),
+                },
             );
         },
         .frames => std.debug.print("preview: outcome=frames (placeholder: 待接入)\n", .{}),

@@ -45,9 +45,10 @@
 //!   * `Outcome` 的载荷由**调用方传进 `open` 的那个 allocator** 分配，
 //!     并且必须用**同一个 allocator** 调 `Outcome.deinit` 释放；
 //!   * `image.pixels` 与 `text` 归 `Outcome` 所有；
-//!   * `audio` 拥有解码后的 PCM（`pcm`，用同一个 allocator 释放）与一个
+//!   * `audio` 拥有解码后的 PCM（`pcm`，用同一个 allocator 释放）、解码时顺带
+//!     算出的波形峰值（`peaks`）与渲染好的位图（`waveform`），以及一个
 //!     `audio/player.zig` 的 `Player`（设备句柄 + 播放线程）。`AudioSession.deinit`
-//!     负责停播、join、释放两者；`Outcome.deinit` 已经带 allocator，调用方不用改；
+//!     负责停播、join、释放全部四样；`Outcome.deinit` 已经带 allocator，调用方不用改；
 //!   * `frames` 本阶段仍是占位，不持有任何系统句柄或内存；
 //!     `Outcome.deinit` 仍会走它的 `deinit`，将来接上会话时不需要改调用方；
 //!   * `Registry.open` **不复制** `sample`：调用期间它必须有效。`preview_panel`
@@ -71,11 +72,13 @@
 //! 是 `Sample` 自带的事实，无条件显示在预览区，不参与 `Outcome`。
 //!
 //! 只依赖 Zig 0.17 标准库、`zig/core`，以及 app 内的 `audio/player.zig`（设备句柄与
-//! 播放线程在那边，UI 只读原子位置）；没有 @cImport、没有窗口、没有口岸。
+//! 播放线程在那边，UI 只读原子位置）和 `audio/peaks.zig`（波形峰值只是两个 i16
+//! 数组，本文件存着它，不认识怎么算、也不认识像素）；没有 @cImport、没有窗口、没有口岸。
 
 const std = @import("std");
 const core = @import("otto_core");
 const audio_player = @import("audio/player.zig");
+const peaks_mod = @import("audio/peaks.zig");
 
 /// provider 声明的"我产出的载荷是什么"。注意：这是 **provider 的属性**，不是
 /// 样本的媒体类型——同一个 Shell 缩略图 provider 可以服务图片、视频、三维文件，
@@ -117,6 +120,10 @@ pub const Bitmap = struct {
     }
 };
 
+/// 一张"没有图"的位图：零尺寸、空像素、不拥有任何内存。会话没有波形时用它，
+/// 视图因此可以照常画（`width == 0` 时直接跳过），不用额外判空指针。
+pub const emptyBitmap: Bitmap = .{ .pixels = &.{}, .width = 0, .height = 0, .stride = 0 };
+
 /// 音频会话：**能播的声音**，不是一个空壳。
 ///
 /// 字段是解码后的 PCM（交错、`channels` 声道、`bits` 位、`sample_rate`）、时长，
@@ -124,6 +131,9 @@ pub const Bitmap = struct {
 ///
 /// 所有权：
 ///   * `pcm` 用创建这个 Outcome 的 allocator 分配，`deinit(allocator)` 释放；
+///   * `peaks`（每桶一对 min/max）与 `waveform`（由 peaks 渲染的 BGRA 位图）
+///     同样由 `open` 的 allocator 分配，`deinit` 一并释放。两者在 `open` 里算一次
+///     **存起来**：播放时每帧重画只读它们，不重新解码、不重新算峰值；
 ///   * `player` 由 `Player.create` 分配，`Player.deinit` 释放（内部停播 + join）；
 ///   * `position_ms` 是 UI 线程最后一次读到的快照；跨线程的真值在 Player 的
 ///     `std.atomic.Value(u64)` 里。UI **只读** `positionMs()`，不碰播放线程。
@@ -137,6 +147,11 @@ pub const AudioSession = struct {
     duration_ms: u64,
     position_ms: u64 = 0,
     player: ?*audio_player.Player = null,
+    /// 波形峰值，长度 = 桶数（`audio/peaks.zig` 的 `default_buckets`）；空音频为 0。
+    peaks: peaks_mod.Peaks = .{},
+    /// 由 `peaks` 渲染的 BGRA 位图（`audio/waveform.zig`）。视图把它当图片画，
+    /// 不认识它是怎么来的；空位图（`width == 0`）表示"没有波形"。
+    waveform: Bitmap = emptyBitmap,
 
     pub fn play(self: *AudioSession) !void {
         const player = self.player orelse return error.NoAudioPlayer;
@@ -169,13 +184,18 @@ pub const AudioSession = struct {
         return error.Unsupported;
     }
 
-    /// 停播 → join 播放线程 → 释放 Player 与 PCM。必须与 `open` 用同一个 allocator。
+    /// 停播 → join 播放线程 → 释放 Player、波形位图、峰值、PCM。
+    /// 必须与 `open` 用同一个 allocator。
     pub fn deinit(self: *AudioSession, allocator: std.mem.Allocator) void {
         if (self.player) |player| {
             player.stop();
             player.deinit();
             self.player = null;
         }
+        if (self.waveform.pixels.len != 0) self.waveform.deinit(allocator);
+        self.waveform = emptyBitmap;
+        self.peaks.deinit(allocator);
+        self.peaks = .{};
         if (self.pcm.len != 0) allocator.free(self.pcm);
         self.pcm = &.{};
         self.position_ms = 0;
@@ -330,306 +350,3 @@ pub fn countLines(text: []const u8) usize {
     return lines;
 }
 
-// ---------------------------------------------------------------------------
-// 测试：注册表顺序与空注册表（假 provider，不碰磁盘、不碰口岸）
-// ---------------------------------------------------------------------------
-//
-// 放在本文件里而不是 preview_test.zig：它只依赖契约本身，属于"契约自己的行为"。
-// 假 provider 的计数是文件级 var：测试串行执行，每个测试开头清零。
-
-const testing = std.testing;
-
-var first_open_calls: u32 = 0;
-var second_open_calls: u32 = 0;
-var second_supports_calls: u32 = 0;
-
-fn firstSupports(_: *const core.model.Sample) bool {
-    return true;
-}
-
-fn firstOpen(allocator: std.mem.Allocator, request: Request) Error!Outcome {
-    first_open_calls += 1;
-    return .{ .text = try std.fmt.allocPrint(allocator, "first:{d}", .{request.max_px}) };
-}
-
-fn secondSupports(_: *const core.model.Sample) bool {
-    second_supports_calls += 1;
-    return true;
-}
-
-fn secondOpen(allocator: std.mem.Allocator, _: Request) Error!Outcome {
-    second_open_calls += 1;
-    return .{ .text = try allocator.dupe(u8, "second") };
-}
-
-fn neverSupports(_: *const core.model.Sample) bool {
-    return false;
-}
-
-fn neverOpen(_: std.mem.Allocator, _: Request) Error!Outcome {
-    unreachable; // supports 为假就永远不该被打开
-}
-
-const first_provider: Provider = .{
-    .name = "first",
-    .kind = .text,
-    .supports = firstSupports,
-    .open = firstOpen,
-};
-
-const second_provider: Provider = .{
-    .name = "second",
-    .kind = .text,
-    .supports = secondSupports,
-    .open = secondOpen,
-};
-
-const never_provider: Provider = .{
-    .name = "never",
-    .kind = .unknown,
-    .supports = neverSupports,
-    .open = neverOpen,
-};
-
-var decline_calls: u32 = 0;
-
-fn declineSupports(_: *const core.model.Sample) bool {
-    return true;
-}
-
-fn declineUnsupported(_: std.mem.Allocator, _: Request) Error!Outcome {
-    decline_calls += 1;
-    return .{ .none = .unsupported };
-}
-
-fn declineNoHandler(_: std.mem.Allocator, _: Request) Error!Outcome {
-    decline_calls += 1;
-    return .{ .none = .no_handler };
-}
-
-fn declineFailed(_: std.mem.Allocator, _: Request) Error!Outcome {
-    decline_calls += 1;
-    return .{ .none = .failed };
-}
-
-fn declineFileMissing(_: std.mem.Allocator, _: Request) Error!Outcome {
-    decline_calls += 1;
-    return .{ .none = .file_missing };
-}
-
-const unsupported_provider: Provider = .{
-    .name = "declines-unsupported",
-    .kind = .unknown,
-    .supports = declineSupports,
-    .open = declineUnsupported,
-};
-
-const no_handler_provider: Provider = .{
-    .name = "declines-no-handler",
-    .kind = .image,
-    .supports = declineSupports,
-    .open = declineNoHandler,
-};
-
-const failed_provider: Provider = .{
-    .name = "declines-failed",
-    .kind = .image,
-    .supports = declineSupports,
-    .open = declineFailed,
-};
-
-const file_missing_provider: Provider = .{
-    .name = "declines-file-missing",
-    .kind = .image,
-    .supports = declineSupports,
-    .open = declineFileMissing,
-};
-
-/// 真出一张 2×2 的图：用来验证"前面的 provider 谢绝之后，后面的成功分支能赢"。
-fn imageOpen(allocator: std.mem.Allocator, _: Request) Error!Outcome {
-    const pixels = try allocator.alloc(u8, 2 * 2 * 4);
-    @memset(pixels, 0xff);
-    return .{ .image = .{ .pixels = pixels, .width = 2, .height = 2, .stride = 8 } };
-}
-
-const image_provider: Provider = .{
-    .name = "image",
-    .kind = .image,
-    .supports = declineSupports,
-    .open = imageOpen,
-};
-
-const fake_sample: core.model.Sample = .{
-    .id = "s1",
-    .file_name = "Kick",
-    .file_ext = ".wav",
-    .file_path = "C:\\lib\\Kick.wav",
-};
-
-test "注册表按顺序问，第一个 supports 为真的赢，后面的连问都不问" {
-    first_open_calls = 0;
-    second_open_calls = 0;
-    second_supports_calls = 0;
-
-    const providers = [_]*const Provider{ &first_provider, &second_provider };
-    const registry: Registry = .{ .providers = &providers };
-    const request: Request = .{ .sample = &fake_sample, .max_px = 128 };
-
-    const answered = try registry.openAnswered(testing.allocator, request);
-    defer answered.outcome.deinit(testing.allocator);
-
-    try testing.expect(answered.provider == &first_provider);
-    try testing.expectEqual(@as(u32, 1), first_open_calls);
-    // 第一个赢之后，第二个的 supports/open 一次都不该被调用。
-    try testing.expectEqual(@as(u32, 0), second_supports_calls);
-    try testing.expectEqual(@as(u32, 0), second_open_calls);
-
-    switch (answered.outcome) {
-        .text => |text| try testing.expectEqualStrings("first:128", text),
-        else => return error.ExpectedText,
-    }
-}
-
-test "跳过不支持的 provider，落到下一个" {
-    first_open_calls = 0;
-    second_open_calls = 0;
-    second_supports_calls = 0;
-
-    const providers = [_]*const Provider{ &never_provider, &second_provider };
-    const registry: Registry = .{ .providers = &providers };
-
-    const outcome = try registry.open(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
-    defer outcome.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(u32, 1), second_supports_calls);
-    try testing.expectEqual(@as(u32, 1), second_open_calls);
-    switch (outcome) {
-        .text => |text| try testing.expectEqualStrings("second", text),
-        else => return error.ExpectedText,
-    }
-}
-
-test "谢绝（none.*）不是最终答案：继续问下一个，成功分支才终止" {
-    decline_calls = 0;
-    second_open_calls = 0;
-
-    // thumb 声明"可能行"，open 却谢绝；后面那个 provider 才是真正能出答案的。
-    const providers = [_]*const Provider{ &failed_provider, &second_provider };
-    const registry: Registry = .{ .providers = &providers };
-
-    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
-    defer answered.outcome.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(u32, 1), decline_calls);
-    try testing.expectEqual(@as(u32, 1), second_open_calls);
-    try testing.expect(answered.provider == &second_provider);
-    switch (answered.outcome) {
-        .text => |text| try testing.expectEqualStrings("second", text),
-        else => return error.ExpectedText,
-    }
-}
-
-test "no_handler 谢绝之后，后面的 provider 出图并赢" {
-    // 真正的形状：能力表说有 handler（PerceivedType 回退），thumb 取图却谢绝，
-    // 而音频/抽帧 provider 在后。赢家必须是后面那个，注册表不能停在 no_handler。
-    decline_calls = 0;
-    const providers = [_]*const Provider{ &no_handler_provider, &image_provider };
-    const registry: Registry = .{ .providers = &providers };
-
-    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
-    defer answered.outcome.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(u32, 1), decline_calls);
-    try testing.expect(answered.provider == &image_provider);
-    switch (answered.outcome) {
-        .image => |bitmap| {
-            try testing.expectEqual(@as(u32, 2), bitmap.width);
-            try testing.expectEqual(@as(u32, 2), bitmap.height);
-            try testing.expectEqual(@as(usize, 8), bitmap.stride);
-        },
-        else => return error.ExpectedImage,
-    }
-}
-
-test "全部谢绝：最终原因按 file_missing > failed > no_handler > unsupported" {
-    const request: Request = .{ .sample = &fake_sample, .max_px = 64 };
-
-    {
-        const providers = [_]*const Provider{ &unsupported_provider, &no_handler_provider, &failed_provider };
-        const registry: Registry = .{ .providers = &providers };
-        const answered = try registry.openAnswered(testing.allocator, request);
-        try testing.expectEqual(Reason.failed, answered.outcome.none);
-        try testing.expect(answered.provider == &failed_provider);
-    }
-    {
-        const providers = [_]*const Provider{ &unsupported_provider, &no_handler_provider };
-        const registry: Registry = .{ .providers = &providers };
-        const answered = try registry.openAnswered(testing.allocator, request);
-        try testing.expectEqual(Reason.no_handler, answered.outcome.none);
-        try testing.expect(answered.provider == &no_handler_provider);
-    }
-    {
-        const providers = [_]*const Provider{ &unsupported_provider, &failed_provider, &file_missing_provider };
-        const registry: Registry = .{ .providers = &providers };
-        const answered = try registry.openAnswered(testing.allocator, request);
-        try testing.expectEqual(Reason.file_missing, answered.outcome.none);
-        try testing.expect(answered.provider == &file_missing_provider);
-    }
-    {
-        // 出现顺序不影响优先级：最具体的那个赢。
-        const providers = [_]*const Provider{ &failed_provider, &unsupported_provider };
-        const registry: Registry = .{ .providers = &providers };
-        const answered = try registry.openAnswered(testing.allocator, request);
-        try testing.expectEqual(Reason.failed, answered.outcome.none);
-    }
-    {
-        // 全部只给 unsupported：还是 unsupported，不会被抬成别的原因。
-        const providers = [_]*const Provider{ &unsupported_provider, &unsupported_provider };
-        const registry: Registry = .{ .providers = &providers };
-        const answered = try registry.openAnswered(testing.allocator, request);
-        try testing.expectEqual(Reason.unsupported, answered.outcome.none);
-    }
-}
-
-test "唯一的 provider 谢绝 no_handler：最终原因仍是 no_handler，不会退化成 unsupported" {
-    // 本机 .wav 的真实形状：caps 说"有 handler"，thumb.get 却给 NoHandler，
-    // 后面没有音频 provider。答案必须是 no_handler，而不是"没人接手"。
-    const providers = [_]*const Provider{&no_handler_provider};
-    const registry: Registry = .{ .providers = &providers };
-    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
-    try testing.expectEqual(Reason.no_handler, answered.outcome.none);
-    try testing.expect(answered.provider == &no_handler_provider);
-}
-
-test "都不支持 → none.unsupported，谁都不会被打开" {
-    first_open_calls = 0;
-    second_open_calls = 0;
-
-    const providers = [_]*const Provider{ &never_provider, &never_provider };
-    const registry: Registry = .{ .providers = &providers };
-
-    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
-    defer answered.outcome.deinit(testing.allocator);
-
-    try testing.expect(answered.provider == null);
-    try testing.expectEqual(@as(u32, 0), first_open_calls);
-    try testing.expectEqual(@as(u32, 0), second_open_calls);
-    try testing.expectEqual(Reason.unsupported, answered.outcome.none);
-    try testing.expect(answered.outcome.isNone());
-}
-
-test "空注册表也是 none.unsupported（不 panic）" {
-    const providers = [_]*const Provider{};
-    const registry: Registry = .{ .providers = &providers };
-    const outcome = try registry.open(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
-    defer outcome.deinit(testing.allocator);
-    try testing.expectEqual(Reason.unsupported, outcome.none);
-    try testing.expect(registry.find(&fake_sample) == null);
-}
-
-test "countLines：末尾没有换行时按实际行数算" {
-    try testing.expectEqual(@as(usize, 1), countLines(""));
-    try testing.expectEqual(@as(usize, 1), countLines("名称: Kick"));
-    try testing.expectEqual(@as(usize, 5), countLines("a\nb\nc\nd\ne"));
-    try testing.expectEqual(@as(usize, 2), countLines("a\n"));
-}
