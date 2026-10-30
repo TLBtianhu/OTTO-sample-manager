@@ -554,10 +554,10 @@ pub fn main(init: std.process.Init) !void {
     // （`providers/root.zig`），`--preview` 自检与 UI 看到的是同一份顺序。
     const panel = try preview_panel.Panel.init(init.gpa, init.io, &preview_providers.registry, .{});
     defer panel.deinit();
-    const app = try nanoui.App.create(init, .{ .name = "OTTO Lite" });
+    // 字体索引只写进数据目录形态（portable/installed）；dev 传 null → 每次重扫。
+    const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null });
     trace.mark("setup.app");
     defer app.destroy();
-
     var state = State{
         .gpa = init.gpa,
         .live = live,

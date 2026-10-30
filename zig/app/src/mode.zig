@@ -155,6 +155,20 @@ pub fn cacheDirFor(allocator: std.mem.Allocator, data_dir: ?[]const u8) !?[]u8 {
     return try std.fs.path.join(allocator, &.{ base, "cache", "thumbs" });
 }
 
+/// 字体索引缓存的纯路径：`<dataDir>\cache\fonts.idx`；没有 dataDir 就是 null
+/// （dev 形态不写盘，行为和没有缓存时完全一样）。
+pub fn fontCachePathFor(allocator: std.mem.Allocator, data_dir: ?[]const u8) !?[]u8 {
+    const base = data_dir orelse return null;
+    return try std.fs.path.join(allocator, &.{ base, "cache", "fonts.idx" });
+}
+
+/// 系统字体目录：字体索引描述的就是它，必须和 nanoui 扫描的目录一致。
+/// 非 Windows 没有这个形态（app 本身只构建 Windows 目标）。
+pub fn systemFontDir() ?[]const u8 {
+    if (builtin.os.tag != .windows) return null;
+    return "C:\\Windows\\Fonts";
+}
+
 /// 文件监听根：`--watch` 优先，否则用解析后的库文件所在目录；都解析成绝对路径，
 /// 保证 join 出来的路径能和库里的 `filePath` 按字节比较。
 ///
@@ -172,17 +186,31 @@ pub fn watchRoot(
     return try cwd.realPathFileAlloc(io, parent, allocator);
 }
 
-/// 启动时的 L3 缓存目录：按运行形态取 dataDir 再拼 `cache/thumbs`。
-/// dev 返回 null；其它形态拿不到 dataDir（例如 installed 没有 %APPDATA%）也返回
-/// null——缓存只是加速层，不值得让启动失败。
-pub fn thumbsCacheDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+/// 启动时的数据目录：dev 没有（不写盘），其它形态按 exe 旁边的标记 /
+/// %APPDATA% 判定；拿不到也是 null——缓存只是加速层，不值得让启动失败。
+fn startupDataDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     const mode = try detect(allocator, io, exe_path);
     if (mode == .dev) return null;
-    const data_dir = (try dataDir(allocator, io, mode, exe_path)) orelse return null;
+    return dataDir(allocator, io, mode, exe_path);
+}
+
+/// 启动时的 L3 缓存目录：按运行形态取 dataDir 再拼 `cache/thumbs`。
+/// dev 返回 null；其它形态拿不到 dataDir（例如 installed 没有 %APPDATA%）也返回
+/// null——缓存只是加速层，不值得让启动失败。
+pub fn thumbsCacheDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+    const data_dir = (try startupDataDir(allocator, io)) orelse return null;
     defer allocator.free(data_dir);
     return cacheDirFor(allocator, data_dir);
+}
+
+/// 启动时的字体索引缓存：按运行形态取 dataDir 再拼 `cache/fonts.idx`。
+/// dev / 拿不到 dataDir → null（每次启动重扫，与没有这个功能时一致）。
+pub fn fontCachePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+    const data_dir = (try startupDataDir(allocator, io)) orelse return null;
+    defer allocator.free(data_dir);
+    return fontCachePathFor(allocator, data_dir);
 }
 
 /// `%APPDATA%` 的薄封装。

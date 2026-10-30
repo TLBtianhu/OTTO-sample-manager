@@ -42,6 +42,10 @@ pub fn firstFrame(
         .height = native.height,
         .scale = native.scale,
         .theme = native.theme,
+        // The probe runs the same font path as the real window: the app's
+        // cache settings come through `nanoui.App` (null in dev).
+        .font_cache = app.options.font_cache,
+        .fonts_dir = app.options.fonts_dir,
     });
 
     const elapsed = bench_stats.sinceMs(init.io, started);
@@ -82,7 +86,7 @@ fn report(tester: *ui.Tester, frame_ms: f64) void {
         .{ atlas.sprites.count(), atlas.rasterized, atlas.raster_ms, atlas.phase_counts.count() },
     );
     std.debug.print(
-        "bench-first-frame: font files={d} faces={d} walk_ms={d:.2} open_ms={d:.2} alloc_ms={d:.2} header_ms={d:.2} parse_ms={d:.2} table_ms={d:.2} style_ms={d:.2} max_end={d} loads={d} load_ms={d:.2} fallback={d} fallback_ms={d:.2} found={d} layouts={d}\n",
+        "bench-first-frame: font files={d} faces={d} walk_ms={d:.2} open_ms={d:.2} alloc_ms={d:.2} header_ms={d:.2} parse_ms={d:.2} table_ms={d:.2} style_ms={d:.2} max_end={d} loads={d} load_ms={d:.2} fallback={d} fallback_ms={d:.2} found={d} layouts={d} cache={s} cache_ms={d:.2} cache_faces={d} cache_bytes={d}\n",
         .{
             scan.files,
             scan.faces,
@@ -100,6 +104,10 @@ fn report(tester: *ui.Tester, frame_ms: f64) void {
             db.fallback_ms,
             db.found.count(),
             tester.text.layouts.count(),
+            @tagName(db.cache.state),
+            db.cache.ms,
+            db.cache.faces,
+            db.cache.bytes,
         },
     );
     std.debug.print("bench-first-frame: qpc_ms={d:.2}\n", .{trace.since()});

@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const font = @import("font.zig");
+const fontindex = @import("fontindex.zig");
 const trace = @import("../trace.zig");
 
 /// What the last `scan` cost, split by phase. Filled only while
@@ -126,6 +127,17 @@ pub const Db = struct {
     /// database). Allocating a whole file per font instead cost more than
     /// reading it: 69 ms of commits and 35 ms of releases over 372 files.
     file_buf: []u8 = &.{},
+    /// Where the scan's result is kept between starts, and the folder it
+    /// describes (both borrowed; null: no cache, the platform's folders).
+    /// The app chooses the path; without both, a scan runs every start,
+    /// exactly as before this cache existed.
+    cache_path: ?[]const u8 = null,
+    fonts_dir: ?[]const u8 = null,
+    /// What the last scan's cache lookup and write cost and found.
+    cache: fontindex.Stats = .{},
+    /// The folder digest the lookup computed, reused by the write so the
+    /// first start enumerates the folder once, not twice.
+    cache_digest: ?u64 = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) Db {
         return .{ .gpa = gpa, .io = io };
@@ -172,6 +184,25 @@ pub const Db = struct {
             db.scan_stats = .{};
             trace.mark("font.scan.start");
         }
+        if (db.loadCached()) {
+            db.traceScan();
+            db.traceCache();
+            return;
+        }
+        db.scanFonts();
+        db.traceScan();
+        db.saveCached();
+        db.traceCache();
+    }
+
+    /// The folders a scan reads: the one the cache describes when the app
+    /// named it (so the cache and the scan always mean the same thing),
+    /// else the platform's own.
+    fn scanFonts(db: *Db) void {
+        if (db.fonts_dir) |dir| {
+            db.scanDir(dir);
+            return;
+        }
         var buf: [1024]u8 = undefined;
         switch (builtin.os.tag) {
             .windows => {
@@ -193,7 +224,78 @@ pub const Db = struct {
                 }
             },
         }
-        db.traceScan();
+    }
+
+    /// Appends the faces a valid cache holds; false when there is none
+    /// (off, missing, stale, damaged, unreadable), so the scan runs and
+    /// then rewrites it. A cache never makes text worse: every problem
+    /// here is only a reason to scan.
+    fn loadCached(db: *Db) bool {
+        const path = db.cache_path orelse return false;
+        const dir = db.fonts_dir orelse return false;
+        const traced = trace.on();
+        const at = if (traced) trace.stamp() else 0;
+        defer if (traced) {
+            db.cache.ms += trace.msSince(at);
+        };
+        const digest = fontindex.fingerprint(db.gpa, db.io, dir) orelse {
+            db.cache.state = .unreadable;
+            return false;
+        };
+        db.cache_digest = digest;
+        const entries = fontindex.read(db.gpa, db.io, path, dir, digest) catch |err| {
+            db.cache.state = switch (err) {
+                error.NotFound => .miss,
+                error.Stale => .stale,
+                error.OutOfMemory => .unreadable,
+                else => .damaged,
+            };
+            return false;
+        };
+        defer db.gpa.free(entries);
+        for (entries) |e| {
+            db.faces.append(db.gpa, .{ .path = e.path, .index = e.index, .style = e.style }) catch {
+                db.gpa.free(e.path);
+                continue;
+            };
+        }
+        db.cache.state = .hit;
+        db.cache.faces = entries.len;
+        return true;
+    }
+
+    /// Writes the scan's file faces for the next start. A cache is an
+    /// optimization: any failure leaves the app and the next start's scan
+    /// exactly as they were.
+    fn saveCached(db: *Db) void {
+        const path = db.cache_path orelse return;
+        const dir = db.fonts_dir orelse return;
+        const traced = trace.on();
+        const at = if (traced) trace.stamp() else 0;
+        defer if (traced) {
+            db.cache.ms += trace.msSince(at);
+        };
+        const digest = db.cache_digest orelse fontindex.fingerprint(db.gpa, db.io, dir) orelse {
+            db.cache.state = .unreadable;
+            return;
+        };
+        const written = fontindex.write(db.gpa, db.io, path, dir, digest, db.faces.items[db.bundled..]) orelse {
+            db.cache.state = .write_failed;
+            return;
+        };
+        db.cache.state = .written;
+        db.cache.faces = db.faces.items.len - db.bundled;
+        db.cache.bytes = written;
+    }
+
+    /// One line with what the cache lookup or write did, when tracing.
+    fn traceCache(db: *const Db) void {
+        if (!trace.on()) return;
+        trace.markf(
+            "font.cache",
+            "state={s} faces={d} bytes={d} ms={d:.2}",
+            .{ @tagName(db.cache.state), db.cache.faces, db.cache.bytes, db.cache.ms },
+        );
     }
 
     /// One line with what the scan cost, when `ui.trace` is on.

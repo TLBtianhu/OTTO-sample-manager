@@ -371,3 +371,128 @@ release / 2000 条：**冷启动→首帧 126.47 ms**（3 次 137.71/126.02/126.
 **建议把 headless 目标改为 150 ms、用户可见首帧改为 200 ms**；若继续追 100 ms，
 优先级是 ①并行字体扫描 ②字体索引落盘缓存（生产形态）③库加载。
 
+
+## 10. 2026-10-31 追加：字体索引落盘缓存（分支 `feat/font-cache`）
+
+> 目标：便携/安装形态（有数据目录）冷启动到首帧 **≤ 100 ms**；dev 没有数据目录，
+> 按约定仍允许 ~121 ms。机器、构建、素材同第 9 节（release / 2000 条）。
+
+### 10.1 缓存是什么、什么时候失效
+
+`vendor/nanoui/src/ui/tt/fontindex.zig`（新增，nanoui 通用能力）：
+
+* 内容：每个 face 的**字体文件路径 + face index + 族名 / weight / italic / mono**。
+  文件头是 `NUFI` + 格式版本（当前 1）+ nanoui 版本（`build.zig.zon` 的
+  `build_options.version`）+ 字体目录字符串 + 目录摘要（u64）+ face 数，
+  末尾是 Wyhash 校验和。本机 372 个文件 / 409 个 face → **20,602 字节**。
+* 失效条件（任一不符就当没有缓存）：
+  - 字体目录 mtime 变了；
+  - 字体文件数变了；
+  - 任一字体文件的 **mtime 或 size** 变了；
+  - nanoui 版本或格式版本不同；
+  - 字体目录字符串不同；
+  - 文件短于头 / 长度字段越界 / 校验和不符。
+* 摘要对枚举顺序不敏感（每项单独 hash 再合并），目录顺序变化不会误失效。
+* 损坏、版本不符、读失败 → **当没有**：静默重扫并原子重写；文本结果与命中时一致。
+* 写失败（只读、没空间）→ 只记 `write_failed`，下次重扫，不影响启动。
+* 默认关闭：`fontdb.Db.cache_path` 与 `fonts_dir` 都非 null 才启用；dev 传 null，
+  行为与改动前一致（trace 里 `cache=off`，扫描仍 30 ms）。
+* 缓存文件不能放在它描述的字体目录里（会改目录 mtime）；app 放在
+  `<dataDir>/cache/fonts.idx`，与 `C:\Windows\Fonts` 分开。
+* Windows 上摘要用一次 `FindFirstFileW("*")` 枚举拿 mtime/size（372 个文件
+  **0.5 ms**）；可移植路径 `walk` + `statFile` 同机实测 15.4 ms，扫描现在的
+  `open+length` 是 14.2 ms。遇到子目录自动退回可移植路径（Windows 字体目录是平的）。
+
+### 10.2 app 接线
+
+- `mode.fontCachePath` → `<dataDir>/cache/fonts.idx`（portable/installed）；
+  `mode.systemFontDir` → `C:\Windows\Fonts`；dev 两者都 null。
+- nanoui `App.Options` 与 `ui.Tester.Options` 新增 `font_cache` / `fonts_dir`；
+  `Surface` / `Tester` 建文本系统时写进 `fontdb.Db`，所以真实窗口与
+  `--bench-first-frame` 走同一条路径。
+- 日志（`OTTO_TRACE=1`）新增
+  `nanoui-trace font.cache state=... faces=... bytes=... ms=...`；
+  命中时 `font.scan` 行是 `dirs=0 files=0 faces=0`。
+
+### 10.3 三种形态实测（release，2000 条）
+
+| 形态 | 首帧墙钟 | main 内 | setup | frame | 缓存 |
+| --- | --- | --- | --- | --- | --- |
+| dev（无数据目录） | **129.90 / 129.21**（早段；负载段 133.38） | 111.9 / 112.1（负载段 117.3） | 64.7 / 63.9 | 47.1（负载段 48.0） | off（全量扫描 30.7 ms） |
+| portable 首次（清掉 data/cache） | **139.24 / 130.32 / 140.53**（每轮首个子进程） | 首次探针 113.4–117.7 | 64.2–69.0 | 48.7–49.2 | written 2.3 ms，20,602 B |
+| portable 第二次（索引已存在） | 安静窗口 9 个样本 **96.98–105.34，中位 99.09（6/9 ≤100）**；负载窗口 100.01–114.46 | 安静 81.0–84.8；负载 89.0–91.5 | 安静 64.0–66.5；负载 69.5–72.4 | 安静 16.5–17.3；负载 17.8–19.4 | hit 0.83 ms |
+
+口径：墙钟 = `--bench` 父进程「CreateProcess → 子进程打出首帧行」，同第 9 节；
+"portable 首次"取每轮 3 个子进程里的**第一个**（只有它扫描并写索引），
+"portable 第二次"取索引存在时的全部样本。安静窗口是构建结束后、没有并行任务时
+取的样本（早期一段 9 个 + 最后静置后的一轮 3 个）；负载窗口是同一份二进制在随后
+系统繁忙时的复测。
+
+**结论：便携/安装形态第二次在安静窗口达标（中位 99.09 ms），但余量只有约 1 ms。**
+安静窗口里超过 100 的 3 个样本（101–105）同样来自 setup 首个 HWND 从 64 → 66.5 ms
+的抖动；负载窗口 setup 涨到 69.5–72.4 ms，同一项读到 100–114 ms。frame 本身稳定
+在 16.5–17.3 ms（安静）/ 17.8–19.4 ms（负载），缓存命中 0.83 ms（摘要 0.5 +
+读/解析 0.3）——**扫描已经不在关键路径上，100 ms 已经落在首个 HWND 的噪声带里**。
+
+portable 命中时的剩余分解（main ≈ 82 ms）：
+
+| 段 | ms | 说明 |
+| --- | --- | --- |
+| CreateProcess → main | 9.3 | `otto-trace process.begin` |
+| setup（含首个 HWND） | 64–66.5 | `setup.app`（CreateWindowExW）一次性系统成本 |
+| 读库 + JSON decode | 6.6 | 不变 |
+| watcher / thumbs / preview / state | 1.0 | 不变 |
+| frame build | 1.9 | 含缓存命中 |
+| layout | 4.5 | 67 个文本 layout |
+| paint（含 116 字形栅格 5.7） | 10.1 | DirectWrite |
+| other | 0.2 | |
+| 父进程 spawn / 读管道 | ≈16 | 测量开销 |
+
+### 10.4 索引损坏 / 失效（端到端）
+
+| 操作 | 结果 |
+| --- | --- |
+| 翻转缓存中间 1 字节 | 下次启动扫描（`font.scan files=372 faces=409`），重写 20,602 B，应用照常；再下次 `hit` |
+| 截断到 100 字节 | 同上 |
+| 改摘要 1 位并重算校验和（模拟字体目录变化） | 判为 stale → 扫描 → 重写；再下次 `hit` |
+| 真实字体 mtime 改变 | nanoui 单测：临时字体目录 + `Db` 集成，第二个 `Db` 不用缓存、重扫后写回 |
+
+全程无弹窗、不抢焦点；中文 snapshot 正常（见 10.6）。
+
+### 10.5 并行扫描：不做；mmap 字体加载也试过并回退
+
+命中时 `font.scan files=0`，扫描已不在关键路径上；4 线程并行没有作用对象，
+按"先量再决定"不做。
+
+另外试过把 `Db.load` 的 `readFileAlloc` 换成只读文件映射（`populate=false`）：
+`load_ms` 从 4.37 降到 0.23、`fallback_ms` 从 4.15 降到 0.15，但页错误挪进了
+paint（10.1 → 14.5），**frame 仍是 17.1 ms，WS 也没降（70.8 MiB）**——
+19.7 MB 的 `msyh.ttc` 最终要被栅格化读到，早读晚读一样。已回退，不引入映射的生命周期。
+
+### 10.6 测试与 snapshot
+
+```text
+core   78/78
+ports 103/103（11 个测试目标）
+app   125/125
+nanoui 221 pass, 10 skip, 0 fail（231）
+zig build / zig build -Drelease=true → 成功
+```
+
+中文 snapshot：`zig/snapshot-cn-fontcache.png`（380×700 @2x）：搜索框「搜索素材…」、
+「2000 个素材 · 2000 命中 · 2 选中」、中文文件名、预览文案、底部事实行都正常。
+
+### 10.7 最终判断
+
+- **portable / installed 第二次：安静窗口达标**（9 个样本中位 99.09 ms，
+  最好一段 96.98–99.75）。它已经贴着 100 ms 的噪声下限：setup 里 58–67 ms 的
+  首个 HWND 无法压缩，文本首帧 16.5–17.3 ms 里 5.7 ms 是 116 个字形栅格、
+  4.5 ms 是 layout；缓存命中 0.83 ms，扫描已不在关键路径上。
+- **负载窗口不达标**（setup 65 → 72 ms 时同一项 100–114 ms）。所以这个数字
+  不能写成"稳过 100"：100 ms 与首个 HWND 的抖动同量级。
+- **dev：不达标**（本窗口 129.9 ms，上一轮 126.5）。原因是 dev 没有数据目录，
+  按设计不写/不读索引，仍付 30.7 ms 全量扫描（frame 47.1 vs 16.9）。
+- 若要把"稳过 100"写进目标，只能把字体工作与首个 HWND **重叠**（线程里预扫/
+  预载，本轮按任务不把并行当默认方案），或继续压文本首帧（字形栅格 / layout）。
+  本轮不做，也不改宪章。建议验收继续用 ≤ 100 ms 并注明"安静窗口"取数方式，
+  或把便携目标定 110 ms 以吸收首个 HWND 的抖动。
