@@ -51,7 +51,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(caps_library);
 
-    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表口岸单元与集成测试（真 Win32 + 真 Shell）");
+    // 拖出口岸：公共 API（drag.zig）+ OLE / Shell 后端（drag_win.zig）。
+    // user32 是隐藏源窗口与鼠标捕获的落点；ole32 / shell32 是拖放、PIDL 与
+    // 剪贴板的落点。同样挂在模块上，消费方链接 otto_drag 自动带上。
+    const drag_module = b.addModule("otto_drag", .{
+        .root_source_file = b.path("src/drag.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    drag_module.linkSystemLibrary("ole32", .{});
+    drag_module.linkSystemLibrary("shell32", .{});
+    drag_module.linkSystemLibrary("user32", .{});
+    const drag_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_drag",
+        .root_module = drag_module,
+    });
+    b.installArtifact(drag_library);
+
+    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出口岸单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/watch_test.zig"),
@@ -70,7 +88,7 @@ pub fn build(b: *std.Build) void {
     thumb_test_module.linkSystemLibrary("shell32", .{});
     thumb_test_module.linkSystemLibrary("gdi32", .{});
     const run_thumb_tests = b.addRunArtifact(b.addTest(.{ .root_module = thumb_test_module }));
-    // 三个测试进程串行：监听 / 缩略图 / 能力表都会碰 COM 或线程，Zig 0.17 的
+    // 四个测试进程串行：监听 / 缩略图 / 能力表 / 拖出都会碰 COM 或线程，Zig 0.17 的
     // 构建器还会把并行 test step 的 stderr 与进度行交织在一起。串行后
     // --summary all 的输出可直接贴。
     run_thumb_tests.step.dependOn(&run_tests.step);
@@ -90,4 +108,18 @@ pub fn build(b: *std.Build) void {
     const run_caps_tests = b.addRunArtifact(b.addTest(.{ .root_module = caps_test_module }));
     run_caps_tests.step.dependOn(&run_thumb_tests.step);
     test_step.dependOn(&run_caps_tests.step);
+
+    // 拖出测试串在能力表之后：selftest 会真的建立 Shell 数据对象并读回 CF_HDROP，
+    // 需要一个没被别的测试弄脏的 OLE 套间（每个 test 进程本来也是独立进程）。
+    const drag_test_module = b.createModule(.{
+        .root_source_file = b.path("src/drag_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    drag_test_module.linkSystemLibrary("ole32", .{});
+    drag_test_module.linkSystemLibrary("shell32", .{});
+    drag_test_module.linkSystemLibrary("user32", .{});
+    const run_drag_tests = b.addRunArtifact(b.addTest(.{ .root_module = drag_test_module }));
+    run_drag_tests.step.dependOn(&run_caps_tests.step);
+    test_step.dependOn(&run_drag_tests.step);
 }
