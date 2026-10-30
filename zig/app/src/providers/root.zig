@@ -31,5 +31,11 @@ pub const registry: preview.Registry = .{ .providers = &ordered };
 comptime {
     // 空表在 M1 没有意义：至少要有 Shell 缩略图这一项，否则预览永远是 none。
     if (ordered.len == 0) @compileError("至少需要一个预览 provider");
-    if (ordered[0] != &thumb.provider) @compileError("Shell 缩略图必须在这张表里");
+    // 只要求"在表里"，不要求"排在第一个"：顺序表达的是偏好（音频可以压过静态图），
+    // decline 规则保证能力不会被前面的 provider 永久堵死。
+    var has_thumb = false;
+    for (ordered) |p| {
+        if (p == &thumb.provider) has_thumb = true;
+    }
+    if (!has_thumb) @compileError("Shell 缩略图必须在这张表里");
 }

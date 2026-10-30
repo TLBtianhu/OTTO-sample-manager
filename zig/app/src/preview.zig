@@ -378,6 +378,20 @@ const file_missing_provider: Provider = .{
     .open = declineFileMissing,
 };
 
+/// 真出一张 2×2 的图：用来验证"前面的 provider 谢绝之后，后面的成功分支能赢"。
+fn imageOpen(allocator: std.mem.Allocator, _: Request) Error!Outcome {
+    const pixels = try allocator.alloc(u8, 2 * 2 * 4);
+    @memset(pixels, 0xff);
+    return .{ .image = .{ .pixels = pixels, .width = 2, .height = 2, .stride = 8 } };
+}
+
+const image_provider: Provider = .{
+    .name = "image",
+    .kind = .image,
+    .supports = declineSupports,
+    .open = imageOpen,
+};
+
 const fake_sample: core.model.Sample = .{
     .id = "s1",
     .file_name = "Kick",
@@ -445,6 +459,28 @@ test "谢绝（none.*）不是最终答案：继续问下一个，成功分支�
     switch (answered.outcome) {
         .text => |text| try testing.expectEqualStrings("second", text),
         else => return error.ExpectedText,
+    }
+}
+
+test "no_handler 谢绝之后，后面的 provider 出图并赢" {
+    // 真正的形状：能力表说有 handler（PerceivedType 回退），thumb 取图却谢绝，
+    // 而音频/抽帧 provider 在后。赢家必须是后面那个，注册表不能停在 no_handler。
+    decline_calls = 0;
+    const providers = [_]*const Provider{ &no_handler_provider, &image_provider };
+    const registry: Registry = .{ .providers = &providers };
+
+    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
+    defer answered.outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 1), decline_calls);
+    try testing.expect(answered.provider == &image_provider);
+    switch (answered.outcome) {
+        .image => |bitmap| {
+            try testing.expectEqual(@as(u32, 2), bitmap.width);
+            try testing.expectEqual(@as(u32, 2), bitmap.height);
+            try testing.expectEqual(@as(usize, 8), bitmap.stride);
+        },
+        else => return error.ExpectedImage,
     }
 }
 
