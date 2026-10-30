@@ -36,7 +36,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(thumb_library);
 
-    const test_step = b.step("test", "运行监听 / 缩略图口岸单元与集成测试（真 Win32 + 真 Shell）");
+    // 缩略图能力表口岸：只读注册表判断扩展名有没有 IThumbnailProvider 登记，
+    // 不加载任何第三方 DLL。advapi32 只有 Windows 后端（caps_win.zig）需要。
+    const caps_module = b.addModule("otto_caps", .{
+        .root_source_file = b.path("src/caps.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    caps_module.linkSystemLibrary("advapi32", .{});
+    const caps_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_caps",
+        .root_module = caps_module,
+    });
+    b.installArtifact(caps_library);
+
+    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表口岸单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/watch_test.zig"),
@@ -55,8 +70,24 @@ pub fn build(b: *std.Build) void {
     thumb_test_module.linkSystemLibrary("shell32", .{});
     thumb_test_module.linkSystemLibrary("gdi32", .{});
     const run_thumb_tests = b.addRunArtifact(b.addTest(.{ .root_module = thumb_test_module }));
-    // 两个测试进程串行：两边都会起 COM / 线程，Zig 0.17 的构建器还会把并行 test
-    // step 的 stderr 与进度行交织在一起。串行后 --summary all 的输出可直接贴。
+    // 三个测试进程串行：监听 / 缩略图 / 能力表都会碰 COM 或线程，Zig 0.17 的
+    // 构建器还会把并行 test step 的 stderr 与进度行交织在一起。串行后
+    // --summary all 的输出可直接贴。
     run_thumb_tests.step.dependOn(&run_tests.step);
     test_step.dependOn(&run_thumb_tests.step);
+
+    // 能力表测试串在缩略图之后：第 1 条会调 thumb.get 做"Shell 真的能出图"的
+    // 独立探针，必须和缩略图测试用同一套 Shell / COM 环境。
+    const caps_test_module = b.createModule(.{
+        .root_source_file = b.path("src/caps_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    caps_test_module.linkSystemLibrary("advapi32", .{});
+    caps_test_module.linkSystemLibrary("ole32", .{});
+    caps_test_module.linkSystemLibrary("shell32", .{});
+    caps_test_module.linkSystemLibrary("gdi32", .{});
+    const run_caps_tests = b.addRunArtifact(b.addTest(.{ .root_module = caps_test_module }));
+    run_caps_tests.step.dependOn(&run_thumb_tests.step);
+    test_step.dependOn(&run_caps_tests.step);
 }
