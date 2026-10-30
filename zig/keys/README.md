@@ -35,6 +35,22 @@ otto-lite.key.pub    ← 提交进仓库；应用内置它，用来验更新包
 "这个更新包确实出自我们"，不保护"第一次下载的安装包"——首次获取仍然要靠
 SHA-256 和来源可信（GitHub Releases 页面）。
 
+> 签名用的是**私钥**，公钥只负责验证。两个都在手上，但只有公钥能进仓库。
+
+## 自己验一遍
+
+不装 tauri CLI 也能验（`zig/tools/verify-minisign.js`，Node 20+）：
+
+```powershell
+node zig\tools\verify-minisign.js `
+  zig\keys\otto-lite.key.pub `
+  dist\otto-lite-0.0.1-setup.exe.sig `
+  dist\otto-lite-0.0.1-setup.exe
+```
+
+有效输出 `verify: OK  …`，退出码 0；篡改任何一个字节都会变成 `签名无效` 且退出码 1
+（已实测）。
+
 ## 重新生成（会换信任根）
 
 ```powershell

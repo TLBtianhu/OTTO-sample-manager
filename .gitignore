@@ -31,3 +31,4 @@ tools/dnd-research/logs/*.png
 !tools/dnd-research/logs/verified-fix-20260811.log
 zig/keys/*.key
 *.key.enc
+zig/dist/
