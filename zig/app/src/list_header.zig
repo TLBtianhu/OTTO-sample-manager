@@ -23,6 +23,10 @@ pub const Info = struct {
     rows_with_image: u32 = 0,
     /// 监听丢过事件（`live.dirty()`）。
     dirty: bool = false,
+    /// 导入状态（「正在导入…」/「已导入 N 个」/具名错误）。null = 不显示。
+    import_status: ?[]const u8 = null,
+    /// true = `import_status` 是错误，用主题的 danger 色，别用强调色。
+    import_failed: bool = false,
 };
 
 pub fn draw(c: *ui.Context, info: Info) void {
@@ -34,6 +38,12 @@ pub fn draw(c: *ui.Context, info: Info) void {
         info.matched,
         info.selected,
     });
+    if (info.import_status) |status| {
+        ui.textf(c, .{
+            .size = 11,
+            .color = if (info.import_failed) c.theme.danger else c.theme.accent,
+        }, "· {s}", .{status});
+    }
     if (info.flash_left > 0) {
         ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
     } else if (info.rows_with_image > 0) {

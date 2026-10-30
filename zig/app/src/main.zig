@@ -47,6 +47,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const commands = @import("commands.zig");
+const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
 const list_header = @import("list_header.zig");
 const live_mod = @import("live.zig");
@@ -89,6 +90,8 @@ const State = struct {
     selection: selection_mod.Selection = .{},
     /// 搜索框 + 过滤行映射 + 键盘导航（见 `search_ui.zig`）。
     search: search_ui.Search,
+    /// 「导入文件夹」：选择框 → 工作线程 `importRun` → 重载（见 `import_ui.zig`）。
+    import: import_ui.Import,
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
     transport: transport_mod.Transport,
     window: ?*nanoui.Window = null,
@@ -129,14 +132,23 @@ const State = struct {
 
         // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧
         // 就参与过滤。拖拽循环里只按现有状态重画（那几帧不处理输入）。
+        // 「导入文件夹」按钮和搜索框同一行、宽度固定（见 `search_ui.Trailing`）。
+        const import_button: search_ui.Trailing = .{
+            .label = import_ui.button_label,
+            .width = import_ui.button_width,
+            .disabled = s.import.busy(),
+        };
         if (!busy) {
-            const action = s.search.frame(c, s.samples, &s.selection);
+            const action = s.search.frame(c, s.samples, &s.selection, import_button);
             if (action.filter_changed) s.noteSelection();
             if (action.activate) s.activateCursor(c);
+            // 模态选择框在 UI 线程上跑；取消不进状态机（见 `import_ui.begin`）。
+            if (action.trailing_clicked) s.import.begin(window_util.nativeHandle(s.window));
         } else {
-            s.search.draw(c);
+            _ = s.search.draw(c, import_button);
         }
 
+        var status_buffer: [128]u8 = undefined;
         list_header.draw(c, .{
             .total = s.samples.len,
             .matched = s.search.len(),
@@ -145,6 +157,8 @@ const State = struct {
             .flash_count = s.flash_count,
             .rows_with_image = s.reporter.printed_rows,
             .dirty = s.live.dirty(),
+            .import_status = s.import.status(&status_buffer),
+            .import_failed = s.import.phase == .failed,
         });
 
         // 列表容器：在空白处按下再松开 = 清空选择。行是它的后代：点行时
@@ -373,6 +387,11 @@ const State = struct {
         // 拖放循环里不许再碰 UI（连轮询也不做）：等它返回后下一次 tick 再补。
         if (!s.transport.busy) {
             s.refresh();
+            // 导入是异步的：结果回来先重载（换 Live/库指针），再刷新本帧的状态。
+            const import_event = s.import.poll();
+            if (import_event == .reloaded) s.afterReload();
+            if (import_event != .none) if (s.window) |window| window.redraw();
+            if (s.import.tick()) if (s.window) |window| window.redraw();
             // 预览是异步的：工作线程交回结果就换画面并打一行账。`poll` 只在
             // UI 线程调；`sync` 在 view 里提交，这里不重复提交。
             if (s.preview.poll()) {
@@ -391,6 +410,22 @@ const State = struct {
             }
         }
         nanoui.App.after(tick_ms, ctx, tick);
+    }
+
+    /// 导入成功后重载：内存列表换成刚保存的那份库（理由见 `import_ui.zig` 文件头）。
+    /// 选择清空、过滤重建、预览重提交——都走和启动时同一条初始化路径。
+    fn afterReload(s: *State) void {
+        s.live = s.import.live();
+        s.samples = s.live.samples();
+        s.thumbs.clearFailures();
+        s.search.markStale();
+        s.selection.clear();
+        s.selection.resize(s.gpa, s.samples.len) catch {};
+        s.preview.sync(null);
+        if (s.window) |window| {
+            window_util.setTitle(window, s.samples.len);
+            window.redraw();
+        }
     }
 
     fn refresh(s: *State) void {
@@ -470,7 +505,8 @@ pub fn main(init: std.process.Init) !void {
                 "      otto-lite --copy-now <file>\n" ++
                 "      otto-lite --convert <in.json> <out.otto>\n" ++
                 "      otto-lite --library-info <file>\n" ++
-                "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n",
+                "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n" ++
+                "      otto-lite --import-into <folder> [--save <file>]\n",
             .{},
         );
         return error.InvalidArguments;
@@ -486,17 +522,21 @@ pub fn main(init: std.process.Init) !void {
     // 位置参数优先；没有就按运行形态给默认库（见文件头）。
     // 格式按文件头判断：`.otto` 走 OTTOLIB，其余走 electron-store JSON。
     const library_path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
-    const library = library_io.load(init, allocator, library_path) catch |err| {
+    var library = try init.gpa.create(core.store.Library);
+    library.* = library_io.load(init, init.gpa, library_path) catch |err| {
         // 损坏的库（BadMagic / UnknownVersion / Truncated / ChecksumMismatch）在
         // 这里给一行具名错误，而不是把 Zig 调用栈甩给用户。
         std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ library_path, @errorName(err) });
         std.process.exit(1);
     };
+    defer { library.deinit(); init.gpa.destroy(library); }
     const root = try watchRoot(init, allocator, options, library_path);
 
     // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。
-    var live = try live_mod.Live.init(allocator, &library, root);
-    defer live.deinit();
+    var live = try init.gpa.create(live_mod.Live);
+    errdefer init.gpa.destroy(live);
+    live.* = try live_mod.Live.init(init.gpa, library, root);
+    defer { live.deinit(); init.gpa.destroy(live); }
 
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）：
     // 工作线程要拿它分配像素、路径与缓存条目，不能用进程级 arena。
@@ -513,13 +553,15 @@ pub fn main(init: std.process.Init) !void {
 
     var state = State{
         .gpa = init.gpa,
-        .live = &live,
+        .live = live,
         .samples = live.samples(),
         .thumbs = thumbs,
         .preview = panel,
         .search = search_ui.Search.init(init.gpa),
+        .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
         .transport = transport_mod.Transport.init(init.gpa),
     };
+    defer state.import.deinit();
     defer state.selection.deinit(init.gpa);
     defer state.search.deinit();
     defer state.transport.deinit();

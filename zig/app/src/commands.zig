@@ -69,6 +69,13 @@ pub fn run(
     // 按 magic 判断格式并打印条数 / 字节数。
     if (options.library_info) |path| return try library_cli.runInfo(init, allocator, path);
 
+    // UI「导入文件夹」按钮的无头入口：同一个 `importRun`、同一套保存目标规则。
+    // 放在 `--import` 之前：两个标志互斥，用的是同一个 `--save` 值。
+    if (options.import_into) |folder| {
+        const base = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
+        return try import_cli.runInto(init.io, allocator, folder, base, options.save_path);
+    }
+
     // 文件夹导入（M3 第二块）：扫描 → probe → 去重 → 合并 → 原子写。
     // 不建窗口、不碰 nanoui；`--save` 的缺失由 import_cli 自己报。
     if (options.import_dir) |folder| {

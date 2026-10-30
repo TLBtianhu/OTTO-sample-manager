@@ -38,6 +38,9 @@ pub const Options = struct {
     library_info: ?[]const u8 = null,
     /// `--import <folder>`：无窗口的导入流水线（扫描 + probe + 合并 + 原子写）。
     import_dir: ?[]const u8 = null,
+    /// `--import-into <folder>`：UI「导入文件夹」按钮的无头入口——保存目标规则与
+    /// UI 完全同一条（见 `import_target.zig`），真正干活的是 `import_cli.importRun`。
+    import_into: ?[]const u8 = null,
     /// `--import` 的底库：`.otto` 或旧 JSON，按 magic 判断。缺省 = 新建空库。
     import_library: ?[]const u8 = null,
     /// `--import` 的输出路径（OTTOLIB v1，原子写）。
@@ -119,6 +122,12 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.import_dir = args[index];
         } else if (std.mem.startsWith(u8, arg, "--import=")) {
             options.import_dir = arg["--import=".len..];
+        } else if (std.mem.eql(u8, arg, "--import-into")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.import_into = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--import-into=")) {
+            options.import_into = arg["--import-into=".len..];
         } else if (std.mem.eql(u8, arg, "--library")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -276,4 +285,18 @@ test "--import / --library / --save：两种写法都收，不占位置参数" {
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--import" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--library" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--save" }));
+}
+
+test "--import-into：两种写法都收，不占位置参数，--save 可省略" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--import-into", "C:\\packs" });
+    try testing.expectEqualStrings("C:\\packs", spaced.import_into.?);
+    try testing.expect(spaced.import_dir == null);
+    try testing.expect(spaced.save_path == null);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--import-into=C:\\packs", "--save=out.otto" });
+    try testing.expectEqualStrings("C:\\packs", joined.import_into.?);
+    try testing.expectEqualStrings("lib.json", joined.library_path.?);
+    try testing.expectEqualStrings("out.otto", joined.save_path.?);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--import-into" }));
 }
