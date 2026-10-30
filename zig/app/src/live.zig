@@ -4,7 +4,9 @@
 //!   * `zig/ports` 只认路径字节（相对被监视目录的 WTF-8），不认识样本、id、分组；
 //!   * `zig/core` 只认 `Change` 里的绝对路径，不碰文件系统、不碰 Win32；
 //!   * 本文件是两者之间唯一的翻译：相对 → 绝对、kind → `Change` 变体、
-//!     `overflow.lost` → `Change.overflow`。
+//!     `overflow.lost` → `Change.overflow`；
+//!   * `Change.overflow` 不逐条补课：标脏后交给 `rescan_ui.Rescan`，500 ms 防抖
+//!     后在后台线程重扫 watch root，再按 L0 差分增删改当前视图。
 //!
 //! 边界：
 //!   * 不依赖 UI：`Live` 可以被人眼背后的定时器驱动，也可以被 `--demo` 直接驱动；
@@ -20,17 +22,21 @@
 //!   * `overflow` 没有路径，`lost` 原样透传；空路径的路径事件丢弃。
 //!
 //! 线程模型：`ports.Watcher` 的后台线程只往固定队列里写；`poll()` 在调用方线程
-//! 排空队列 → 适配 → `Index.apply`。本文件不跨线程共享任何东西，也不加锁。
+//! 排空队列 → 适配 → `Index.apply` / `Rescan.service`。重扫的扫描线程只把
+//! `scan.Scan` 放进自旋锁保护的单格结果里；`Index` 仍然只在调用方线程上改。
 //!
 //! 所有权：
 //!   * `Index` 借用 `library`（不复制），`library` 必须比 `Live` 活得久；
 //!   * `poll()` 里 join 出来的路径放在每次 poll 重置的 arena 里，只活到本批
 //!     `Index.apply` 返回——`Index` 会把它要长期持有的路径自己复制一份；
-//!   * `root` 由 `Live` 复制持有，调用方传进来的切片之后可以失效。
+//!   * `root` 由 `Live` 复制持有，调用方传进来的切片之后可以失效；
+//!   * `rescan_ui.Rescan` 借用 `root`；`Live.deinit` 先停 watcher，再 join 扫描
+//!     线程，最后才释放字符串——扫描线程不会读到悬空路径。
 
 const std = @import("std");
 const core = @import("otto_core");
 const watch = @import("otto_watch");
+const rescan_ui = @import("rescan_ui.zig");
 
 /// `Live.init` 可能失败的集合：监听口岸打不开目录 / 起不了线程、根路径非法、
 /// 以及任何一次分配失败。
@@ -102,6 +108,7 @@ const AlignedAllocator = struct {
 
 pub const Live = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     /// 被监视目录的绝对路径（末尾分隔符已去掉）；`poll` 用它把相对路径 join 成绝对路径。
     root: []u8,
     index: core.index.Index,
@@ -112,9 +119,20 @@ pub const Live = struct {
     watch_allocator: *AlignedAllocator,
     /// 每次 poll 重置：本批 join 出来的路径只活到 `Index.apply` 返回。
     poll_arena: std.heap.ArenaAllocator,
+    /// 溢出后的局部重扫（500 ms 防抖 + 工作线程）。借用 `root`。
+    rescan: rescan_ui.Rescan,
+    last_rescan: rescan_ui.Report = .{},
+    rescan_serial: u64 = 0,
 
     /// 建立视图并开始监听 `root`。返回时后台线程已经挂好第一轮读。
-    pub fn init(allocator: std.mem.Allocator, library: *const core.store.Library, root: []const u8) InitError!Live {
+    ///
+    /// `allocator` 必须线程安全：重扫线程会用它在扫描结果里分配 arena。
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        library: *const core.store.Library,
+        root: []const u8,
+    ) InitError!Live {
         const owned_root = try normalizeRoot(allocator, root);
         errdefer allocator.free(owned_root);
 
@@ -135,17 +153,20 @@ pub const Live = struct {
 
         return .{
             .allocator = allocator,
+            .io = io,
             .root = owned_root,
             .index = index,
             .watcher = watcher,
             .watch_allocator = watch_allocator,
             .poll_arena = std.heap.ArenaAllocator.init(allocator),
+            .rescan = rescan_ui.Rescan.init(allocator, io, owned_root),
         };
     }
 
     /// 停监听、释放视图与全部字符串；之后不可再用。
     pub fn deinit(self: *Live) void {
         self.watcher.deinit();
+        self.rescan.deinit();
         self.watch_allocator.allocator().destroy(self.watcher);
         self.allocator.destroy(self.watch_allocator);
         self.index.deinit();
@@ -168,7 +189,82 @@ pub const Live = struct {
                 try changes.append(arena, change);
             }
         }
-        return self.index.apply(changes.items);
+
+        var report = core.index.ApplyReport{};
+        var overflow_lost: u32 = 0;
+        var has_overflow = false;
+        for (changes.items) |change| {
+            switch (change) {
+                .overflow => |lost| {
+                    has_overflow = true;
+                    overflow_lost +|= lost;
+                },
+                else => {},
+            }
+        }
+
+        if (has_overflow) {
+            // 溢出本身只是一条「有事件丢了」的信号：先标脏并排一次重扫窗口，
+            // 本批的其余事件不能先应用——重扫需要一个稳定的旧视图做基线。
+            self.index.markDirty();
+            self.rescan.request();
+            report.overflowed = true;
+            report.overflow_lost = overflow_lost;
+        }
+
+        if (has_overflow or self.rescan.active()) {
+            // 重扫期间压住事件，完成后再按原顺序 replay（Index.apply 幂等）。
+            // overflow 不压：它只标脏，同一批不需要再触发一轮。
+            for (changes.items) |change| {
+                switch (change) {
+                    .overflow => {},
+                    else => try self.rescan.holdChange(change),
+                }
+            }
+        } else {
+            report = try self.index.apply(changes.items);
+        }
+
+        if (try self.rescan.service(&self.index, &report)) |finished| {
+            self.last_rescan = finished;
+            self.rescan_serial +%= 1;
+            report.rescanned = true;
+            if (finished.ok) {
+                report.rescan_added = finished.added;
+                report.rescan_removed = finished.removed;
+                report.rescan_moved = finished.moved;
+                report.rescan_modified = finished.modified;
+                report.rescan_unchanged = finished.unchanged;
+                std.debug.print(
+                    "rescan: added={d} removed={d} moved={d} modified={d} dirtied={d} " ++
+                        "unchanged={d} scanned={d} replayed={d} dirty={} ms={d:.2}\n",
+                    .{
+                        finished.added,
+                        finished.removed,
+                        finished.moved,
+                        finished.modified,
+                        finished.dirtied,
+                        finished.unchanged,
+                        finished.scanned,
+                        finished.replayed,
+                        self.index.isDirty(),
+                        finished.elapsed_ms,
+                    },
+                );
+            } else {
+                std.debug.print(
+                    "rescan: failed error={s} replayed={d} dirty={} ms={d:.2}\n",
+                    .{
+                        finished.failure orelse "?",
+                        finished.replayed,
+                        self.index.isDirty(),
+                        finished.elapsed_ms,
+                    },
+                );
+            }
+        }
+
+        return report;
     }
 
     /// 当前视图（只读）。下次 `poll` 可能让数组搬家，别长期持有这个切片。
@@ -179,6 +275,33 @@ pub const Live = struct {
     /// 监听丢过事件、视图可能不完整（透传 `Index.isDirty()`）。
     pub fn dirty(self: *const Live) bool {
         return self.index.isDirty();
+    }
+
+    /// 强制注入一次溢出（测试 / `--demo-rescan` 的钩子）：和 watcher 报
+    /// `Change.overflow` 走同一条路——标脏 + 排重扫。不依赖真实的内核缓冲区溢出。
+    pub fn injectOverflow(self: *Live, lost: u32) error{OutOfMemory}!void {
+        _ = try self.index.apply(&.{.{ .overflow = lost }});
+        self.rescan.request();
+    }
+
+    /// 不经过溢出、主动排一次重扫（`--demo-rescan` 的「再跑一次」用它）。
+    pub fn requestRescan(self: *Live) void {
+        self.rescan.request();
+    }
+
+    /// 重扫排队 / 进行中（UI 可以据此决定是否显示「正在重扫」）。
+    pub fn rescanActive(self: *const Live) bool {
+        return self.rescan.active();
+    }
+
+    /// 已完成的重扫次数；每完成一次 +1（成功和失败都算，用来等结果）。
+    pub fn rescanSerial(self: *const Live) u64 {
+        return self.rescan_serial;
+    }
+
+    /// 最近一次完成的重扫的账。
+    pub fn lastRescan(self: *const Live) rescan_ui.Report {
+        return self.last_rescan;
     }
 };
 

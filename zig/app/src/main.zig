@@ -4,7 +4,7 @@
 //!
 //!   otto-lite [library.json] [--watch <dir>] [--select=0,1]
 //!   otto-lite --version              打印版本与运行形态（dev/portable/installed）
-//!   otto-lite --demo <dir>           文件监听自检（不取缩略图）
+//!   otto-lite --demo <dir> / --demo-rescan <dir>  监听与溢出重扫自检（不开窗）
 //!   otto-lite --demo-thumbs <dir>    缩略图取图层自检（不开窗）
 //!   otto-lite --preview <file>       预览自检（不开窗，打印事实 + kind/outcome/摘要）
 //!   otto-lite --play-test <file>     音频试听自检（解码 + 播 300ms + 断言位置前进）
@@ -437,7 +437,8 @@ const State = struct {
         s.samples = s.live.samples();
 
         const changed = report_events.added != 0 or report_events.removed != 0 or
-            report_events.renamed != 0 or report_events.modified != 0 or report_events.overflowed;
+            report_events.renamed != 0 or report_events.modified != 0 or
+            report_events.overflowed or report_events.rescanned;
         // 磁盘变了：之前「文件没了 / Shell 失败」的结论值得重试一次；过滤映射
         // 也要重建（改名不改样本数，光看数量会漏）。
         if (changed) {
@@ -500,7 +501,7 @@ pub fn main(init: std.process.Init) !void {
             "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
                 "      otto-lite --version\n" ++
                 "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
-                "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
+                "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
                 "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n" ++
@@ -538,7 +539,7 @@ pub fn main(init: std.process.Init) !void {
     // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。
     var live = try init.gpa.create(live_mod.Live);
     errdefer init.gpa.destroy(live);
-    live.* = try live_mod.Live.init(init.gpa, library, root);
+    live.* = try live_mod.Live.init(init.gpa, init.io, library, root);
     defer {
         live.deinit();
         init.gpa.destroy(live);

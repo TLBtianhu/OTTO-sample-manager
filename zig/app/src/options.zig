@@ -20,6 +20,8 @@ pub const Options = struct {
     /// `--version`：打印版本与形态后以 0 退出，不读库、不开窗。
     version_requested: bool = false,
     demo_dir: ?[]const u8 = null,
+    /// `--demo-rescan <dir>`：溢出后的局部重扫自检（不开窗）。
+    demo_rescan_dir: ?[]const u8 = null,
     demo_thumbs_dir: ?[]const u8 = null,
     /// `--preview <file>`：只走注册表打印一次预览摘要，不开窗口。
     preview_path: ?[]const u8 = null,
@@ -83,6 +85,12 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             index += 1;
             if (index == args.len) return error.MissingValue;
             options.demo_dir = args[index];
+        } else if (std.mem.eql(u8, arg, "--demo-rescan")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.demo_rescan_dir = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--demo-rescan=")) {
+            options.demo_rescan_dir = arg["--demo-rescan=".len..];
         } else if (std.mem.eql(u8, arg, "--watch")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -195,6 +203,16 @@ test "位置参数是库文件；--watch / --select 带值" {
     try testing.expectEqualStrings("lib.json", options.library_path.?);
     try testing.expectEqualStrings("C:\\lib", options.watch_dir.?);
     try testing.expectEqualStrings("0,2", options.select.?);
+}
+
+test "--demo-rescan 两种写法都收，不占位置参数" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--demo-rescan", "C:\\samples" });
+    try testing.expectEqualStrings("C:\\samples", spaced.demo_rescan_dir.?);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--demo-rescan=C:\\samples" });
+    try testing.expectEqualStrings("C:\\samples", joined.demo_rescan_dir.?);
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--demo-rescan" }));
 }
 
 test "--copy-now 两种写法；--demo-transport 是开关" {

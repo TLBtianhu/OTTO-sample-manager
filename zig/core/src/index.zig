@@ -56,6 +56,7 @@
 
 const std = @import("std");
 const model = @import("model.zig");
+const rescan = @import("rescan.zig");
 const store = @import("store.zig");
 
 /// 一条文件变更事件。
@@ -104,10 +105,31 @@ pub const ApplyReport = struct {
     overflowed: bool = false,
     /// 本批 `overflow` 声称丢失的条数之和；0 = 没有 overflow，或有但条数未知。
     overflow_lost: u32 = 0,
+    /// 本批是否完成了一次局部重扫（成功或失败）。调用方据此把「重扫改了行」
+    /// 也当成需要刷新视图的信号；失败时 `dirty` 保持，计数全是 0。
+    rescanned: bool = false,
+    /// 重扫的账（与 `added` 等监听事件计数分开；重扫是另一条路径）。
+    rescan_added: usize = 0,
+    rescan_removed: usize = 0,
+    rescan_moved: usize = 0,
+    rescan_modified: usize = 0,
+    rescan_unchanged: usize = 0,
     /// 需要作废缓存的样本身份（`modified` 的那些，用**更新前**的键——
     /// 缓存里现在挂着的就是这个键）。
     ///
-    /// 指向 `Index` 内部缓冲：有效期到下一次 `apply` 或 `deinit`。
+    /// 指向 `Index` 内部缓冲：有效期到下一次 `apply` / `applyRescan` 或 `deinit`。
+    invalidated: []const model.StableKey = &.{},
+};
+
+/// `applyRescan` 的账。计数与 `rescan.Diff` 同口径；`invalidated` 是
+/// 更新前需要作废的缓存键（与 `ApplyReport.invalidated` 同一块内部缓冲，
+/// 有效期到下一次 `apply` / `applyRescan` / `deinit`）。
+pub const RescanReport = struct {
+    added: usize = 0,
+    removed: usize = 0,
+    moved: usize = 0,
+    modified: usize = 0,
+    unchanged: usize = 0,
     invalidated: []const model.StableKey = &.{},
 };
 
@@ -191,6 +213,97 @@ pub const Index = struct {
         return report;
     }
 
+    /// 应用一次局部重扫的差分：先更新、再按下标从后往前删、最后追加新增。
+    ///
+    /// 顺序是刻意的：更新阶段用旧下标（还没删东西，下标稳定）；删除阶段从后
+    /// 往前（前面的删除不会让后面的下标失效）；新增追加到末尾（与 `created`
+    /// 同一条规则）。这样 `diff` 里的下标始终指「这一批开始时的旧列表」。
+    ///
+    /// 注释表不归本模块管：删除只动视图，不会去删按身份保存的用户注释。
+    pub fn applyRescan(
+        self: *Index,
+        difference: rescan.Diff,
+        fresh: []const rescan.ScanEntry,
+    ) error{OutOfMemory}!RescanReport {
+        self.invalidated.clearRetainingCapacity();
+        _ = self.invalidated_arena.reset(.retain_capacity);
+        // moved 与 changed 有交集，按两者之和预留足够；多预留不算浪费。
+        try self.invalidated.ensureUnusedCapacity(
+            self.allocator,
+            difference.changed.len + difference.moved.len,
+        );
+
+        var report = RescanReport{
+            .added = difference.added.len,
+            .removed = difference.removed.len,
+            .moved = difference.moved.len,
+            .modified = difference.changed.len,
+            .unchanged = difference.unchanged,
+        };
+
+        // 1. 在改任何字段之前记下旧键：缓存里现在挂着的是旧键。
+        //    `changed` / `moved` 都按下标升序，合并着走一遍，同一条样本只记一次
+        //    （移动 + 改内容会同时出现在两边，缓存键只需要作废一次）。
+        var changed_cursor: usize = 0;
+        var moved_cursor: usize = 0;
+        const no_more = std.math.maxInt(usize);
+        while (changed_cursor < difference.changed.len or moved_cursor < difference.moved.len) {
+            const changed_old = if (changed_cursor < difference.changed.len)
+                difference.changed[changed_cursor].old.?
+            else
+                no_more;
+            const moved_old = if (moved_cursor < difference.moved.len)
+                difference.moved[moved_cursor].old.?
+            else
+                no_more;
+            const index = @min(changed_old, moved_old);
+            if (index == no_more) break;
+            const sample = self.items.items[index];
+            // 纯「身份 + 路径」改名：身份键没变、mtime 也没变，缓存键仍然有效，
+            // 不需要作废（缩略图键里不含路径）。只有无身份的移动才依赖路径。
+            const unchanged_identity_move = changed_old != index and sample.identity != null;
+            if (!unchanged_identity_move) try self.recordInvalidated(sample.stableKey());
+            if (changed_old == index) changed_cursor += 1;
+            if (moved_old == index) moved_cursor += 1;
+        }
+
+        // 2. 更新 / 移动（下标仍与旧列表一致）。
+        for (difference.changed) |ref| {
+            const index = ref.old orelse continue;
+            const entry = fresh[ref.fresh];
+            const sample = &self.items.items[index];
+            sample.file_size = entry.size;
+            sample.mtime = entry.mtime;
+            // 扫描这一轮没拿到身份（FAT / 网络盘 / 权限）时保留旧身份：
+            // 注释表键在身份上，不能因为一次「未知」就降级成退化键。
+            if (entry.identity) |identity| sample.identity = identity;
+            // 重扫只刷新 L0；L1（时长 / 采样率 / 声道）仍等 probe，别把
+            // pending 标志清掉——那会让「还没读过」看起来像「确认是 0」。
+        }
+        for (difference.moved) |ref| {
+            const index = ref.old orelse continue;
+            const entry = fresh[ref.fresh];
+            const sample = &self.items.items[index];
+            try self.replacePath(sample, entry.path);
+            sample.file_size = entry.size;
+            sample.mtime = entry.mtime;
+            if (entry.identity) |identity| sample.identity = identity;
+        }
+
+        // 3. 从后往前删：`removed` 已按下标升序。
+        var cursor = difference.removed.len;
+        while (cursor > 0) {
+            cursor -= 1;
+            self.removeAt(difference.removed[cursor]);
+        }
+
+        // 4. 追加真正的新文件（按扫描顺序）。
+        for (difference.added) |ref| try self.insertScanEntry(fresh[ref.fresh]);
+
+        report.invalidated = self.invalidated.items;
+        return report;
+    }
+
     /// 当前视图（只读）。下次 `apply` 可能让数组搬家，别长期持有这个切片。
     pub fn samples(self: *const Index) []const model.Sample {
         return self.items.items;
@@ -199,6 +312,13 @@ pub const Index = struct {
     /// `overflow` 之后是否为「可能缺事件」的脏视图。
     pub fn isDirty(self: *const Index) bool {
         return self.dirty;
+    }
+
+    /// 标脏。除了 `overflow` 事件，应用层还可以在「已经收到溢出信号、但这一批
+    /// 事件先被压住等重扫」时主动标脏——脏标记描述的是视图可信度，不是某一批
+    /// 事件的副产物。
+    pub fn markDirty(self: *Index) void {
+        self.dirty = true;
     }
 
     /// 清除脏标记。只清标志、不重建视图：调用方应在重新加载 / 重建之后调用。
@@ -227,7 +347,23 @@ pub const Index = struct {
     }
 
     fn insertCreated(self: *Index, path: []const u8) error{OutOfMemory}!void {
-        const owned_path = try self.allocator.dupe(u8, path);
+        try self.insertScanEntry(.{
+            .path = path,
+            .name = model.baseName(path),
+            .ext = model.fileExtFromPath(path),
+            .size = 0,
+            .mtime = 0,
+            .identity = null,
+        });
+    }
+
+    /// 从一条扫描事实建样本：L0 字段（大小 / mtime / 身份）直接落地，L1 元数据
+    /// 仍未读（`pending_metadata = true`，等后台 probe 补齐）。
+    ///
+    /// `name` / `ext` 不用：`file_ext` 必须指向 Index 自己持有的路径，
+    /// 否则扫描结束后扫描 arena 一释放就成了悬空切片。
+    fn insertScanEntry(self: *Index, entry: rescan.ScanEntry) error{OutOfMemory}!void {
+        const owned_path = try self.allocator.dupe(u8, entry.path);
         errdefer self.allocator.free(owned_path);
         const sample_id = try self.newCreatedId();
         errdefer self.allocator.free(sample_id);
@@ -243,13 +379,29 @@ pub const Index = struct {
             // 与 store 的口径一致：没写 originalId 的样本，original_id 等于 id。
             .original_id = sample_id,
             .imported_at = 0,
-            .mtime = 0,
-            .identity = null,
+            .file_size = entry.size,
+            .mtime = entry.mtime,
+            .identity = entry.identity,
             // 时长 / 采样率 / 声道还没有人读过：等后台扫描补齐。
             .pending_metadata = true,
         });
         self.ownString(owned_path);
         self.ownString(sample_id);
+    }
+
+    /// 改名 / 同卷移动：只换路径与派生名，id / 身份 / 分组 / 目录 / 顺序保持。
+    /// `sample.file_path` 指向旧字符串时先复制新路径，再释放旧字符串。
+    fn replacePath(self: *Index, sample: *model.Sample, new_path: []const u8) error{OutOfMemory}!void {
+        const owned_path = try self.allocator.dupe(u8, new_path);
+        errdefer self.allocator.free(owned_path);
+        try self.owned.ensureUnusedCapacity(self.allocator, 1);
+
+        const old_path = sample.file_path;
+        sample.file_path = owned_path;
+        sample.file_name = model.fileNameFromPath(owned_path);
+        sample.file_ext = model.fileExtFromPath(owned_path);
+        self.ownString(owned_path);
+        self.releaseString(old_path);
     }
 
     /// `removed`：从视图移除。注释表不归本模块管，所以这里不会碰它。

@@ -32,7 +32,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
     const json_text = try demoLibraryJson(allocator, &paths);
     const library = try core.store.load(allocator, json_text);
 
-    var live = try live_mod.Live.init(allocator, &library, root);
+    var live = try live_mod.Live.init(init.gpa, init.io, &library, root);
     defer live.deinit();
 
     const before = live.samples().len;
