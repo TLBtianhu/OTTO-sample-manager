@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_caps", .module = caps_dep.module("otto_caps") },
         // 拖出口岸：拖拽与剪贴板（OLE / Shell，只在 Windows 上场）。
         .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
+        // 库文件口岸：原子写 / 整读（容器格式在 core 的 library_binary）。
+        .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
     };
 
     const app_module = b.createModule(.{
@@ -89,6 +91,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_thumb", .module = thumb_dep.module("otto_thumb") },
             .{ .name = "otto_caps", .module = caps_dep.module("otto_caps") },
             .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
+            .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
         },
     });
     test_module.addOptions("build_options", build_options);

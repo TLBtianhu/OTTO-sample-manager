@@ -35,11 +35,13 @@ zig build test
 | `src/diagnostics.zig` | `LoadError` 与 `LoadReport`（修复 / 丢弃计数） |
 | `src/reconcile.zig` | 旧数据修复：目录归属、扁平目录、目录树、分组双向关系、排序重建 |
 | `src/store.zig` | `Library`、`load` / `loadFile`，解析 map 形式的样本 / 分组 / 目录并装配索引 |
+| `src/library_binary.zig` | `OTTOLIB` v1 二进制快照的编码 / 解码：版本化头、定长字段、字符串长度与数量上限、尾部 CRC32，全部校验且绝不 panic（不碰 I/O） |
 | `src/query.zig` | 目录递归过滤、分组过滤、文件名子串过滤、排序、子树枚举 |
 | `src/annotations.zig` | 以 `StableKey`（身份优先）为键的注释表：`AnnotationTable` / `resolve` 旧库迁移 |
 | `src/index.zig` | 可变索引层：在不可变 `Library` 之上滚动应用 created / removed / renamed / modified / overflow |
 | `src/tests.zig` | 集成测试（4 个 fixture + 1000 条合成数据耗时打印） |
 | `src/store_test.zig` | `store` 的单元测试（内联 JSON） |
+| `src/library_binary_test.zig` | `OTTOLIB` 往返 / 四个具名损坏错误 / 上限 / 任意截断或翻字节不 panic |
 | `src/annotations_test.zig` | 身份 / 注释表的集成测试（改名不丢、fallback、`resolve` 迁移、identity 加载） |
 | `src/index_test.zig` | 索引层的集成测试（顺序 / 身份 / 注释 / 脏标记 / 降级 / 覆盖） |
 | `fixtures/*.json` | 全部为手工构造的合成数据，**不含任何真实用户数据** |

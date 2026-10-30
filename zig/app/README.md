@@ -28,6 +28,31 @@ user data is committed. Its files (`D:/lib/...`) do not exist on a normal
 machine, so the default list shows the "file missing" placeholder in every
 thumbnail slot — that is the honest state, not a broken image.
 
+## Library files (`OTTOLIB` v1)
+
+The positional library argument is opened by **file header**, not by extension:
+`OTTOLIB\0` goes through `core.library_binary`, anything that looks like a JSON
+object still goes through `core.store` (old electron-store dumps remain
+readable). A new library is written as `OTTOLIB` v1: versioned header, fixed
+little-endian records, per-string/count limits and a trailing CRC32.
+
+```powershell
+# old JSON -> new binary snapshot, atomically (same-dir .tmp + fsync + MoveFileExW)
+zig-out/bin/otto-lite.exe --convert fixtures/library.json %TEMP%\big.otto
+
+# format is decided by magic; corrupted files report BadMagic / UnknownVersion /
+# Truncated / ChecksumMismatch instead of a generic parse error
+zig-out/bin/otto-lite.exe --library-info %TEMP%\big.otto
+zig-out/bin/otto-lite.exe --library-info fixtures/library.json
+
+# the UI opens the binary snapshot exactly like a JSON library
+zig-out/bin/otto-lite.exe %TEMP%\big.otto --nanoui-wait=2 --nanoui-snapshot=lib.png
+```
+
+`--convert` prints `samples=… groups=… folders=… bytes=… write_ms=…`;
+`--library-info` prints `format=json|otto samples=… groups=… bytes=…` plus a
+`read_ms` line. This first slice does **not** write back from the UI yet.
+
 ## Thumbnails
 
 Every row asks `src/thumbs.zig` for one 64px thumbnail (32 points) on its left:

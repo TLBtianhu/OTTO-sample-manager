@@ -7,6 +7,13 @@
 
 const std = @import("std");
 
+/// `--convert <in.json> <out.otto>` 的两个位置值。用 struct 而不是两个可选字段，
+/// 避免"有输入没输出"这种只可能来自解析 bug 的中间状态。
+pub const Convert = struct {
+    input: []const u8,
+    output: []const u8,
+};
+
 pub const Options = struct {
     /// 位置参数；`null` = 用形态决定的默认库。
     library_path: ?[]const u8 = null,
@@ -25,6 +32,10 @@ pub const Options = struct {
     /// `--filter <text>` / `--filter=<text>`：不开窗的过滤自检。
     /// 空串是一个**有效值**（`--filter=` = 不过滤，应命中全部）。
     filter: ?[]const u8 = null,
+    /// `--convert <in.json> <out.otto>`：载入旧 JSON → 写新二进制快照。
+    convert: ?Convert = null,
+    /// `--library-info <file>`：按 magic 判断格式并打印条数 / 字节数。
+    library_info: ?[]const u8 = null,
 };
 
 pub fn parse(args: anytype) error{MissingValue}!Options {
@@ -78,6 +89,24 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.filter = args[index];
         } else if (std.mem.startsWith(u8, arg, "--filter=")) {
             options.filter = arg["--filter=".len..];
+        } else if (std.mem.eql(u8, arg, "--convert")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            const input = args[index];
+            index += 1;
+            if (index == args.len or std.mem.startsWith(u8, args[index], "--")) return error.MissingValue;
+            options.convert = .{ .input = input, .output = args[index] };
+        } else if (std.mem.startsWith(u8, arg, "--convert=")) {
+            const input = arg["--convert=".len..];
+            index += 1;
+            if (index == args.len or std.mem.startsWith(u8, args[index], "--")) return error.MissingValue;
+            options.convert = .{ .input = input, .output = args[index] };
+        } else if (std.mem.eql(u8, arg, "--library-info")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.library_info = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--library-info=")) {
+            options.library_info = arg["--library-info=".len..];
         } else if (!std.mem.startsWith(u8, arg, "--")) {
             options.library_path = arg;
         }
@@ -169,4 +198,32 @@ test "--filter 两种写法都收；--filter= 是空串（有效值），没写�
     try testing.expect(none.filter == null);
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--filter" }));
+}
+
+test "--convert 吃两个值：输入 JSON、输出 OTTOLIB" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--convert", "in.json", "out.otto" });
+    try testing.expectEqualStrings("in.json", spaced.convert.?.input);
+    try testing.expectEqualStrings("out.otto", spaced.convert.?.output);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--convert=in.json", "out.otto" });
+    try testing.expectEqualStrings("in.json", joined.convert.?.input);
+    try testing.expectEqualStrings("out.otto", joined.convert.?.output);
+
+    // 两个值缺一不可，也不能把下一个 --flag 当成输出路径。
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--convert" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--convert", "in.json" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--convert=in.json" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--convert", "in.json", "--filter=x" }));
+}
+
+test "--library-info 两种写法都收，不占位置参数" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--library-info", "kit.otto" });
+    try testing.expectEqualStrings("kit.otto", spaced.library_info.?);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--library-info=C:\\lib\\kit.otto" });
+    try testing.expectEqualStrings("C:\\lib\\kit.otto", joined.library_info.?);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--library-info" }));
 }
