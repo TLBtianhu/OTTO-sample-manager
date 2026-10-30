@@ -96,6 +96,26 @@ pub fn byFileName(
     return apply(backing, library, .{ .name_contains = needle });
 }
 
+/// 文件名子串命中的**样本下标**，保持传入顺序（列表的"行 → 样本"映射）。
+///
+/// 与 `name_contains` 是同一条规则（`containsIgnoreCase`：ASCII 大小写不敏感、
+/// 空查询等于不过滤），只是不复制样本、不改顺序：UI 的过滤结果必须能按下标
+/// 找回 `samples`，复制一份样本会让选择与预览指着两套下标。
+/// 返回的切片归调用方（`allocator.free`）。
+pub fn matchingIndices(
+    backing: std.mem.Allocator,
+    samples: []const model.Sample,
+    needle: []const u8,
+) QueryError![]usize {
+    var result: std.ArrayList(usize) = .empty;
+    errdefer result.deinit(backing);
+    for (samples, 0..) |sample, index| {
+        if (!containsIgnoreCase(sample.file_name, needle)) continue;
+        try result.append(backing, index);
+    }
+    return result.toOwnedSlice(backing);
+}
+
 /// 返回 root_id 及其全部后代目录 id（先序、去重、环安全）。未知目录返回只含自身的列表。
 pub fn folderSubtreeIds(
     backing: std.mem.Allocator,
@@ -290,6 +310,31 @@ test "containsIgnoreCase 支持中文与空串" {
     try std.testing.expect(!containsIgnoreCase("Kick", "snare"));
     try std.testing.expect(containsIgnoreCase("Kick", ""));
     try std.testing.expect(!containsIgnoreCase("", "kick"));
+}
+
+test "matchingIndices 是行→样本的映射：大小写不敏感、空查询全中、无命中为空" {
+    const samples = [_]model.Sample{
+        .{ .id = "a", .file_name = "Kick 01", .file_ext = ".wav", .file_path = "C:\\lib\\kick.wav" },
+        .{ .id = "b", .file_name = "Snare", .file_ext = ".wav", .file_path = "C:\\lib\\snare.wav" },
+        .{ .id = "c", .file_name = "IMG_002", .file_ext = ".png", .file_path = "C:\\lib\\img.png" },
+    };
+
+    const kick = try matchingIndices(std.testing.allocator, &samples, "kIcK");
+    defer std.testing.allocator.free(kick);
+    try std.testing.expectEqualSlices(usize, &.{0}, kick);
+
+    const img = try matchingIndices(std.testing.allocator, &samples, "img");
+    defer std.testing.allocator.free(img);
+    try std.testing.expectEqualSlices(usize, &.{2}, img);
+
+    // 空查询 = 不过滤：结果是 0..n-1，顺序与传入一致。
+    const all = try matchingIndices(std.testing.allocator, &samples, "");
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, all);
+
+    const none = try matchingIndices(std.testing.allocator, &samples, "guitar");
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
 test "目录环不会让递归查询死循环" {

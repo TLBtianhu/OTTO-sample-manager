@@ -111,6 +111,9 @@ pub const Panel = struct {
     current_provider: ?[]const u8 = null,
     /// true = 已提交请求、答案还没到。`current == null and pending` 显示"正在读取"。
     pending: bool = false,
+    /// Enter 想播放，但音频还压在 worker 上：`poll` 接手到音频就补这一次播放。
+    /// `sync` 换样本时清掉，免得"给上一行按的 Enter"播了下一行。
+    wants_play: bool = false,
     active_generation: u64 = 0,
     /// 上一帧看到的播放状态：播放自然结束时没有新 Outcome，靠它触发一次重画，
     /// 让按钮从"停止"变回"播放"。
@@ -176,6 +179,7 @@ pub const Panel = struct {
         self.clearCurrent();
         self.clearFacts();
         self.pending = false;
+        self.wants_play = false;
         self.active_generation +%= 1;
         const generation = self.active_generation;
 
@@ -229,6 +233,16 @@ pub const Panel = struct {
         self.current = result.outcome;
         self.current_provider = result.provider;
         self.pending = false;
+        // Enter 比读数先按：现在音频到了，补上这次播放。
+        if (self.wants_play) {
+            self.wants_play = false;
+            if (self.current) |*outcome| switch (outcome.*) {
+                .audio => |*session| {
+                    if (!session.isPlaying()) _ = preview_audio.play(session);
+                },
+                else => {},
+            };
+        }
         return true;
     }
 
@@ -286,6 +300,23 @@ pub const Panel = struct {
         if (now == self.was_playing) return false;
         self.was_playing = now;
         return true;
+    }
+
+    /// Enter：当前预览是音频就开始播放。已经在播就不从头重来（Enter 是"预览
+    /// 这一行"，不是"重播"）。返回是否正在播放，调用方据此重画。
+    ///
+    /// 音频还在 worker 上（`pending`）时记下意图，`poll` 接手到音频再播：
+    /// 光标刚移过去就按 Enter 也不会白按。
+    pub fn playCurrent(self: *Panel) bool {
+        self.wants_play = false;
+        const outcome = if (self.current) |*value| value else {
+            self.wants_play = self.pending;
+            return false;
+        };
+        return switch (outcome.*) {
+            .audio => |*session| if (session.isPlaying()) true else preview_audio.play(session),
+            else => false,
+        };
     }
 
     // -----------------------------------------------------------------------

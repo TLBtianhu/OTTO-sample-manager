@@ -73,6 +73,16 @@ pub const Selection = struct {
         self.cursor = null;
     }
 
+    /// 只清选中集合与锚点，保留"当前行"。
+    ///
+    /// 过滤条件变化时用：行号整体变了，选中集合必须清空（否则会指错文件），
+    /// 但光标还要尽量停在原来那个样本的新行上（`filter.cursorSample` 决定）。
+    /// 空白处点击与 Esc 清选择仍走 `clear`（连光标一起清）。
+    pub fn clearBits(self: *Selection) void {
+        self.bits.unsetAll();
+        self.anchor = null;
+    }
+
     /// 只选中这一行；锚点与当前行都指向它。
     pub fn selectOnly(self: *Selection, index: usize) void {
         if (index >= self.len()) return;
@@ -103,6 +113,19 @@ pub const Selection = struct {
     pub fn add(self: *Selection, index: usize) void {
         if (index >= self.len()) return;
         self.bits.set(index);
+    }
+
+    /// 清空后只选中 `indices` 里的样本；锚点与当前行分别指向 `anchor` / `cursor`。
+    ///
+    /// 过滤列表里的 Shift+点击用它：只选看得见的行，不把被过滤掉的样本顺手带进来
+    /// （用户看不见它们，计数与拖出却会带上）。
+    pub fn selectList(self: *Selection, anchor: usize, cursor: usize, indices: []const usize) void {
+        self.bits.unsetAll();
+        for (indices) |index| {
+            if (index < self.len()) self.bits.set(index);
+        }
+        self.anchor = if (anchor < self.len()) anchor else null;
+        self.cursor = if (cursor < self.len()) cursor else null;
     }
 
     /// 一次点击的完整语义。行号越界时什么也不做（防御列表缩短的那一帧）。
@@ -304,6 +327,42 @@ test "拖拽取集合：行在选中里 → 全部；不在 → 只有它" {
     const one = try sel.dragIndices(testing.allocator, 2);
     defer testing.allocator.free(one);
     try testing.expectEqualSlices(usize, &.{2}, one);
+}
+
+test "selectList 只选给定下标，锚点/当前行指向两端" {
+    var sel: Selection = .{};
+    defer sel.deinit(testing.allocator);
+    try sel.resize(testing.allocator, 6);
+
+    sel.selectList(1, 4, &.{ 1, 3, 4 });
+    try expectBits(&sel, &.{ false, true, false, true, true, false });
+    try testing.expectEqual(@as(?usize, 1), sel.anchor);
+    try testing.expectEqual(@as(?usize, 4), sel.cursor);
+
+    // 越界下标被忽略；锚点越界时作废，当前行越界时也作废。
+    sel.selectList(9, 9, &.{ 0, 8 });
+    try expectBits(&sel, &.{ true, false, false, false, false, false });
+    try testing.expectEqual(@as(?usize, null), sel.anchor);
+    try testing.expectEqual(@as(?usize, null), sel.cursor);
+}
+
+test "clearBits 只清选中集合，保留当前行（过滤后光标还要用）" {
+    var sel: Selection = .{};
+    defer sel.deinit(testing.allocator);
+    try sel.resize(testing.allocator, 5);
+
+    sel.click(1, .{});
+    sel.click(3, .{ .ctrl = true });
+    try expectBits(&sel, &.{ false, true, false, true, false });
+
+    sel.clearBits();
+    try expectBits(&sel, &.{ false, false, false, false, false });
+    try testing.expectEqual(@as(?usize, null), sel.anchor);
+    try testing.expectEqual(@as(?usize, 3), sel.cursor);
+
+    // `clear` 仍然是"连光标一起清"的那个。
+    sel.clear();
+    try testing.expectEqual(@as(?usize, null), sel.cursor);
 }
 
 test "Ctrl+C 取集合；没有选中就用当前行；都没有就是空" {

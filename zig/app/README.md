@@ -94,14 +94,57 @@ zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
 #   (its facts are printed before the outcome either way)
 ```
 
+## Search and keyboard
+
+A full-width field (`搜索素材…`) sits above the list:
+
+- **Ctrl+F** focuses it; **Esc** clears the query and gives the keyboard back;
+- typing filters as it goes (no debounce: a 2000-sample library is one pass over
+  memory);
+- matching is a case-insensitive substring of the **file name**, the same
+  `containsIgnoreCase` rule as `core.query`: `core.query.matchingIndices` gives
+  the row → sample mapping, and the app does not carry a second matcher;
+- an empty query shows everything.
+
+The header reads `N 个素材 · M 命中 · K 选中`.
+
+| key | action |
+| --- | --- |
+| ↑ / ↓ | move the cursor row (clamped at both ends, no wrap) and select that row |
+| Home / End | first / last row |
+| Enter | preview the cursor row; an audio row starts playing |
+| Esc | clear the search first, then the selection |
+
+**Why a filter change clears the selection:** rows are positions, and filtering
+renumbers every one of them; a selection kept across a filter change would point
+at different files. The list only walks the row → sample-index mapping, while
+selection, preview and drag-out stay keyed by sample index — so the selection is
+dropped honestly instead of being silently rewritten. The cursor keeps a sample
+index of its own: if the old sample is still in the result it stays on it (at its
+new row), otherwise it falls back to row 0.
+
+Shift+click selects only the **visible** rows between the anchor and the target:
+doing it by sample index would also select filtered-out files the user cannot
+see while the count and drag-out would include them.
+
+The preview follows the cursor (so a filtered row can be looked at without a
+click); the selection count stays 0 until an arrow key or a click selects it.
+The "hit" rows are renumbered from 1 in the filtered list.
+
+Not in this half: pinyin / initials, the input-method (IME) composition path,
+matching-substring highlighting and fuzzy matching.
+
 ## Headless checks
 
 ```powershell
 zig-out/bin/otto-lite.exe --nanoui-snapshot=shot.png       # first frame only
 zig-out/bin/otto-lite.exe --nanoui-wait=2 --nanoui-snapshot=shot.png   # after thumbnails land
 
-# two selected rows (tint + "N 个素材 · M 选中" header), no input at all:
+# two selected rows (tint + "N 个素材 · M 命中 · K 选中" header), no input at all:
 zig-out/bin/otto-lite.exe --select=0,1 --nanoui-snapshot=sel.png
+
+# the search field: type into it, then ↓↓ and Enter, all headless
+zig-out/bin/otto-lite.exe C:\src\otto-testkit\library.json --nanoui-script="chord:ctrl+f;type:img;key:down;key:down;key:enter" --nanoui-snapshot=search.png
 
 # a real click through the script runner: row 1, then the empty area below it
 # (use a library with fewer rows than fit the window)
@@ -128,7 +171,7 @@ Melodyne, Explorer) or copy them to the clipboard.
 - **Shift+click**: select the range from the anchor (the last clicked row) to
   this one.
 - **Click the empty area** below the rows: clear the selection.
-- Selected rows are tinted; the header reads `N 个素材 · M 选中`.
+- Selected rows are tinted; the header reads `N 个素材 · M 命中 · K 选中`.
 
 **Drag out**: press on a row and move more than 6 points. If the row is part of
 the selection, the whole selection is dragged; otherwise only that row. The
@@ -167,6 +210,15 @@ zig-out/bin/otto-lite.exe --demo-transport
 ## Self-checks
 
 ```powershell
+# filter without a window: load → filter → matched=N and the first 3 hits
+zig-out/bin/otto-lite.exe C:\src\otto-testkit\library.json --filter=img
+#   otto-lite: filter="img" total=12 matched=8
+#     1. img00.bmp
+#     2. img00.png
+#     3. img01.bmp
+zig-out/bin/otto-lite.exe C:\src\otto-testkit\library.json --filter=
+#   otto-lite: filter="" total=12 matched=12   (empty query = everything)
+
 # file watching: 3 empty wavs → watch → a 4th arrives
 zig-out/bin/otto-lite.exe --demo <dir>
 
