@@ -32,6 +32,9 @@ test {
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");
     _ = @import("import_cli_test.zig");
+    // 导入的保存目标策略（纯字符串）与 UI 状态机文案（线程/对话框走人工验收）。
+    _ = @import("import_target.zig");
+    _ = @import("import_ui.zig");
     _ = @import("mode.zig");
     _ = @import("version.zig");
     // 预览契约与注册表顺序；`providers/root.zig` 里的 comptime 检查也会在这里跑。

@@ -51,6 +51,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(caps_library);
 
+    // 文件夹选择口岸：IFileOpenDialog 的"选择文件夹"模式（手写 COM vtable）。
+    // ole32 是 CoInitializeEx / CoCreateInstance / CoTaskMemFree 的落点。
+    const folder_picker_module = b.addModule("otto_folder_picker", .{
+        .root_source_file = b.path("src/folder_picker.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    folder_picker_module.linkSystemLibrary("ole32", .{});
+    const folder_picker_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_folder_picker",
+        .root_module = folder_picker_module,
+    });
+    b.installArtifact(folder_picker_library);
+
     // 拖出口岸：公共 API（drag.zig）+ OLE / Shell 后端（drag_win.zig）。
     // user32 是隐藏源窗口与鼠标捕获的落点；ole32 / shell32 是拖放、PIDL 与
     // 剪贴板的落点。同样挂在模块上，消费方链接 otto_drag 自动带上。
@@ -107,7 +122,7 @@ pub fn build(b: *std.Build) void {
     });
     probe_module.addImport("otto_wav_header", wav_header_module);
 
-    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件 / 扫描 / 探测口岸的单元与集成测试（真 Win32 + 真 Shell）");
+    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件 / 扫描 / 探测 / 文件夹选择口岸的单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/watch_test.zig"),
@@ -205,4 +220,16 @@ pub fn build(b: *std.Build) void {
     const run_wav_header_tests = b.addRunArtifact(b.addTest(.{ .root_module = wav_header_test_module }));
     run_wav_header_tests.step.dependOn(&run_probe_tests.step);
     test_step.dependOn(&run_wav_header_tests.step);
+
+    // 文件夹选择：只跑纯逻辑（选项位 / 取消码 / 宽字符路径 / 环境变量开关）；
+    // 真实对话框必须人工验证，见 `folder_picker.zig` 的文件头。
+    const folder_picker_test_module = b.createModule(.{
+        .root_source_file = b.path("src/folder_picker_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    folder_picker_test_module.linkSystemLibrary("ole32", .{});
+    const run_folder_picker_tests = b.addRunArtifact(b.addTest(.{ .root_module = folder_picker_test_module }));
+    run_folder_picker_tests.step.dependOn(&run_wav_header_tests.step);
+    test_step.dependOn(&run_folder_picker_tests.step);
 }

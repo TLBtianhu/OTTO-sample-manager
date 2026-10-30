@@ -59,7 +59,17 @@ zig-out/bin/otto-lite.exe %TEMP%\big.otto --nanoui-wait=2 --nanoui-snapshot=lib.
 zig-out/bin/otto-lite.exe --import C:\packs\drums --save %TEMP%\kit.otto
 # on top of an existing library (JSON or OTTOLIB, format decided by magic):
 zig-out/bin/otto-lite.exe --import C:\packs\drums --library old.otto --save kit.otto
+# the UI button's headless entry: same importRun, same save-target rule:
+zig-out/bin/otto-lite.exe old.json --import-into C:\packs\drums
 ```
+
+The UI has the same thing behind a 「导入文件夹」 button next to the search
+field: `IFileOpenDialog` picks a folder, `importRun` runs on a worker thread,
+and the list is reloaded from the file that was just written. A JSON library is
+saved as the sibling `<stem>.otto` and the header flashes 「已转为 OTTOLIB」;
+`.otto` is saved in place. `OTTO_NO_DIALOG=1` makes the picker return
+`error.Cancelled` before COM is touched, so `--nanoui-script` can click the
+button without a real dialog (the real dialog itself needs a human).
 
 The pipeline is scan (L0) → probe (L1, header only) → dedupe → merge → atomic
 write; it never creates a window or touches nanoui:
@@ -87,9 +97,9 @@ scanned=12 added=12 skipped_path=0 skipped_identity=0 failed=0 wrote=… bytes=2
 ```
 
 On the M3 fixtures this imports 500 WAVs in **85 ms** (36 ms on re-run) and
-2000 WAVs in **297 ms**, including the atomic write. Not in this slice: a folder
-picker UI, progress reporting, thumbnail pre-warming, and L1 for non-WAV
-formats.
+2000 WAVs in **297 ms**, including the atomic write. Not in this slice: a
+progress bar/cancel button during an import, thumbnail pre-warming, and L1 for
+non-WAV formats.
 
 ## Thumbnails
 

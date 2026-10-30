@@ -28,6 +28,16 @@ pub const Outcome = struct {
     filter_changed: bool = false,
     /// Enter：预览当前行（音频由调用方触发播放）。
     activate: bool = false,
+    /// 搜索框右侧的固定宽按钮被点了（「导入文件夹」）。按钮的语义不在本文件。
+    trailing_clicked: bool = false,
+};
+
+/// 搜索框右侧的固定宽按钮。宽度是**点**数且不参与 `fill`：窗宽 380 时搜索框
+/// 仍有约 256 点，不会被按钮挤没；窄窗也只是搜索框变短，按钮不消失。
+pub const Trailing = struct {
+    label: []const u8,
+    width: f32 = 92,
+    disabled: bool = false,
 };
 
 pub const Search = struct {
@@ -118,6 +128,7 @@ pub const Search = struct {
         c: *ui.Context,
         samples: []const core.model.Sample,
         selection: *selection_mod.Selection,
+        trailing: ?Trailing,
     ) Outcome {
         var outcome: Outcome = .{};
 
@@ -129,21 +140,33 @@ pub const Search = struct {
 
         // 本帧输入的字符在 draw 里才进 TextBuffer：再比一次，过滤当帧生效，
         // 表头与列表都不会慢一拍。
-        self.draw(c);
+        outcome.trailing_clicked = self.draw(c, trailing);
         if (self.rebuild(samples)) |change| self.onRebuild(c, selection, &outcome, change);
         return outcome;
     }
 
-    /// 只画搜索框（拖拽循环里也这么画：那一帧不处理输入，但要保持布局）。
-    pub fn draw(self: *Search, c: *ui.Context) void {
-        const bar = ui.div(c).wFull().px(12).py(6);
+    /// 只画搜索行（拖拽循环里也这么画：那一帧不处理输入，但要保持布局）。
+    /// 返回右侧按钮是否被点击；没有按钮时永远是 false。
+    pub fn draw(self: *Search, c: *ui.Context, trailing: ?Trailing) bool {
+        const bar = ui.div(c).row().wFull().itemsCenter().px(12).py(6).gap(8);
         const result = ui.textField(c, &self.buffer, .{
             .placeholder = placeholder,
             .width = .fill,
             .size = 12,
         });
+        var clicked = false;
+        if (trailing) |button| {
+            const it = ui.button(c, button.label, .{
+                .variant = .secondary,
+                .width = .{ .px = button.width },
+                .size = 11,
+                .disabled = button.disabled,
+            });
+            clicked = it.clicked;
+        }
         bar.end();
         self.focused = result.focused;
+        return clicked;
     }
 
     fn onRebuild(

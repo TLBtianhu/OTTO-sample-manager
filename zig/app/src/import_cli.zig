@@ -1,6 +1,11 @@
 //! 文件夹导入流水线（无窗口）：扫描 → probe → 去重 → 合并 → 原子写。
 //!
 //!   otto-lite.exe --import <folder> [--library <file.otto|library.json>] --save <out.otto>
+//!   otto-lite.exe --import-into <folder> [--save <file>]     UI 按钮的无头入口
+//!
+//! 流水线本体是 `importRun`（不打印、失败进 `Report.failure`）：CLI 的 `--import`、
+//! UI 的工作线程、`--import-into` 三处调的是同一个函数，区别只在谁决定保存目标、
+//! 谁把账打印出来。`--import-into` 与 UI 共用 `import_target.resolve` 的规则。
 //!
 //! 分工（和 M3 的分层一致）：
 //!   * 遍历、L0 事实、文件身份 —— `ports/scan.zig`；
@@ -34,6 +39,7 @@
 
 const std = @import("std");
 const core = @import("otto_core");
+const import_target = @import("import_target.zig");
 const library_io = @import("library_io.zig");
 const probe_mod = @import("otto_probe");
 const scan_mod = @import("otto_scan");
@@ -72,6 +78,38 @@ pub const Outcome = struct {
     code: u8 = 0,
     counts: Counts = .{},
     elapsed_ms: f64 = 0,
+};
+
+/// 失败发生在哪一步。UI 只显示具名错误，不弹窗；CLI 用它决定错误行的前缀。
+/// `internal` = `importRun` 自身返回了 error（目前只有内存不足）。
+pub const Stage = enum { library, scan, save, internal };
+
+/// 一次导入失败的具体原因：阶段 + 底层错误的静态名字（`@errorName`）。
+/// 名字指向编译期常量，不需要释放，可以跨线程交回 UI。
+pub const Failure = struct {
+    stage: Stage,
+    name: []const u8,
+};
+
+/// `importRun` 的账：字段名就是摘要行的字段名，另带耗时与失败原因。
+///
+/// `failure == null` 才是成功。失败时 `scanned/added/...` 是**已经做完的部分**，
+/// 调用方可以据此提示"扫了多少、写没写出去"；`bytes == 0` 表示没有写成功。
+pub const Report = struct {
+    scanned: usize = 0,
+    added: usize = 0,
+    skipped_path: usize = 0,
+    skipped_identity: usize = 0,
+    failed: usize = 0,
+    bytes: usize = 0,
+    ms: f64 = 0,
+    /// 扫描层跳过的东西（摘要第二行；字段不进主摘要行）。
+    skipped_hidden: usize = 0,
+    skipped_temp: usize = 0,
+    skipped_size: usize = 0,
+    skipped_other: usize = 0,
+    duplicate_scanned: usize = 0,
+    failure: ?Failure = null,
 };
 
 /// 一条文件相对底库的判定。
@@ -219,51 +257,92 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, options: Options) !u8 {
 
 /// 流水线本体（不打印摘要）。失败返回 `code = 1` 而不是 error：
 /// 只有根目录打不开、底库读不了、输出写不了、内存不足会提前结束。
+///
+/// 真正的流水线是 `importRun`；本函数只负责把 `Report` 翻译成退出码与 stderr。
 pub fn execute(io: std.Io, allocator: std.mem.Allocator, options: Options) !Outcome {
     const save_path = options.save_path orelse {
         std.debug.print("otto-lite: import 失败：缺少 --save <out.otto>\n", .{});
         return .{ .code = 1 };
     };
-    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    const report = importRun(allocator, io, options.folder, options.library_path, save_path) catch |err| {
+        std.debug.print("otto-lite: import 失败 error={s}\n", .{@errorName(err)});
+        return .{ .code = 1 };
+    };
+    const counts = countsFrom(report);
 
-    // 所有临时分配（扫描结果、去重表、id 字符串）都进这层 arena：execute 返回时
-    // 一次释放，不会在进程级 arena 里留下按文件数增长的一次性垃圾。
+    if (report.failure) |failure| {
+        const subject = switch (failure.stage) {
+            .library => options.library_path orelse save_path,
+            .scan => options.folder,
+            .save, .internal => save_path,
+        };
+        std.debug.print(
+            "otto-lite: import 失败 {s}={s} error={s}\n",
+            .{ @tagName(failure.stage), subject, failure.name },
+        );
+        return .{ .code = 1, .counts = counts, .elapsed_ms = report.ms };
+    }
+
+    if (counts.failed > 0) {
+        std.debug.print("otto-lite: import 有 {d} 个文件失败（跳过并继续）\n", .{counts.failed});
+    }
+    return .{ .code = 0, .counts = counts, .elapsed_ms = report.ms };
+}
+
+/// 导入流水线本体（不打印任何东西）：载入底库 → 扫描 → probe → 去重合并 → 原子写。
+///
+/// `base_library_path == null` 时若 `save_path` 已存在就复用它当底库（同一条命令
+/// 重跑得到 `added=0`）；否则新建空库。失败不抛 error，而是放进 `Report.failure`
+/// ——UI 需要拿具名错误画在表头上，CLI 需要选错误前缀，两边共用这一份结果。
+///
+/// 参数顺序按任务约定（allocator 在前），与 `library_io.loadWith(io, …)` 的
+/// 既有顺序不同；这层薄封装只在 app 内使用。只有内存不足（以及 id 后缀 1000 次
+/// 都撞上的 `IdCollision`）会以 error 返回，其它失败都进 `Report.failure`。
+pub fn importRun(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    folder: []const u8,
+    base_library_path: ?[]const u8,
+    save_path: []const u8,
+) error{ OutOfMemory, IdCollision }!Report {
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    var report = Report{};
+
+    // 所有临时分配（扫描结果、去重表、id 字符串）都进这层 arena：返回时一次
+    // 释放，不会在进程级 arena 里留下按文件数增长的一次性垃圾。
     var transient = std.heap.ArenaAllocator.init(allocator);
     defer transient.deinit();
     const temp = transient.allocator();
 
-    // 1) 载入底库。`--library` 优先；没给时若 `--save` 已存在就用它当底库——
-    //    "同一条命令再跑一次"必须是 added=0，而不是把新库覆盖回同样的 12 条。
-    //    已存在的库读不了就报错退出，绝不悄悄覆盖用户的库。
-    const base_path = options.library_path orelse existingLibraryPath(io, save_path);
+    // 1) 载入底库。`base_library_path` 优先；没给时若 `save_path` 已存在就用它
+    //    当底库——"同一条命令再跑一次"必须是 added=0。已存在的库读不了就失败，
+    //    绝不悄悄覆盖用户的库。
+    const base_path = base_library_path orelse existingLibraryPath(io, save_path);
     var library = if (base_path) |path|
         library_io.loadWith(io, allocator, path) catch |err| {
-            std.debug.print("otto-lite: import 失败 library={s} error={s}\n", .{ path, @errorName(err) });
-            return .{ .code = 1 };
+            report.failure = .{ .stage = .library, .name = @errorName(err) };
+            report.ms = elapsedMs(io, started);
+            return report;
         }
     else
         try core.store.empty(allocator);
     defer library.deinit();
 
     // 2) 扫描（L0）。
-    var scan = scan_mod.run(temp, io, options.folder, .{}, null) catch |err| {
-        std.debug.print("otto-lite: import 失败 folder={s} error={s}\n", .{ options.folder, @errorName(err) });
-        return .{ .code = 1 };
+    var scan = scan_mod.run(temp, io, folder, .{}, null) catch |err| {
+        report.failure = .{ .stage = .scan, .name = @errorName(err) };
+        report.ms = elapsedMs(io, started);
+        return report;
     };
     defer scan.deinit();
 
-    var counts = Counts{
-        .scanned = scan.files.len,
-        .failed = scan.failures.len,
-        .skipped_hidden = scan.counts.skipped_hidden,
-        .skipped_temp = scan.counts.skipped_temp,
-        .skipped_size = scan.counts.skipped_size,
-        .skipped_other = scan.counts.skipped_other,
-        .duplicate_scanned = scan.counts.duplicates,
-    };
-    for (scan.failures) |failure| {
-        std.debug.print("otto-lite: import 失败 file={s} error={s}\n", .{ failure.path, failure.err });
-    }
+    report.scanned = scan.files.len;
+    report.failed = scan.failures.len;
+    report.skipped_hidden = scan.counts.skipped_hidden;
+    report.skipped_temp = scan.counts.skipped_temp;
+    report.skipped_size = scan.counts.skipped_size;
+    report.skipped_other = scan.counts.skipped_other;
+    report.duplicate_scanned = scan.counts.duplicates;
 
     // 3) 去重索引 + 逐条 probe。
     var dedupe = try Dedupe.init(temp, &library);
@@ -273,19 +352,19 @@ pub fn execute(io: std.Io, allocator: std.mem.Allocator, options: Options) !Outc
     for (scan.files) |fact| {
         switch (dedupe.classify(fact)) {
             .duplicate_path => {
-                counts.skipped_path += 1;
+                report.skipped_path += 1;
                 continue;
             },
             .duplicate_identity => {
-                counts.skipped_identity += 1;
+                report.skipped_identity += 1;
                 continue;
             },
             .new => {},
         }
 
-        const metadata = probe_mod.probe(temp, io, fact.path) catch |err| {
-            counts.failed += 1;
-            std.debug.print("otto-lite: import 失败 file={s} error={s}\n", .{ fact.path, @errorName(err) });
+        const metadata = probe_mod.probe(temp, io, fact.path) catch {
+            // 单个文件读不了只记账并继续；根目录/底库/输出才是致命失败。
+            report.failed += 1;
             continue;
         };
         const id = try uniqueSampleId(temp, fact.path, &dedupe);
@@ -294,14 +373,80 @@ pub fn execute(io: std.Io, allocator: std.mem.Allocator, options: Options) !Outc
     }
 
     // 4) 合并（深拷贝进库的 arena）并原子写。
-    counts.added = try library.appendSamples(incoming.items);
-    counts.bytes = library_io.saveWith(io, allocator, save_path, &library) catch |err| {
-        std.debug.print("otto-lite: import 失败 save={s} error={s}\n", .{ save_path, @errorName(err) });
-        return .{ .code = 1 };
+    report.added = try library.appendSamples(incoming.items);
+    report.bytes = library_io.saveWith(io, allocator, save_path, &library) catch |err| {
+        report.failure = .{ .stage = .save, .name = @errorName(err) };
+        report.ms = elapsedMs(io, started);
+        return report;
     };
 
-    const elapsed_ms = @as(f64, @floatFromInt(started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
-    return .{ .code = 0, .counts = counts, .elapsed_ms = elapsed_ms };
+    report.ms = elapsedMs(io, started);
+    return report;
+}
+
+/// `--import-into <folder> [--save <file>]`：UI「导入文件夹」按钮的无头入口。
+///
+/// 它不是另一条流水线：保存目标由 `import_target.resolve` 决定（与 UI 完全同一
+/// 条规则），真正干活的是 `importRun`。成功时打印与 `--import` 相同的摘要行；
+/// 若这次把 JSON 写成了 `.otto`，再多一行转换提示（UI 里是表头闪一次）。
+pub fn runInto(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    folder: []const u8,
+    library_path: []const u8,
+    save_override: ?[]const u8,
+) !u8 {
+    var target = import_target.resolve(allocator, library_path, save_override) catch |err| {
+        std.debug.print("otto-lite: import-into 失败 error={s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer target.deinit(allocator);
+
+    const report = importRun(allocator, io, folder, library_path, target.path) catch |err| {
+        std.debug.print("otto-lite: import-into 失败 error={s}\n", .{@errorName(err)});
+        return 1;
+    };
+    if (report.failure) |failure| {
+        std.debug.print(
+            "otto-lite: import-into 失败 {s}={s} error={s}\n",
+            .{ @tagName(failure.stage), folder, failure.name },
+        );
+        return 1;
+    }
+
+    const counts = countsFrom(report);
+    printSummary(io, allocator, &counts, target.path, report.ms);
+    if (target.converted) {
+        const line = std.fmt.allocPrint(
+            allocator,
+            "otto-lite: 已转为 OTTOLIB {s}\n",
+            .{target.path},
+        ) catch return 0;
+        defer allocator.free(line);
+        std.Io.File.stdout().writeStreamingAll(io, line) catch {};
+    }
+    return 0;
+}
+
+fn countsFrom(report: Report) Counts {
+    return .{
+        .scanned = report.scanned,
+        .added = report.added,
+        .skipped_path = report.skipped_path,
+        .skipped_identity = report.skipped_identity,
+        .failed = report.failed,
+        .bytes = report.bytes,
+        .skipped_hidden = report.skipped_hidden,
+        .skipped_temp = report.skipped_temp,
+        .skipped_size = report.skipped_size,
+        .skipped_other = report.skipped_other,
+        .duplicate_scanned = report.duplicate_scanned,
+    };
+}
+
+fn elapsedMs(io: std.Io, started: std.Io.Clock.Timestamp) f64 {
+    const nanoseconds = started.untilNow(io).raw.nanoseconds;
+    return @as(f64, @floatFromInt(nanoseconds)) / 1_000_000.0;
 }
 
 /// `--save` 已经存在时把它当底库（幂等重跑）。只把 `FileNotFound` 当作"没有"；
