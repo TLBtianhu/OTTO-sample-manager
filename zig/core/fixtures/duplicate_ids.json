@@ -1,0 +1,58 @@
+{
+  "samples": {
+    "key_a": {
+      "id": "dup_1",
+      "fileName": "Dup A",
+      "filePath": "D:/d/a.wav",
+      "importedAt": 1
+    },
+    "key_b": {
+      "id": "dup_1",
+      "fileName": "Dup B",
+      "filePath": "D:/d/b.wav",
+      "importedAt": 2
+    },
+    "key_c": {
+      "id": "dup_2",
+      "fileName": "Dup C",
+      "filePath": "D:/d/c.wav",
+      "importedAt": 3
+    }
+  },
+  "groups": {
+    "g1": {
+      "id": "g1",
+      "name": "G1",
+      "sampleIds": [
+        "dup_1",
+        "dup_1"
+      ]
+    }
+  },
+  "folderState": {
+    "folders": {
+      "f1": {
+        "id": "f1",
+        "name": "F1",
+        "path": "D:/d",
+        "sampleIds": [
+          "dup_1",
+          "dup_1",
+          "dup_2"
+        ],
+        "parentId": null
+      },
+      "f2": {
+        "id": "f1",
+        "name": "F2 duplicate id",
+        "path": "D:/e",
+        "sampleIds": [],
+        "parentId": null
+      }
+    },
+    "folderOrder": [
+      "f1",
+      "f1"
+    ]
+  }
+}
