@@ -3,6 +3,8 @@
 //! skipped elsewhere.
 const std = @import("std");
 const font = @import("font.zig");
+const fontdb = @import("fontdb.zig");
+const fontindex = @import("fontindex.zig");
 const raster = @import("raster.zig");
 
 const candidates = [_][]const u8{
@@ -60,7 +62,7 @@ test "a font the app brings is found by its family, from its bytes" {
     const gpa = std.testing.allocator;
     const data = load(gpa) orelse return error.SkipZigTest;
     defer gpa.free(data);
-    var db = @import("fontdb.zig").Db.init(gpa, std.testing.io);
+    var db = fontdb.Db.init(gpa, std.testing.io);
     defer db.deinit();
     // Only this font: no folders scanned.
     db.scanned = true;
@@ -71,3 +73,71 @@ test "a font the app brings is found by its family, from its bytes" {
     try std.testing.expect(f.glyphIndex('A') != 0);
     try std.testing.expect(db.family("No Such Family", 400, false) == null);
 }
+
+// One real font in a folder of its own, with a cache beside it: the
+// first start scans and writes, the second is answered by the cache, a
+// moved mtime or a damaged file scans again. This is the app's path
+// (`Db.cache_path` + `Db.fonts_dir`) without the system font folder.
+test "the font index cache: a second start skips the scan; a changed font or a damaged index rescans" {
+    const gpa = std.testing.allocator;
+    const data = load(gpa) orelse return error.SkipZigTest;
+    defer gpa.free(data);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    const root = path_buffer[0..len];
+    try tmp.dir.createDir(std.testing.io, "fonts", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fonts/one.ttf", .data = data });
+    const fonts_dir = try std.fs.path.join(gpa, &.{ root, "fonts" });
+    defer gpa.free(fonts_dir);
+    // The cache lives beside the folder, as an app keeps it in its data
+    // directory; putting it inside would change the folder it describes.
+    const cache_path = try std.fs.path.join(gpa, &.{ root, "cache", "fonts.idx" });
+    defer gpa.free(cache_path);
+
+    // First start: scans, writes the index.
+    var first = fontdb.Db.init(gpa, std.testing.io);
+    defer first.deinit();
+    first.cache_path = cache_path;
+    first.fonts_dir = fonts_dir;
+    first.scan();
+    try std.testing.expectEqual(fontindex.State.written, first.cache.state);
+    const faces = first.faces.items.len;
+    try std.testing.expect(faces > 0);
+
+    // Second start: the cache answers, no file is read.
+    var second = fontdb.Db.init(gpa, std.testing.io);
+    defer second.deinit();
+    second.cache_path = cache_path;
+    second.fonts_dir = fonts_dir;
+    second.scan();
+    try std.testing.expectEqual(fontindex.State.hit, second.cache.state);
+    try std.testing.expectEqual(faces, second.faces.items.len);
+
+    // The same font with a moved mtime is a different folder: scan again.
+    var file = try tmp.dir.openFile(std.testing.io, "fonts/one.ttf", .{ .mode = .read_write });
+    try file.setTimestamps(std.testing.io, .{
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 1_700_000_000_000_000_000 } },
+    });
+    file.close(std.testing.io);
+    var moved = fontdb.Db.init(gpa, std.testing.io);
+    defer moved.deinit();
+    moved.cache_path = cache_path;
+    moved.fonts_dir = fonts_dir;
+    moved.scan();
+    try std.testing.expectEqual(fontindex.State.written, moved.cache.state);
+    try std.testing.expectEqual(faces, moved.faces.items.len);
+
+    // A damaged index is not a smaller cache: it is ignored and rewritten.
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = cache_path, .data = "not a font index" });
+    var damaged = fontdb.Db.init(gpa, std.testing.io);
+    defer damaged.deinit();
+    damaged.cache_path = cache_path;
+    damaged.fonts_dir = fonts_dir;
+    damaged.scan();
+    try std.testing.expectEqual(fontindex.State.written, damaged.cache.state);
+    try std.testing.expectEqual(faces, damaged.faces.items.len);
+}
+

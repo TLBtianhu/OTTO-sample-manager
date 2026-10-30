@@ -12,6 +12,11 @@ const Window = window_mod.Window;
 pub const Options = struct {
     name: []const u8 = "nanoui",
     quit_on_last_window_closed: bool = true,
+    /// Where the font scan's result is cached, and the folder that cache
+    /// describes (the app's, kept for the process's life). Both null: the
+    /// scan runs every start, as before.
+    font_cache: ?[]const u8 = null,
+    fonts_dir: ?[]const u8 = null,
     // The macOS app's hooks, accepted here and not called yet.
     ctx: ?*anyopaque = null,
     on_open_urls: ?*const fn (ctx: ?*anyopaque, urls: []const []const u8) void = null,
