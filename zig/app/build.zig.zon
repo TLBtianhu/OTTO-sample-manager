@@ -6,11 +6,12 @@
     .dependencies = .{
         .nanoui = .{ .path = "../vendor/nanoui" },
         .otto_core = .{ .path = "../core" },
-        // zig/ports 是一个 package、三个 module：监听 / 缩略图 / 能力表。
-        // 三个依赖名都指向 ../ports：`ports_dep.module("otto_watch")` 之类。
+        // zig/ports 是一个 package、四个 module：监听 / 缩略图 / 能力表 / 拖出。
+        // 四个依赖名都指向 ../ports：`ports_dep.module("otto_watch")` 之类。
         .ports = .{ .path = "../ports" },
         .thumb = .{ .path = "../ports" },
         .caps = .{ .path = "../ports" },
+        .drag = .{ .path = "../ports" },
     },
     .paths = .{
         "build.zig",
