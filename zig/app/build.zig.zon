@@ -6,6 +6,7 @@
     .dependencies = .{
         .nanoui = .{ .path = "../vendor/nanoui" },
         .otto_core = .{ .path = "../core" },
+        .ports = .{ .path = "../ports" },
     },
     .paths = .{
         "build.zig",

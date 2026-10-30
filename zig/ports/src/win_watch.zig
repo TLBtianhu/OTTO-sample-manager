@@ -321,13 +321,16 @@ pub const Context = struct {
 
         var context = Context{ .allocator = allocator, .handle = handle };
         errdefer context.deinit();
-        context.buffer = try allocator.alloc(u8, read_buffer_bytes);
+        // ReadDirectoryChangesW 要求缓冲区按 DWORD 对齐（不对齐时 Windows 直接返回
+        // ERROR_NOACCESS 998，线程当场退出）。调用方传进来的分配器可能是 bump/arena，
+        // 只保证 1 字节对齐，所以这块固定大小的缓冲区不走它。
+        context.buffer = try std.heap.page_allocator.alloc(u8, read_buffer_bytes);
         return context;
     }
 
     pub fn deinit(self: *Context) void {
         if (self.handle) |handle| _ = CloseHandle(handle);
-        if (self.buffer.len != 0) self.allocator.free(self.buffer);
+        if (self.buffer.len != 0) std.heap.page_allocator.free(self.buffer);
         self.handle = null;
         self.buffer = &.{};
     }
