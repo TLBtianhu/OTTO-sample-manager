@@ -58,6 +58,9 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", app_version);
     app_module.addOptions("build_options", build_options);
+    // 音频 provider 的 WASAPI 是手写 extern（ole32：CoInitializeEx/CoCreateInstance），
+    // 不经过 ports，也不引入 C shim；kernel32 由 Windows 目标默认链接。
+    app_module.linkSystemLibrary("ole32", .{});
     const exe = b.addExecutable(.{
         .name = "otto-lite",
         .root_module = app_module,
@@ -89,6 +92,8 @@ pub fn build(b: *std.Build) void {
         },
     });
     test_module.addOptions("build_options", build_options);
+    // 测试进程不建音频设备，但链接期要认识音频 provider 引用的 ole32 符号。
+    test_module.linkSystemLibrary("ole32", .{});
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     const test_step = b.step("test", "运行 live 适配层与 thumbs 取图层的单元测试");
     test_step.dependOn(&run_tests.step);

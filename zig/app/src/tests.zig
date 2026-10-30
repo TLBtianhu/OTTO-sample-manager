@@ -12,7 +12,9 @@
 //!   * `preview_snapshot.zig` —— 请求快照的深拷贝（跨线程所有权）；
 //!   * `sample_facts.zig` —— 事实（名称/大小/时长/路径/扩展名）的格式化；
 //!   * `providers/`     —— 缩略图 provider 的纯逻辑（真实 Shell 取图由
-//!                         `--preview` / `--demo-thumbs` 覆盖）。
+//!                         `--preview` / `--demo-thumbs` 覆盖）与音频 provider 的
+//!                         `supports`/文件缺失分支；`audio/wav.zig` 的解析测试也随
+//!                         这个 import 一起进来（真实播放由 `--play-test` 覆盖）。
 test {
     _ = @import("live.zig");
     _ = @import("thumbs_test.zig");

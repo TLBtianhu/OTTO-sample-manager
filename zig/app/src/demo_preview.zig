@@ -6,7 +6,8 @@
 //!   1. **事实**（`sample_facts.zig`）：名称 / 大小 / 时长 / 路径 / 扩展名，无条件打印，
 //!      与 provider 无关——"没有预览"不等于"什么都不知道"；
 //!   2. **Outcome**：落到哪个 provider（`provider=`）/ 它声明的 `kind` / 五个分支的
-//!      哪一个 / 载荷摘要（image 尺寸与字节数、text 行数与内容、none 的原因）。
+//!      哪一个 / 载荷摘要（image 尺寸与字节数、audio 的采样率/声道/位深/时长/PCM
+//!      字节、text 行数与内容、none 的原因）。
 //!
 //! 退出码：拿到任何 `Outcome` 都算成功（`none` 是诚实答案，不是错误），返回 0；
 //! 只有参数缺失、`open` 抛 `OutOfMemory` 这类"连答案都构造不出来"时返回 1。
@@ -76,7 +77,12 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u
                 .{ bitmap.width, bitmap.height, bitmap.stride, bitmap.byteLen() },
             );
         },
-        .audio => std.debug.print("preview: outcome=audio (placeholder: 待接入)\n", .{}),
+        .audio => |session| {
+            std.debug.print(
+                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d}\n",
+                .{ session.sample_rate, session.channels, session.bits, session.duration_ms, session.pcm.len },
+            );
+        },
         .frames => std.debug.print("preview: outcome=frames (placeholder: 待接入)\n", .{}),
         .text => |text| {
             std.debug.print("preview: outcome=text lines={d}\n", .{preview.countLines(text)});

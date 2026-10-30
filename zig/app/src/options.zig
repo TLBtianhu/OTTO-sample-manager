@@ -16,6 +16,8 @@ pub const Options = struct {
     demo_thumbs_dir: ?[]const u8 = null,
     /// `--preview <file>`：只走注册表打印一次预览摘要，不开窗口。
     preview_path: ?[]const u8 = null,
+    /// `--play-test <file>`：解码 + 真播放 300ms + 断言位置前进，不开窗口。
+    play_test_path: ?[]const u8 = null,
     demo_transport: bool = false,
     watch_dir: ?[]const u8 = null,
     copy_now: ?[]const u8 = null,
@@ -41,6 +43,12 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.preview_path = args[index];
         } else if (std.mem.startsWith(u8, arg, "--preview=")) {
             options.preview_path = arg["--preview=".len..];
+        } else if (std.mem.eql(u8, arg, "--play-test")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.play_test_path = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--play-test=")) {
+            options.play_test_path = arg["--play-test=".len..];
         } else if (std.mem.eql(u8, arg, "--demo")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -114,6 +122,7 @@ test "缺值返回 MissingValue" {
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--copy-now" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--select" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--preview" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--play-test" }));
 }
 
 test "--preview 两种写法都收；它是开关 + 值，不是布尔" {
@@ -123,4 +132,13 @@ test "--preview 两种写法都收；它是开关 + 值，不是布尔" {
     const joined = try parse(&[_][]const u8{ "otto-lite", "--preview=C:\\samples\\a.wav" });
     try testing.expectEqualStrings("C:\\samples\\a.wav", joined.preview_path.?);
     try testing.expect(joined.library_path == null);
+}
+
+test "--play-test 两种写法都收，不占位置参数" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--play-test", "tone.wav" });
+    try testing.expectEqualStrings("tone.wav", spaced.play_test_path.?);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--play-test=C:\\samples\\tone.wav" });
+    try testing.expectEqualStrings("C:\\samples\\tone.wav", joined.play_test_path.?);
 }

@@ -37,6 +37,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const preview = @import("preview.zig");
+const player_mod = @import("audio/player.zig");
 const sample_facts = @import("sample_facts.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
 const ui = nanoui.ui;
@@ -110,6 +111,9 @@ pub const Panel = struct {
     /// true = 已提交请求、答案还没到。`current == null and pending` 显示"正在读取"。
     pending: bool = false,
     active_generation: u64 = 0,
+    /// 上一帧看到的播放状态：播放自然结束时没有新 Outcome，靠它触发一次重画，
+    /// 让按钮从"停止"变回"播放"。
+    was_playing: bool = false,
     /// 当前想要的样本指纹（路径 + mtime + size），用来判断"选中行变了没有"。
     /// 也是图像缓存键的来源；`current` 有效期间它不会变。
     requested_path: ?[]u8 = null,
@@ -243,7 +247,11 @@ pub const Panel = struct {
                 "provider={s} text lines={d}",
                 .{ provider, preview.countLines(text) },
             ) catch "?",
-            .audio => std.fmt.bufPrint(buffer, "provider={s} audio(placeholder)", .{provider}) catch "?",
+            .audio => |session| std.fmt.bufPrint(
+                buffer,
+                "provider={s} audio {d}Hz ch={d} bits={d} {d}ms",
+                .{ provider, session.sample_rate, session.channels, session.bits, session.duration_ms },
+            ) catch "?",
             .frames => std.fmt.bufPrint(buffer, "provider={s} frames(placeholder)", .{provider}) catch "?",
             .none => |reason| std.fmt.bufPrint(
                 buffer,
@@ -251,6 +259,23 @@ pub const Panel = struct {
                 .{ provider, @tagName(reason) },
             ) catch "?",
         };
+    }
+
+    /// 当前显示的是不是正在播放的音频。UI 线程只读 Player 的原子量。
+    pub fn isPlaying(self: *const Panel) bool {
+        const outcome = self.current orelse return false;
+        return switch (outcome) {
+            .audio => |session| session.isPlaying(),
+            else => false,
+        };
+    }
+
+    /// 播放状态变了没有（开始/自然结束）。`tick` 用它补一次重画。
+    pub fn playbackChanged(self: *Panel) bool {
+        const now = self.isPlaying();
+        if (now == self.was_playing) return false;
+        self.was_playing = now;
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -286,7 +311,7 @@ pub const Panel = struct {
 
     /// 按 `Outcome` 的五个分支画内容；`current == null` 时区分"未选中"与"正在读"。
     fn drawOutcome(self: *Panel, c: *ui.Context) void {
-        const outcome = self.current orelse {
+        const current = if (self.current) |*outcome| outcome else {
             if (self.pending) {
                 ui.text(c, "正在读取预览…", .{ .size = 12, .color = c.theme.muted });
             } else {
@@ -295,7 +320,7 @@ pub const Panel = struct {
             return;
         };
 
-        switch (outcome) {
+        switch (current.*) {
             .image => |bitmap| {
                 self.caption(c, "图像预览");
                 ui.textf(c, .{ .size = 13 }, "{d}×{d} 像素", .{ bitmap.width, bitmap.height });
@@ -313,11 +338,7 @@ pub const Panel = struct {
                     .leading = 1.1,
                 });
             },
-            .audio => {
-                self.caption(c, "音频预览");
-                ui.text(c, "音频预览待接入", .{ .size = 13, .color = c.theme.text });
-                ui.text(c, "WASAPI 播放会话是 M1 的下一块", .{ .size = 10, .color = c.theme.muted });
-            },
+            .audio => |*session| self.drawAudio(c, session),
             .frames => {
                 self.caption(c, "帧预览");
                 ui.text(c, "帧预览待接入", .{ .size = 13, .color = c.theme.text });
@@ -328,6 +349,47 @@ pub const Panel = struct {
                 ui.text(c, reasonText(reason), .{ .size = 13, .color = c.theme.text });
                 ui.text(c, reasonDetail(reason), .{ .size = 10, .color = c.theme.muted, .wrap = true });
             },
+        }
+    }
+
+    /// 音频分支：格式 + 时长 + 播放/停止。视图只读会话的原子位置；`play()/stop()`
+    /// 由 UI 线程投递命令，设备与播放线程都在 `audio/player.zig` 里。
+    fn drawAudio(self: *Panel, c: *ui.Context, session: *preview.AudioSession) void {
+        self.caption(c, "音频预览");
+        ui.textf(c, .{ .size = 13 }, "{d} Hz · {d} 声道 · {d} 位", .{
+            session.sample_rate,
+            session.channels,
+            session.bits,
+        });
+        ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "时长 {d}.{d:0>3} 秒 · {d} 字节 PCM", .{
+            session.duration_ms / 1000,
+            session.duration_ms % 1000,
+            session.pcm.len,
+        });
+
+        const row = ui.div(c).row().gap(10).itemsCenter();
+        defer row.end();
+
+        const playing = session.isPlaying();
+        const button = ui.button(c, if (playing) "停止" else "播放", .{ .size = 11 });
+        if (button.clicked) {
+            if (playing) {
+                session.stop();
+            } else {
+                session.play() catch |err| {
+                    std.debug.print(
+                        "otto-lite: 音频播放失败（{s} hresult=0x{x:0>8}）\n",
+                        .{ @errorName(err), @as(u32, @bitCast(player_mod.lastHresult())) },
+                    );
+                };
+            }
+            c.changed = true;
+        }
+        if (playing) {
+            ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "{d} / {d} ms", .{
+                session.positionMs(),
+                session.duration_ms,
+            });
         }
     }
 
