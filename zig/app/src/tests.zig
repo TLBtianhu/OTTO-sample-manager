@@ -9,8 +9,11 @@
 //!   * `mode.zig`       —— dev/portable/installed 判定、数据目录与默认库（纯函数 + 真标记文件）；
 //!   * `version.zig`    —— 编译期注入的版本号与 `--version` 输出格式；
 //!   * `preview.zig`    —— 注册表顺序、谢绝（none）后继续问、最终原因优先级、行数统计；
+//!   * `preview_test.zig` —— 上面这些契约行为的测试（从 `preview.zig` 拆出来，守住单文件行数）；
 //!   * `preview_snapshot.zig` —— 请求快照的深拷贝（跨线程所有权）；
 //!   * `sample_facts.zig` —— 事实（名称/大小/时长/路径/扩展名）的格式化；
+//!   * `audio/peaks.zig` —— 波形峰值的桶切分、多声道混合、空/单帧/满幅；
+//!   * `audio/waveform.zig` —— 峰值到位图的尺寸、BGRA 顺序、静音细线与越界写；
 //!   * `providers/`     —— 缩略图 provider 的纯逻辑（真实 Shell 取图由
 //!                         `--preview` / `--demo-thumbs` 覆盖）与音频 provider 的
 //!                         `supports`/文件缺失分支；`audio/wav.zig` 的解析测试也随
@@ -25,7 +28,10 @@ test {
     _ = @import("version.zig");
     // 预览契约与注册表顺序；`providers/root.zig` 里的 comptime 检查也会在这里跑。
     _ = @import("preview.zig");
+    _ = @import("preview_test.zig");
     _ = @import("preview_snapshot.zig");
     _ = @import("sample_facts.zig");
+    _ = @import("audio/peaks.zig");
+    _ = @import("audio/waveform.zig");
     _ = @import("providers/root.zig");
 }
