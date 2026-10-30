@@ -5,7 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // 数据层静态库：消费方（Electron 主进程 / Tauri / 测试）链接 otto_core。
-    const library_module = b.createModule(.{
+    // 同时以模块形式导出，Zig 应用可以直接 `@import("otto_core")`。
+    const library_module = b.addModule("otto_core", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
