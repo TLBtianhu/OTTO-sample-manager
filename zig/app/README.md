@@ -6,7 +6,7 @@ everything the toolkit does not cover yet.
 ```
 zig/
   core/      library data layer (its own package, `zig build test`)
-  ports/     Win32 ports: file watching, shell thumbnails, capability table
+  ports/     Win32 ports: file watching, shell thumbnails, capability table, drag-out
   app/       this app
   vendor/    nanoui checkout (git-ignored; see below)
 ```
@@ -48,10 +48,67 @@ the atomic ready counter changes.
 ```powershell
 zig-out/bin/otto-lite.exe --nanoui-snapshot=shot.png       # first frame only
 zig-out/bin/otto-lite.exe --nanoui-wait=2 --nanoui-snapshot=shot.png   # after thumbnails land
+
+# two selected rows (tint + "N 个素材 · M 选中" header), no input at all:
+zig-out/bin/otto-lite.exe --select=0,1 --nanoui-snapshot=sel.png
+
+# a real click through the script runner: row 1, then the empty area below it
+# (use a library with fewer rows than fit the window)
+zig-out/bin/otto-lite.exe small-library.json --nanoui-script="at:190,60;at:190,500" --nanoui-snapshot=clear.png
 ```
+
+`--select=0,1` seeds the selection: headless snapshots get no mouse, so it is
+the only way to photograph the selected state deterministically. It is a
+debug/screenshot flag, not a user-facing selection feature.
 
 `--nanoui-snapshot` draws before any background fetch can finish, so a real
 thumbnail needs `--nanoui-wait` (seconds). Both keep the window hidden.
+
+## Selecting and dragging out
+
+The list is the only view: select rows, then drag them into a host (FL Studio,
+Melodyne, Explorer) or copy them to the clipboard.
+
+- **Click** a row: select only it.
+- **Ctrl+click**: toggle that row.
+- **Shift+click**: select the range from the anchor (the last clicked row) to
+  this one.
+- **Click the empty area** below the rows: clear the selection.
+- Selected rows are tinted; the header reads `N 个素材 · M 选中`.
+
+**Drag out**: press on a row and move more than 6 points. If the row is part of
+the selection, the whole selection is dragged; otherwise only that row. The
+drag is staged during the frame (paths are copied into the transport's own
+arena) and started right after the frame, by a timer: `DoDragDrop` blocks until
+the mouse is released, so it must never run inside `view`. Esc or a drop on an
+invalid target is a cancel, not an error (only a log line); OLE failures are
+logged too, never shown as a dialog.
+
+**Ctrl+C** puts the selected files on the clipboard (`CF_HDROP`); with nothing
+selected it copies the last clicked row. The header flashes
+`· 已复制 N 个素材` for 1.5 s.
+
+### Verifying by hand (the only way for real drag and clipboard)
+
+The port itself is exercised headlessly by `--demo-transport`, but a real drop
+needs a real host window and real mouse:
+
+```powershell
+# 1) select two rows, then drag them onto FL Studio / Melodyne
+zig-out/bin/otto-lite.exe fixtures/library.json
+
+# 2) Ctrl+C on a selection, then Ctrl+V in an Explorer folder
+#    (the fixture paths do not exist, so use a library of real files)
+
+# 3) clipboard without the UI: explicit, one file, writes CF_HDROP
+zig-out/bin/otto-lite.exe --copy-now C:\path\to\a.wav
+#    paste in Explorer: the file appears (copied, not moved)
+
+# 4) headless: no clipboard, no OLE drag loop, no window
+zig-out/bin/otto-lite.exe --demo-transport
+#    prints selected=… paths=… drag_pending=… and checks the validation-only
+#    paths of copyToClipboard (empty list, a directory) + ports' selftest
+```
 
 ## Self-checks
 
