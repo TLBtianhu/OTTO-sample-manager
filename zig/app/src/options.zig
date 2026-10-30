@@ -22,6 +22,9 @@ pub const Options = struct {
     watch_dir: ?[]const u8 = null,
     copy_now: ?[]const u8 = null,
     select: ?[]const u8 = null,
+    /// `--filter <text>` / `--filter=<text>`：不开窗的过滤自检。
+    /// 空串是一个**有效值**（`--filter=` = 不过滤，应命中全部）。
+    filter: ?[]const u8 = null,
 };
 
 pub fn parse(args: anytype) error{MissingValue}!Options {
@@ -69,6 +72,12 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.select = args[index];
         } else if (std.mem.startsWith(u8, arg, "--select=")) {
             options.select = arg["--select=".len..];
+        } else if (std.mem.eql(u8, arg, "--filter")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.filter = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--filter=")) {
+            options.filter = arg["--filter=".len..];
         } else if (!std.mem.startsWith(u8, arg, "--")) {
             options.library_path = arg;
         }
@@ -141,4 +150,23 @@ test "--play-test 两种写法都收，不占位置参数" {
 
     const joined = try parse(&[_][]const u8{ "otto-lite", "--play-test=C:\\samples\\tone.wav" });
     try testing.expectEqualStrings("C:\\samples\\tone.wav", joined.play_test_path.?);
+}
+
+test "--filter 两种写法都收；--filter= 是空串（有效值），没写才是 null" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--filter", "img" });
+    try testing.expectEqualStrings("img", spaced.filter.?);
+    try testing.expectEqualStrings("lib.json", spaced.library_path.?);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--filter=tone" });
+    try testing.expectEqualStrings("tone", joined.filter.?);
+
+    // 空串 = 不过滤：不能和"没给 --filter"混成同一种状态。
+    const empty = try parse(&[_][]const u8{ "otto-lite", "--filter=" });
+    try testing.expect(empty.filter != null);
+    try testing.expectEqualStrings("", empty.filter.?);
+
+    const none = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(none.filter == null);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--filter" }));
 }

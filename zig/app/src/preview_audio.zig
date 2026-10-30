@@ -56,7 +56,7 @@ pub fn draw(
     tools.end();
     header.end();
     if (button.clicked) {
-        if (playing) session.stop() else play(session);
+        if (playing) session.stop() else _ = play(session);
         c.changed = true;
     }
 
@@ -83,14 +83,17 @@ fn caption(c: *ui.Context, provider: ?[]const u8) void {
     }
 }
 
-/// 失败只打一行日志：不弹窗、不抢焦点（与播放按钮原来的行为一致）。
-fn play(session: *preview.AudioSession) void {
+/// 播放会话（播放键与 Enter 共用）；失败只打一行日志，不弹窗、不抢焦点。
+/// 返回是否真的开始播放，调用方据此决定要不要重画。
+pub fn play(session: *preview.AudioSession) bool {
     session.play() catch |err| {
         std.debug.print(
             "otto-lite: 音频播放失败（{s} hresult=0x{x:0>8}）\n",
             .{ @errorName(err), @as(u32, @bitCast(player_mod.lastHresult())) },
         );
+        return false;
     };
+    return true;
 }
 
 /// 波形（图）+ 播放进度（div）。`waveform.pixels` 为空时什么都不画，

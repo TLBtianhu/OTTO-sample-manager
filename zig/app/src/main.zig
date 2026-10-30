@@ -20,7 +20,15 @@
 //! 便携版用 `<exe 目录>\data\library.json`，安装版用 `%APPDATA%\OTTO\library.json`。
 //!
 //! 选择：点一行 = 只选它；Ctrl+点击 = 切换；Shift+点击 = 从锚点连选；
-//! 空白处点击 = 清空。选中行有可见底色，表头是「N 个素材 · M 选中」。
+//! 空白处点击 = 清空。选中行有可见底色，表头是「N 个素材 · M 命中 · K 选中」。
+//!
+//! 搜索（M2 第一半，`search_ui.zig`）：列表上方是搜索框（占位「搜索素材…」），
+//! Ctrl+F 聚焦、Esc 清空并失焦；输入即过滤，规则只有一条——文件名子串、ASCII
+//! 大小写不敏感（`core.query.matchingIndices`），空查询 = 全部。列表只遍历一份
+//! 「行 → 样本下标」的映射（`filter.zig`），选择/预览/拖拽仍然只认样本下标。
+//! 过滤条件变化时**清空选择**：行号会整体变，保留会指错文件（v1 的诚实做法）；
+//! 光标尽量停在原样本的新行，原样本不在了才回落到第 0 行。↑↓（越界不环绕）、
+//! Home/End、Enter（音频行触发播放）、Esc（先清搜索再清选择）都在 `search_ui.zig`。
 //!
 //! 拖出：在行上按住移动超过 6 px 就进入"待拖拽"（`State.rowInput`）。帧里只做
 //! **快照**（`Transport.stage` 把路径复制出帧的生命周期），帧结束后由
@@ -36,19 +44,24 @@ const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const demo_preview = @import("demo_preview.zig");
 const demo_play = @import("demo_play.zig");
+const demo_filter = @import("demo_filter.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_watch = @import("demo_watch.zig");
+const list_header = @import("list_header.zig");
 const live_mod = @import("live.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
 const preview_providers = @import("providers/root.zig");
 const row_thumb = @import("row_thumb.zig");
+const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
 const thumbs_mod = @import("thumbs.zig");
+const thumbs_report = @import("thumbs_report.zig");
 const transport_mod = @import("transport.zig");
 const version_mod = @import("version.zig");
+const window_util = @import("window_util.zig");
 const ui = nanoui.ui;
 
 /// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中。监听线程自己
@@ -74,6 +87,8 @@ const State = struct {
     preview: *preview_panel.Panel,
     /// 选择模型（下标 + 锚点 + 当前行）；帧里只改它，不碰磁盘。
     selection: selection_mod.Selection = .{},
+    /// 搜索框 + 过滤行映射 + 键盘导航（见 `search_ui.zig`）。
+    search: search_ui.Search,
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
     transport: transport_mod.Transport,
     window: ?*nanoui.Window = null,
@@ -81,11 +96,8 @@ const State = struct {
     last_ready: u32 = 0,
     /// 本帧真正画出缩略图的可见行数（tick / 打印用）。
     rows_with_image: u32 = 0,
-    /// 上一次打印时的两个数字，避免每帧重复刷同一行；第一次一定打印。
-    printed_ready: u32 = 0,
-    printed_rows: u32 = 0,
-    reported: bool = false,
-    printed_settled: bool = false,
+    /// 缩略图的排队/取图情况，数字变了才打印一行（见 `thumbs_report.zig`）。
+    reporter: thumbs_report.Reporter = .{},
     /// 按下时的行与位置（只记一次；松手/离开后清掉）。
     press_row: ?usize = null,
     press_origin: ui.Point = .{},
@@ -115,18 +127,25 @@ const State = struct {
         ui.column(c, .{ .width = .fill, .height = .fill });
         defer ui.end(c);
 
-        // 首行显示总数与选中数（截图里也能核对的数字）。
-        // 注意这里是显式 end：`defer header.end()` 会拖到函数返回才关盒，
-        // 列表会变成 header 的子节点（行方向），只剩一行能看见。
-        const header = ui.div(c).row().wFull().h(30).px(12).gap(8).itemsCenter();
-        ui.textf(c, .{ .size = 12 }, "{d} 个素材 · {d} 选中", .{ s.samples.len, s.selection.count() });
-        if (s.flash_left > 0) {
-            ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{s.flash_count});
-        } else if (s.printed_rows > 0) {
-            ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "· {d} 行有缩略图", .{s.printed_rows});
+        // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧
+        // 就参与过滤。拖拽循环里只按现有状态重画（那几帧不处理输入）。
+        if (!busy) {
+            const action = s.search.frame(c, s.samples, &s.selection);
+            if (action.filter_changed) s.noteSelection();
+            if (action.activate) s.activateCursor(c);
+        } else {
+            s.search.draw(c);
         }
-        if (s.live.dirty()) ui.text(c, "· 有事件丢失，视图可能不完整", .{ .size = 11 });
-        header.end();
+
+        list_header.draw(c, .{
+            .total = s.samples.len,
+            .matched = s.search.len(),
+            .selected = s.selection.count(),
+            .flash_left = s.flash_left,
+            .flash_count = s.flash_count,
+            .rows_with_image = s.reporter.printed_rows,
+            .dirty = s.live.dirty(),
+        });
 
         // 列表容器：在空白处按下再松开 = 清空选择。行是它的后代：点行时
         // 上一帧的 hot 落在行上，容器的 interact 不会 clicked（见 nanoui
@@ -134,10 +153,13 @@ const State = struct {
         const body = ui.div(c).sizeFull();
         const body_it = body.interaction();
 
-        var rows = ui.list(c, .{ .count = s.samples.len, .row_height = 44 });
-        while (rows.next()) |i| {
-            const it = s.drawRow(c, i, s.samples[i]);
-            if (!busy) s.rowInput(c, i, it);
+        // 列表只遍历行映射：第 row 行 → 第 index 个样本。选择/预览/拖拽仍然
+        // 只认样本下标，过滤不会造出第二套身份。
+        var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44 });
+        while (rows.next()) |row| {
+            const index = s.search.sampleAt(row) orelse continue;
+            const it = s.drawRow(c, row, index, s.samples[index]);
+            if (!busy) s.rowInput(c, index, it);
         }
         rows.end();
 
@@ -159,12 +181,16 @@ const State = struct {
         s.preview.sync(s.previewRow());
         s.preview.draw(c);
 
-        s.report();
+        s.reporter.report(s.thumbs, s.rows_with_image);
     }
 
-    /// 一行的绘制 + 交互。返回 pressable 的 Interaction 给 `rowInput` 判点击/拖拽。
-    fn drawRow(s: *State, c: *ui.Context, i: usize, sample: core.model.Sample) ui.Interaction {
-        const selected = s.selection.isSelected(i);
+    /// 一行的绘制 + 交互。`row` 是过滤结果里的行号（显示用），`index` 是样本
+    /// 下标（选择/预览/拖拽用）。返回 pressable 的 Interaction 给 `rowInput`。
+    fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core.model.Sample) ui.Interaction {
+        const selected = s.selection.isSelected(index);
+        // 光标行：过滤后选择会被清空，但光标还要停在一个样本上（预览也跟着它）。
+        // 选中底色更重；只有光标时给一层很浅的底色 + 强调色行号。
+        const is_cursor = s.selection.cursor == index;
         const style: ui.Style = .{
             .direction = .row,
             .width = .fill,
@@ -173,16 +199,17 @@ const State = struct {
             .gap = 10,
             .align_items = .center,
             // 选中底色：主题强调色的低透明度版本；未选中交给 hover 动画。
-            .background = if (selected) c.theme.accent.alpha(0.16) else null,
+            .background = if (selected) c.theme.accent.alpha(0.16) else if (is_cursor) c.theme.accent.alpha(0.07) else null,
         };
         // 选中行悬停时把底色加深而不是换成灰色的 surface_hover——否则鼠标停在
         // 刚点过的那一行上，选中底色会被 hover 盖掉，看起来像没选中。
-        const hover_color = if (selected) c.theme.accent.alpha(0.26) else c.theme.surface_hover;
+        const hover_color = if (selected) c.theme.accent.alpha(0.26) else if (is_cursor) c.theme.accent.alpha(0.14) else c.theme.surface_hover;
         const it = ui.pressable(c, style, hover_color);
         defer ui.end(c);
 
         if (row_thumb.draw(c, s.thumbs, sample)) s.rows_with_image += 1;
-        ui.textf(c, .{ .size = 11 }, "{d:0>4}", .{i + 1});
+        // 行号是**过滤结果里的位置**（第 1 行是当前列表的第一行），不是样本下标。
+        ui.textf(c, .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
         ui.text(c, sample.file_name, .{ .size = 13 });
         ui.textf(c, .{ .size = 11 }, "{d:.2}s", .{sample.duration});
         return it;
@@ -190,16 +217,20 @@ const State = struct {
 
     /// 点击语义、拖拽阈值。Ctrl+点击在 nanoui 里不算 clicked（它被当成右键按下，
     /// 见 `interact` 的 `right_pressed`），所以这里单独认。
-    fn rowInput(s: *State, c: *ui.Context, i: usize, it: ui.Interaction) void {
+    fn rowInput(s: *State, c: *ui.Context, index: usize, it: ui.Interaction) void {
         if (it.right_pressed and c.input.button == .left and c.input.ctrl) {
-            s.selection.click(i, .{ .ctrl = true });
+            s.selection.click(index, .{ .ctrl = true });
             s.cancelPress();
             s.noteSelection();
             c.changed = true;
             return;
         }
         if (it.clicked) {
-            s.selection.click(i, .{ .shift = c.input.shift });
+            if (c.input.shift) {
+                s.search.selectVisible(c, &s.selection, index);
+            } else {
+                s.selection.click(index, .{});
+            }
             s.cancelPress();
             s.noteSelection();
             c.changed = true;
@@ -207,14 +238,14 @@ const State = struct {
         }
         if (s.drag_ended or s.drag_armed or !it.pressed) return;
         if (s.press_row == null) {
-            s.press_row = i;
+            s.press_row = index;
             s.press_origin = c.input.mouse;
         }
-        if (s.press_row != i) return;
+        if (s.press_row != index) return;
         const dx = c.input.mouse.x - s.press_origin.x;
         const dy = c.input.mouse.y - s.press_origin.y;
         if (dx * dx + dy * dy <= drag_threshold * drag_threshold) return;
-        s.armDrag(c, i);
+        s.armDrag(c, index);
     }
 
     /// 选择集合变了就打一行：无头验收（`--nanoui-script` + snapshot）也能从
@@ -300,6 +331,18 @@ const State = struct {
         return &s.samples[row];
     }
 
+    /// Enter：预览当前行。预览条已经跟着光标装载；如果它是音频，这里开始播放。
+    fn activateCursor(s: *State, c: *ui.Context) void {
+        const sample = s.selection.cursor orelse return;
+        if (sample >= s.samples.len) return;
+        const playing = s.preview.playCurrent();
+        c.changed = true;
+        std.debug.print(
+            "otto-lite: enter row={d} sample={d} name={s} playing={}\n",
+            .{ (s.search.rowOfSample(sample) orelse 0) + 1, sample, s.samples[sample].file_name, playing },
+        );
+    }
+
     /// `--select=0,1`：截图/自检用的预置选择，不是给最终用户的入口。
     fn seedSelection(s: *State, text: []const u8) void {
         var buffer: [64]usize = undefined;
@@ -320,27 +363,6 @@ const State = struct {
         std.debug.print(
             "otto-lite: --select 预置 {d} 行（selected={d}）\n",
             .{ count, s.selection.count() },
-        );
-    }
-
-    /// 数字变了才打印一行：`--nanoui-snapshot` 的 stdout 里就能数清「多少行取到图」。
-    fn report(s: *State) void {
-        const ready = s.thumbs.readyCount();
-        const stats = s.thumbs.stats();
-        // 「全部落地」也值得打一行：默认 fixture 的 wav 全都取不到，只有这一行能
-        // 把最终账目（failed=N、pending=0）带出来。
-        const settled = stats.pending == 0;
-        const changed = !s.reported or ready != s.printed_ready or
-            s.rows_with_image != s.printed_rows or (settled and !s.printed_settled);
-        if (!changed) return;
-        s.reported = true;
-        s.printed_ready = ready;
-        s.printed_rows = s.rows_with_image;
-        s.printed_settled = settled;
-
-        std.debug.print(
-            "otto-lite: 缩略图 ready={d} 本帧画图={d} requested={d} no_handler={d} cached={d} failed={d} pending={d}\n",
-            .{ stats.ready, s.rows_with_image, stats.requested, stats.no_handler, stats.cached, stats.failed, stats.pending },
         );
     }
 
@@ -381,8 +403,12 @@ const State = struct {
 
         const changed = report_events.added != 0 or report_events.removed != 0 or
             report_events.renamed != 0 or report_events.modified != 0 or report_events.overflowed;
-        // 磁盘变了：之前「文件没了 / Shell 失败」的结论值得重试一次。
-        if (changed) s.thumbs.clearFailures();
+        // 磁盘变了：之前「文件没了 / Shell 失败」的结论值得重试一次；过滤映射
+        // 也要重建（改名不改样本数，光看数量会漏）。
+        if (changed) {
+            s.thumbs.clearFailures();
+            s.search.markStale();
+        }
 
         // 后台取到新图也要重画：ready 计数是本层唯一的变化信号。
         const ready = s.thumbs.readyCount();
@@ -392,7 +418,7 @@ const State = struct {
         if (!changed and !ready_changed) return;
 
         const window = s.window orelse return;
-        if (changed) setTitle(window, s.samples.len);
+        if (changed) window_util.setTitle(window, s.samples.len);
         window.redraw();
     }
 
@@ -400,7 +426,7 @@ const State = struct {
     fn dragTimer(ctx: ?*anyopaque) callconv(.c) void {
         const s: *State = @ptrCast(@alignCast(ctx.?));
         if (s.transport.busy) return;
-        const result = s.transport.execute(nativeHandle(s.window));
+        const result = s.transport.execute(window_util.nativeHandle(s.window));
         switch (result.outcome) {
             .none => return,
             .no_window => std.debug.print(
@@ -431,23 +457,6 @@ const State = struct {
     }
 };
 
-/// 平台原生窗口句柄。Windows 上 `Window` 有 `hwnd` 字段；其它平台没有（拖拽口岸
-/// 也只在 Windows 上场），用 comptime 检查而不是条件编译整个 app。
-fn nativeHandle(window: ?*nanoui.Window) ?*anyopaque {
-    const win = window orelse return null;
-    if (comptime @hasField(nanoui.Window, "hwnd")) {
-        const hwnd = win.hwnd orelse return null;
-        return @ptrCast(hwnd);
-    }
-    return null;
-}
-
-/// 窗口标题：`OTTO Lite <版本> — <行数>`（见 `version.windowTitle`）。
-fn setTitle(window: *nanoui.Window, total: usize) void {
-    var buffer: [96]u8 = undefined;
-    window.setTitle(version_mod.windowTitle(&buffer, total));
-}
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -455,6 +464,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             "用法：otto-lite [library.json] [--watch <dir>] [--select=0,1]\n" ++
                 "      otto-lite --version\n" ++
+                "      otto-lite [library.json] --filter=<text>\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n",
@@ -510,6 +520,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // 过滤自检：不开窗，载入库 → 用 UI 同一条匹配规则过滤 → 打印命中数。
+    if (options.filter) |needle| {
+        const path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
+        const code = try demo_filter.run(init, allocator, path, needle);
+        if (code != 0) std.process.exit(code);
+        return;
+    }
+
     // 位置参数优先；没有就按运行形态给默认库（见文件头）。
     const library_path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
     const library = try core.store.loadCwdFile(allocator, init.io, library_path);
@@ -538,9 +556,11 @@ pub fn main(init: std.process.Init) !void {
         .samples = live.samples(),
         .thumbs = thumbs,
         .preview = panel,
+        .search = search_ui.Search.init(init.gpa),
         .transport = transport_mod.Transport.init(init.gpa),
     };
     defer state.selection.deinit(init.gpa);
+    defer state.search.deinit();
     defer state.transport.deinit();
     state.selection.resize(init.gpa, state.samples.len) catch {};
     if (options.select) |text| state.seedSelection(text);
