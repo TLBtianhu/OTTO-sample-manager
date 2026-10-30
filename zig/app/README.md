@@ -127,3 +127,42 @@ be looked at:
 ```powershell
 zig-out/bin/otto-lite.exe <dir>/library.json --nanoui-wait=2 --nanoui-snapshot=thumbs.png
 ```
+
+## Version and run modes
+
+`build.zig.zon` is the only place the version is written. `build.zig` reads
+`.version` at configure time and injects it as `build_options.version`, so the
+binary cannot disagree with the manifest:
+
+```powershell
+zig-out/bin/otto-lite.exe --version     # otto-lite 0.0.1 (dev)
+```
+
+The mode is detected from the executable itself (`src/mode.zig`), never from the
+working directory or a path guess:
+
+| mode | judgement | data directory |
+| --- | --- | --- |
+| dev | exe path contains a whole `zig-out` segment | none — default library is `fixtures/library.json` |
+| portable | `otto-portable.flag` next to the exe | `<exe dir>\data` |
+| installed | everything else | `%APPDATA%\OTTO` |
+
+`--version` prints the mode in parentheses and exits 0; it never opens the
+library or a window, so it works on a freshly unpacked portable copy.
+
+## Packaging
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ../package.ps1 -Version 0.0.1
+```
+
+The script refuses to build when `-Version` does not match `build.zig.zon`, then
+verifies the built exe reports the same version. It produces exactly two
+artifacts in `zig/dist/`:
+
+- `otto-lite-0.0.1-portable.zip` — `otto-lite.exe`, `otto-portable.flag`,
+  `README.txt`, `LICENSE`;
+- `otto-lite-0.0.1-setup.exe` — NSIS installer (Chinese + English), installs to
+  `Program Files\OTTO Lite`, writes no data there, keeps `%APPDATA%\OTTO` on
+  uninstall. It is **not** code-signed: SmartScreen will warn on first run.
+
