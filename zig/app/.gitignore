@@ -1,4 +1,4 @@
 zig-out/
 .zig-cache/
 zig-pkg/
-shot*.png
+*.png
