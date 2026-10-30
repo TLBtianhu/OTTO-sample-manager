@@ -64,6 +64,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
         // WAV 头部解析：解码器（audio/wav.zig）与 probe 共用同一份块扫描。
         .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
+        // 更新 feed 口岸（M5）：WinHTTP GET / 本地文件，只收发字节。
+        .{ .name = "otto_feed", .module = ports_dep.module("otto_feed") },
     };
 
     const app_module = b.createModule(.{
@@ -75,6 +77,9 @@ pub fn build(b: *std.Build) void {
     // 版本号走 build options，app 与测试两个 module 都要能 import。
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", app_version);
+    // 更新公钥也走 build options：`zig/keys/otto-lite.key.pub` 是唯一来源，
+    // 源码里没有第二份拷贝（公钥换掉时旧版本必然验不过，见 keys/README.md）。
+    build_options.addOption([]const u8, "update_public_key", updatePublicKey(b));
     app_module.addOptions("build_options", build_options);
     // 音频 provider 的 WASAPI 是手写 extern（ole32：CoInitializeEx/CoCreateInstance），
     // 不经过 ports，也不引入 C shim；kernel32 由 Windows 目标默认链接。
@@ -121,6 +126,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
             .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
             .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
+            .{ .name = "otto_feed", .module = ports_dep.module("otto_feed") },
         },
     });
     test_module.addOptions("build_options", build_options);
@@ -129,6 +135,24 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     const test_step = b.step("test", "运行 live 适配层与 thumbs 取图层的单元测试");
     test_step.dependOn(&run_tests.step);
+}
+
+/// 读 `../keys/otto-lite.key.pub`（public key 文件的原文，base64）。
+///
+/// 为什么不在 `update_check.zig` 里 `@embedFile`：密钥文件在 `zig/keys/`，
+/// 而本包的模块根是 `zig/app/`，`@embedFile("../../keys/…")` 会被"文件在模块外"
+/// 拒绝。为什么不在 app 里复制一份：那会让公钥有两个来源，换密钥时必然漂移。
+/// 构建脚本读一次、注入成常量，和版本号走同一条路。
+fn updatePublicKey(b: *std.Build) []const u8 {
+    const path = b.root.joinString(b.allocator, "../keys/otto-lite.key.pub") catch @panic("OOM");
+    const text = b.root.root_dir.handle.readFileAlloc(
+        b.graph.io,
+        path,
+        b.allocator,
+        .limited(4 * 1024),
+    ) catch |err| @panic(b.fmt("读取更新公钥 {s} 失败：{t}", .{ path, err }));
+    // 构建选项是编译期常量，去掉尾部换行比在运行期反复 trim 更省事。
+    return std.mem.trim(u8, text, " \t\r\n");
 }
 
 /// 读 `build.zig.zon` 的 `.version`，供编译期注入。

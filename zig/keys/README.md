@@ -37,6 +37,17 @@ SHA-256 和来源可信（GitHub Releases 页面）。
 
 > 签名用的是**私钥**，公钥只负责验证。两个都在手上，但只有公钥能进仓库。
 
+### 应用里怎么读它
+
+`zig/app/build.zig` 在配置阶段读本目录的 `otto-lite.key.pub`，注入成
+`build_options.update_public_key`（和版本号同一条路）。桌面应用里**没有第二份
+拷贝**，换密钥只需要换这个文件。
+
+M5 这一轮的验签边界（详见 `zig/app/README.md` 的 "What signature verifies in this
+slice"）：检查更新时没有安装包，所以只验**信封**——签名格式、算法、以及 key id
+是否等于这把公钥；整包验证 `verifySignatureFile` 已经实现并用真实的
+`otto-lite-0.1.1-setup.exe` + `.sig` 测过，但要等下载到安装包之后才会被调用。
+
 ## 自己验一遍
 
 不装 tauri CLI 也能验（`zig/tools/verify-minisign.js`，Node 20+）：

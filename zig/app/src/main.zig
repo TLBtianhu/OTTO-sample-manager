@@ -1,40 +1,24 @@
 //! OTTO Lite：用 nanoui 的 Windows CPU 后端把 `zig/core` 的资料库画成 380×700 列表，
-//! 用 `zig/ports` 的文件监听让列表跟着磁盘变、用系统缩略图给每行左侧配一张小图，
-//! 用拖拽口岸把选中的素材交给别的程序。
+//! 用 `zig/ports` 的文件监听让列表跟着磁盘变、用系统缩略图给每行左侧配一张小图。
 //!
 //!   otto-lite [library.json] [--watch <dir>] [--select=0,1]
 //!   otto-lite --version | --convert <in> <out> | --library-info <file>
 //!   otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport
 //!   otto-lite --preview <file> | --play-test <file> | --copy-now <file>
 //!   otto-lite --import <folder> [--library <file>] --save <out.otto>
-//!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点。
+//!   otto-lite --check-update <url>     （无窗口更新检查，见 `update_ui.zig`）
+//!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点。表头右上角的
+//!   「检查更新」默认不联网：只有点击才起线程（`update_ui.zig`）。
 //!
-//! 列表下方是一条固定高度的预览区（`preview_panel.zig`）：选中行变化时把样本交给
-//! 注册表，按 `Outcome` 的五个分支画图/文字/占位/原因；名称/大小/时长/路径是样本
-//! 自带的事实，无条件显示在预览区下方。本文件不认识任何媒体类型，也不判断扩展名
-//! ——换一个 provider 不需要改这里（ROADMAP M1 的验收）。
+//! 列表下方是预览区（`preview_panel.zig`）：选中行变化时把样本交给注册表，按
+//! `Outcome` 的分支画图/文字/占位；本文件不认识任何媒体类型（ROADMAP M1）。
 //!
 //! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
 //! 便携版用 `<exe 目录>\data\library.json`，安装版用 `%APPDATA%\OTTO\library.json`。
 //!
-//! 选择：点一行 = 只选它；Ctrl+点击 = 切换；Shift+点击 = 从锚点连选；
-//! 空白处点击 = 清空。选中行有可见底色，表头是「N 个素材 · M 命中 · K 选中」。
-//!
-//! 搜索（M2 第一半，`search_ui.zig`）：列表上方是搜索框（占位「搜索素材…」），
-//! Ctrl+F 聚焦、Esc 清空并失焦；输入即过滤，规则只有一条——文件名子串、ASCII
-//! 大小写不敏感（`core.query.matchingIndices`），空查询 = 全部。列表只遍历一份
-//! 「行 → 样本下标」的映射（`filter.zig`），选择/预览/拖拽仍然只认样本下标。
-//! 过滤条件变化时**清空选择**：行号会整体变，保留会指错文件（v1 的诚实做法）；
-//! 光标尽量停在原样本的新行，原样本不在了才回落到第 0 行。↑↓（越界不环绕）、
-//! Home/End、Enter（音频行触发播放）、Esc（先清搜索再清选择）都在 `search_ui.zig`。
-//!
-//! 拖出：在行上按住移动超过 6 px 就进入"待拖拽"（`State.rowInput`）。帧里只做快照
-//! （`Transport.stage` 把路径复制出帧的生命周期），帧结束后由 `nanoui.App.after(0, …)`
-//! 的定时器调 `Transport.execute`——`DoDragDrop` 会阻塞到用户松手，绝不能在 `view` 里调。
-//! 拖哪些：该行在选中集合里 → 整个集合；否则只有这一行。
-//!
-//! Ctrl+C：选中集合（没有选中就当前行）写剪贴板，表头闪 1.5 秒提示。
-//! 取消（Esc / 无效目标）只清状态，不算错误；OLE 失败只打日志，不弹窗。
+//! 搜索（`search_ui.zig`）：Ctrl+F 聚焦、Esc 清空；输入即过滤（文件名子串、ASCII
+//! 大小写不敏感），过滤变化时清空选择、光标尽量停在原样本。↑↓/Home/End/Enter 在
+//! `search_ui.zig`；拖出与 Ctrl+C 见 `transport.zig`（DoDragDrop 绝不进 `view`）。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -56,6 +40,7 @@ const thumbs_mod = @import("thumbs.zig");
 const thumbs_report = @import("thumbs_report.zig");
 const trace = @import("trace.zig");
 const transport_mod = @import("transport.zig");
+const update_ui = @import("update_ui.zig");
 const version_mod = @import("version.zig");
 const window_util = @import("window_util.zig");
 const ui = nanoui.ui;
@@ -87,6 +72,8 @@ const State = struct {
     search: search_ui.Search,
     /// 「导入文件夹」：选择框 → 工作线程 `importRun` → 重载（见 `import_ui.zig`）。
     import: import_ui.Import,
+    /// 「检查更新」：入口 → 工作线程取 feed → 一行提示（`update_ui.zig`）；默认不联网。
+    update: update_ui.Update,
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
     transport: transport_mod.Transport,
     window: ?*nanoui.Window = null,
@@ -144,7 +131,8 @@ const State = struct {
         }
 
         var status_buffer: [128]u8 = undefined;
-        list_header.draw(c, .{
+        var update_buffer: [96]u8 = undefined;
+        const header_action = list_header.draw(c, .{
             .total = s.samples.len,
             .matched = s.search.len(),
             .selected = s.selection.count(),
@@ -154,7 +142,13 @@ const State = struct {
             .dirty = s.live.dirty(),
             .import_status = s.import.status(&status_buffer),
             .import_failed = s.import.phase == .failed,
+            .update_status = s.update.status(&update_buffer),
+            .update_clickable = s.update.clickable(),
         });
+        if (!busy) {
+            if (header_action.check_clicked) s.update.begin();
+            if (header_action.status_clicked) s.update.printUrl();
+        }
 
         // 列表容器：在空白处按下再松开 = 清空选择。行是它的后代：点行时
         // 上一帧的 hot 落在行上，容器的 interact 不会 clicked（见 nanoui
@@ -387,6 +381,8 @@ const State = struct {
             if (import_event == .reloaded) s.afterReload();
             if (import_event != .none) if (s.window) |window| window.redraw();
             if (s.import.tick()) if (s.window) |window| window.redraw();
+            // 更新检查也是异步的：结果回来就换表头那一行并重画。
+            if (s.update.poll()) if (s.window) |window| window.redraw();
             // 预览是异步的：工作线程交回结果就换画面并打一行账。`poll` 只在
             // UI 线程调；`sync` 在 view 里提交，这里不重复提交。
             if (s.preview.poll()) {
@@ -508,7 +504,8 @@ pub fn main(init: std.process.Init) !void {
                 "      otto-lite --convert <in.json> <out.otto>\n" ++
                 "      otto-lite --library-info <file>\n" ++
                 "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n" ++
-                "      otto-lite --import-into <folder> [--save <file>]\n",
+                "      otto-lite --import-into <folder> [--save <file>]\n" ++
+                "      otto-lite --check-update <url> | <library> --update-url <url>\n",
             .{},
         );
         return error.InvalidArguments;
@@ -566,10 +563,12 @@ pub fn main(init: std.process.Init) !void {
         .preview = panel,
         .search = search_ui.Search.init(init.gpa),
         .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
+        .update = try update_ui.Update.init(init.gpa, init.io, options.update_url),
         .transport = transport_mod.Transport.init(init.gpa),
     };
     trace.mark("setup.state");
     defer state.import.deinit();
+    defer state.update.deinit();
     defer state.selection.deinit(init.gpa);
     defer state.search.deinit();
     defer state.transport.deinit();

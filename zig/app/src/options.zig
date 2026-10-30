@@ -61,6 +61,11 @@ pub const Options = struct {
     /// `--bench-first-frame`：只建一次离屏首帧并打印耗时（由 `--bench` 起的
     /// 子进程使用；用户一般不用直接调）。
     bench_first_frame: bool = false,
+    /// `--check-update <url>`：无窗口检查一次 feed，打印结果并退出 0/1。
+    check_update: ?[]const u8 = null,
+    /// `--update-url <url>`：表头「检查更新」用的 feed 地址。
+    /// 默认 null = 没有更新源，点击只提示"未配置"，**不联网**。
+    update_url: ?[]const u8 = null,
 };
 
 pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
@@ -190,6 +195,18 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.bench_samples = arg["--bench-samples=".len..];
         } else if (std.mem.eql(u8, arg, "--bench-first-frame")) {
             options.bench_first_frame = true;
+        } else if (std.mem.eql(u8, arg, "--check-update")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.check_update = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--check-update=")) {
+            options.check_update = arg["--check-update=".len..];
+        } else if (std.mem.eql(u8, arg, "--update-url")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.update_url = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--update-url=")) {
+            options.update_url = arg["--update-url=".len..];
         } else if (!std.mem.startsWith(u8, arg, "--")) {
             options.library_path = arg;
         }
@@ -400,4 +417,28 @@ test "--cache-budget-kib：两种写法、KiB → 字节、默认 256 MiB、非�
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib" }));
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=x" }));
+}
+
+test "更新检查：--check-update / --update-url 两种写法都收，默认两个都是 null（不联网）" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(plain.check_update == null);
+    try testing.expect(plain.update_url == null);
+
+    const spaced = try parse(&[_][]const u8{
+        "otto-lite", "--check-update", "file:///C:/feed/latest.json", "--update-url", "https://example.com/latest.json",
+    });
+    try testing.expectEqualStrings("file:///C:/feed/latest.json", spaced.check_update.?);
+    try testing.expectEqualStrings("https://example.com/latest.json", spaced.update_url.?);
+    // 两个标志都不占位置参数。
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{
+        "otto-lite", "lib.json", "--check-update=https://a/b.json", "--update-url=https://a/b.json",
+    });
+    try testing.expectEqualStrings("https://a/b.json", joined.check_update.?);
+    try testing.expectEqualStrings("https://a/b.json", joined.update_url.?);
+    try testing.expectEqualStrings("lib.json", joined.library_path.?);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--check-update" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--update-url" }));
 }

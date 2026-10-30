@@ -175,6 +175,22 @@ pub fn build(b: *std.Build) void {
     });
     probe_module.addImport("otto_wav_header", wav_header_module);
 
+    // 更新 feed 口岸（M5）：一次 HTTP(S) GET（WinHTTP，手写 extern）或读本地文件。
+    // 只收发字节，不解析 JSON、不验签——那是 app 的 `update_check.zig`。
+    // winhttp 挂在模块上：消费方（app）链接 otto_feed 时自动带上。
+    const feed_module = b.addModule("otto_feed", .{
+        .root_source_file = b.path("src/feed.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    feed_module.linkSystemLibrary("winhttp", .{});
+    const feed_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_feed",
+        .root_module = feed_module,
+    });
+    b.installArtifact(feed_library);
+
     const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件 / 磁盘缓存 / 扫描 / 探测 / 文件夹选择口岸的单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
@@ -319,4 +335,16 @@ pub fn build(b: *std.Build) void {
     run_thumb_host_tests.step.dependOn(&install_thumb_host_fake.step);
     run_thumb_host_tests.step.dependOn(&run_folder_picker_tests.step);
     test_step.dependOn(&run_thumb_host_tests.step);
+
+    // 更新 feed 口岸（M5）：本地文件 / file:// 两条读路径 + 一次回环请求。
+    // 串在最后：它只碰文件系统与 WinHTTP，不需要 COM / Shell。
+    const feed_test_module = b.createModule(.{
+        .root_source_file = b.path("src/feed_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    feed_test_module.linkSystemLibrary("winhttp", .{});
+    const run_feed_tests = b.addRunArtifact(b.addTest(.{ .root_module = feed_test_module }));
+    run_feed_tests.step.dependOn(&run_thumb_host_tests.step);
+    test_step.dependOn(&run_feed_tests.step);
 }
