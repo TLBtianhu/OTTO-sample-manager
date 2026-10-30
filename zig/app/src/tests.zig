@@ -48,4 +48,8 @@ test {
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");
     _ = @import("providers/root.zig");
+    // 更新检查的纯逻辑（M5）：feed 解析、版本判定、minisign 信封与真实签名向量。
+    _ = @import("update_check.zig");
+    // 更新检查的接线：表头文案、poll 落地、本地 feed 的三种判定与信封失败。
+    _ = @import("update_ui.zig");
 }

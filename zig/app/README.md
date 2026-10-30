@@ -363,6 +363,85 @@ working directory or a path guess:
 `--version` prints the mode in parentheses and exits 0; it never opens the
 library or a window, so it works on a freshly unpacked portable copy.
 
+## Update check (M5)
+
+The header has a small 「检查更新」 entry at its right edge. Clicking it starts one
+background thread (`ports/feed.zig` → `update_check.zig`), and the result becomes one
+line under the header:
+
+| state | header line |
+| --- | --- |
+| feed is newer | `有新版本 0.2.0` — accent, clickable; this slice only prints the URL |
+| same version | `已是最新 (0.1.1)` |
+| feed is older | `本地版本更新 (0.1.0)` — the local build is newer, so no downgrade is offered |
+| any failure | `检查失败：NetFailure` / `检查失败：InvalidJson` / … (named, never a dialog) |
+
+**Nothing is fetched unless the user clicks.** There is no startup check, no timer and
+no retry, and the feed URL is empty by default (`--update-url`; the settings panel comes
+in a later slice). "A freshly unpacked OTTO has never made a network request" is a
+property of the code path, not a promise to remember: `Update.init` only stores the URL,
+`tick` only polls a thread that may not exist, and `begin()` has exactly one caller —
+the click in `main.zig`'s view.
+
+```powershell
+# headless: one check, one line; exit 0 = checked (all three verdicts), 1 = failed
+zig-out/bin/otto-lite.exe --check-update file:///C:/feed/latest.json
+#   update: available 0.2.0 (current 0.1.1) signature=ok size=1465543 url=https://…
+#   update: up_to_date (current 0.1.1) signature=ok
+#   update: ahead 0.1.0 (current 0.1.1) signature=ok
+#   update: failed error=NetFailure code=12029 http=0
+
+# the UI entry reads the same URL source; the snapshot clicks the real button
+zig-out/bin/otto-lite.exe fixtures/library.json --update-url=file:///C:/feed/latest.json ^
+  --nanoui-script="click:检查更新;live:1" --nanoui-snapshot=update.png
+```
+
+The feed is our own `latest.json` (`update_check.parseFeed` is the only reader):
+
+```json
+{
+  "version": "0.2.0",
+  "notes": "…",
+  "pub_date": "2026-11-01T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "url": "https://example.com/otto-lite-0.2.0-setup.exe",
+      "size": 1465543,
+      "signature": "<base64 minisign>"
+    }
+  }
+}
+```
+
+`version` is the only compared field and must be `x.y.z` (`core.semver`: no
+prerelease suffixes, no leading zeros). `notes` / `pub_date` are for display and may
+be missing; `platforms.windows-x86_64` is required because that is the only thing we
+ship. `size` is the installer's byte count (to be checked at download time) and
+`signature` is the **installer's** minisign signature, not the feed's.
+
+`ports/feed.zig` does the transfer: `http(s)` through WinHTTP (`WinHttpOpen` →
+`WinHttpConnect` → `WinHttpOpenRequest` → `WinHttpSendRequest` → `WinHttpReceiveResponse`
+→ `WinHttpReadData`), 5 s per phase, redirects followed with
+`WINHTTP_OPTION_REDIRECT_POLICY = ALWAYS` and at most 5 hops, 256 KiB body limit and
+`TooLarge` / `NotFound` / `NetFailure` / `BadUrl` as the only errors. `file://` and
+plain paths go through the same entry point for offline tests.
+
+### What "signature" verifies in this slice
+
+There is no installer at check time, so a check verifies the **envelope only**: the
+two base64 layers, the 74-byte structure, the algorithm (`ED` = BLAKE2b-512 then
+Ed25519, `Ed` = plain), and that the **key id matches the built-in public key**
+(`zig/keys/otto-lite.key.pub`, read at configure time into
+`build_options.update_public_key` — one source, no copy). A key-id mismatch fails the
+check instead of showing "new version".
+
+`verifySignatureFile` (true Ed25519 verification over BLAKE2b-512 of the whole file)
+is implemented and pinned by a test against the real `otto-lite-0.1.1-setup.exe` +
+`.sig`, but nothing calls it yet: it needs the downloaded installer, which is the next
+slice. So "check passed" means *the feed claims a newer version and its signature was
+made by our key id* — **not** "the installer is trustworthy". Downloading and
+replacing the running app is deliberately out of scope here.
+
 ## Packaging
 
 ```powershell
