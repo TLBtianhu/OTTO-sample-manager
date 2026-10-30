@@ -12,6 +12,7 @@ const std = @import("std");
 pub const model = @import("model.zig");
 pub const store = @import("store.zig");
 pub const query = @import("query.zig");
+pub const cache = @import("cache.zig");
 
 /// 内核数据层版本号，与 build.zig.zon 保持一致。
 pub const version = "0.1.0";
