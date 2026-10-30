@@ -69,6 +69,11 @@ try {
 $exe = Join-Path $AppDir 'zig-out\bin\otto-lite.exe'
 if (-not (Test-Path $exe)) { throw "没有产物: $exe" }
 
+# 缩略图隔离 helper：`zig build` 一次出两个 exe，缺一个就不是可用的分发物
+# （主程序在启动时会明确报错，而不是静默把第三方 handler 请回自己进程）。
+$helper = Join-Path $AppDir 'zig-out\bin\otto-thumb-host.exe'
+if (-not (Test-Path $helper)) { throw "没有 helper 产物: $helper（zig build 应同时产出两个 exe）" }
+
 # 复核 exe 里的版本：build_options 注入错了会在这里暴露，而不是等用户装完才发现。
 $reported = (& $exe --version | Out-String).Trim()
 $expected = "otto-lite $Version (dev)"
@@ -90,6 +95,7 @@ if (Test-Path $portableStage) { Remove-Item $portableStage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $portableStage | Out-Null
 
 Copy-Item $exe (Join-Path $portableStage 'otto-lite.exe')
+Copy-Item $helper (Join-Path $portableStage 'otto-thumb-host.exe')
 
 # 便携版的唯一判据：exe 同目录有标记文件 → 数据写在自己的 data\ 下。
 # 空文件即可；内容不是协议的一部分。
@@ -106,6 +112,9 @@ OTTO Lite $Version（便携版）
 
 不要删除 otto-portable.flag：它是"我是便携版"的唯一判据。删了程序会按安装版处理，
 把数据写到 %APPDATA%\OTTO。
+
+同目录的 otto-thumb-host.exe 是缩略图隔离进程（第三方 Shell handler 在它里面跑，
+崩了不会带走主程序）。不要删，也不要只拷 otto-lite.exe 出去——缺了它程序会拒绝启动。
 
 命令行：
   otto-lite.exe [library.json] [--watch <dir>] [--select=0,1]
@@ -140,6 +149,7 @@ if (Test-Path $installerStage) { Remove-Item $installerStage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $installerStage | Out-Null
 
 Copy-Item $exe (Join-Path $installerStage 'otto-lite.exe')
+Copy-Item $helper (Join-Path $installerStage 'otto-thumb-host.exe')
 
 $installedReadme = @"
 OTTO Lite $Version（安装版）
@@ -147,6 +157,9 @@ OTTO Lite $Version（安装版）
 程序安装在 Program Files\OTTO Lite，安装目录只放程序文件，不写任何用户数据。
 用户数据（库、分组、标签）保存在 %APPDATA%\OTTO\，每个用户各自一份。
 卸载会删除程序与快捷方式，但保留 %APPDATA%\OTTO；要彻底清理请手动删除该目录。
+
+同目录的 otto-thumb-host.exe 是缩略图隔离进程（第三方 Shell handler 在它里面跑），
+不要单独删除：缺了它主程序会拒绝启动。
 
 命令行（在安装目录下）：
   otto-lite.exe [library.json] [--watch <dir>] [--select=0,1]

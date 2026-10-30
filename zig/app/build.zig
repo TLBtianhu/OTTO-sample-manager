@@ -36,6 +36,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // 缩略图隔离：客户端模块 + 同一个包里构建的 helper exe（`otto-thumb-host`）。
+    const thumb_host_dep = b.dependency("thumb_host", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const app_imports: []const std.Build.Module.Import = &.{
         .{ .name = "nanoui", .module = nanoui_dep.module("nanoui") },
@@ -43,6 +48,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_watch", .module = ports_dep.module("otto_watch") },
         // 缩略图口岸（公共 API + Windows Shell 后端）与能力表口岸（只读注册表）。
         .{ .name = "otto_thumb", .module = thumb_dep.module("otto_thumb") },
+        // 缩略图隔离客户端：把第三方 handler 关进 helper 进程（M4 第一块）。
+        .{ .name = "otto_thumb_host", .module = thumb_host_dep.module("otto_thumb_host") },
         .{ .name = "otto_caps", .module = caps_dep.module("otto_caps") },
         // 拖出口岸：拖拽与剪贴板（OLE / Shell，只在 Windows 上场）。
         .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
@@ -77,6 +84,13 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // 缩略图隔离的 helper：由 `zig/ports` 的构建图产出（`--size` 由客户端在 spawn 时给），
+    // 这里只把它拷进同一个 `zig-out/bin`。**一次 `zig build` 出两个 exe**，
+    // 而不是让用户/打包脚本自己拼——helper 与 otto-lite 必须是同一次构建的产物。
+    const thumb_host_exe = thumb_host_dep.artifact("otto-thumb-host");
+    const install_thumb_host = b.addInstallBinFile(thumb_host_exe.getEmittedBin(), "otto-thumb-host.exe");
+    b.getInstallStep().dependOn(&install_thumb_host.step);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
@@ -96,6 +110,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_core", .module = core_dep.module("otto_core") },
             .{ .name = "otto_watch", .module = ports_dep.module("otto_watch") },
             .{ .name = "otto_thumb", .module = thumb_dep.module("otto_thumb") },
+            .{ .name = "otto_thumb_host", .module = thumb_host_dep.module("otto_thumb_host") },
             .{ .name = "otto_caps", .module = caps_dep.module("otto_caps") },
             .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
             .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },

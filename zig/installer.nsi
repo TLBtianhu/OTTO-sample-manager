@@ -92,6 +92,7 @@ Section "OTTO Lite" SecMain
   ; 程序文件。安装目录只放可执行文件与说明/许可证，不创建 data\。
   SetOutPath "$INSTDIR"
   File "${SOURCE_DIR}\otto-lite.exe"
+  File "${SOURCE_DIR}\otto-thumb-host.exe"
   File "${SOURCE_DIR}\README.txt"
 !ifdef LICENSE_FILE
   File "${LICENSE_FILE}"
@@ -125,6 +126,7 @@ Section "Uninstall"
   SetRegView 64
 
   ; 先删程序和快捷方式；安装目录里没有用户数据。
+  Delete "$INSTDIR\otto-thumb-host.exe"
   Delete "$INSTDIR\otto-lite.exe"
   Delete "$INSTDIR\README.txt"
 !ifdef LICENSE_FILE

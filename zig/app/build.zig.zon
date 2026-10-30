@@ -10,6 +10,8 @@
         // 五个依赖名里 ports 是主入口：`ports_dep.module("otto_watch")` 之类。
         .ports = .{ .path = "../ports" },
         .thumb = .{ .path = "../ports" },
+        // 缩略图隔离的客户端模块；同一个包里的 helper exe 也从这里拿。
+        .thumb_host = .{ .path = "../ports" },
         .caps = .{ .path = "../ports" },
         .drag = .{ .path = "../ports" },
     },

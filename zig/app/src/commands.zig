@@ -19,6 +19,7 @@ const import_cli = @import("import_cli.zig");
 const library_cli = @import("library_cli.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
+const thumb_bench = @import("thumb_bench.zig");
 const transport_mod = @import("transport.zig");
 const version_mod = @import("version.zig");
 
@@ -43,8 +44,14 @@ pub fn run(
     // 真正写剪贴板只走这条显式命令（用户点名的文件）。
     if (options.copy_now) |path| return transport_mod.copyNow(init.gpa, path);
 
-    // 取图自检：完全不开窗，也不碰 nanoui。
-    if (options.demo_thumbs_dir) |dir_path| return try demo_thumbs.run(init, init.gpa, dir_path);
+    // 取图自检：完全不开窗，也不碰 nanoui。`--no-isolation` 在这条路径上同样生效，
+    // 便于把同一份 fixture 在两种后端上各跑一遍。
+    if (options.demo_thumbs_dir) |dir_path| {
+        return try demo_thumbs.run(init, init.gpa, dir_path, !options.no_isolation);
+    }
+
+    // 进程内 vs 隔离 helper 的对照（字节一致 + 200 张耗时），同样不开窗。
+    if (options.thumb_bench_dir) |dir_path| return try thumb_bench.run(init, init.gpa, dir_path);
 
     if (options.demo_dir) |dir_path| {
         try demo_watch.run(init, allocator, dir_path);
