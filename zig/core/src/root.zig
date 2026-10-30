@@ -1,9 +1,11 @@
 //! OTTO Sample Manager「金属内核」数据层入口。
 //!
 //! 公共模块：
-//!   * model  —— Sample / SampleGroup / SampleFolder / Settings 强类型
-//!   * store  —— 从 electron-store JSON 加载并修复旧数据
-//!   * query  —— 目录递归 / 分组 / 文件名子串查询
+//!   * model       —— Sample / SampleGroup / SampleFolder / Settings 强类型，
+//!                    以及文件身份（FileIdentity / StableKey）
+//!   * store       —— 从 electron-store JSON 加载并修复旧数据
+//!   * query       —— 目录递归 / 分组 / 文件名子串查询
+//!   * annotations —— 以身份为键的用户注释表（分组 / 标签 / 评分）与旧库迁移
 //!
 //! 只依赖 Zig 0.17 标准库，没有 @cImport、没有外部依赖。
 
@@ -12,6 +14,7 @@ const std = @import("std");
 pub const model = @import("model.zig");
 pub const store = @import("store.zig");
 pub const query = @import("query.zig");
+pub const annotations = @import("annotations.zig");
 
 /// 内核数据层版本号，与 build.zig.zon 保持一致。
 pub const version = "0.1.0";

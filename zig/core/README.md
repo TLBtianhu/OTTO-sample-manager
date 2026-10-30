@@ -28,25 +28,50 @@ zig build test
 | --- | --- |
 | `build.zig` | 产出静态库 `otto_core`、`test` 步骤；把 `fixtures` 作为匿名模块注入测试 |
 | `build.zig.zon` | 包元数据（名称 / 版本 / 打包路径 / fingerprint） |
-| `src/root.zig` | 公共入口：导出 `model` / `store` / `query`，以及 `otto_core_version` |
-| `src/model.zig` | `Sample` / `SampleGroup` / `SampleFolder` / `Settings` 强类型，路径派生工具 |
+| `src/root.zig` | 公共入口：导出 `model` / `store` / `query` / `annotations`，以及 `otto_core_version` |
+| `src/model.zig` | `Sample` / `SampleGroup` / `SampleFolder` / `Settings` 强类型，文件身份（`FileIdentity` / `FallbackKey` / `StableKey`），路径派生工具 |
 | `src/json.zig` | electron-store JSON 的容错标量 / 字符串数组读取（缺失、null、类型错误） |
 | `src/settings.zig` | `settings` / `copySettings` / `folderSettings` 三个设置对象的解析与默认值 |
 | `src/diagnostics.zig` | `LoadError` 与 `LoadReport`（修复 / 丢弃计数） |
 | `src/reconcile.zig` | 旧数据修复：目录归属、扁平目录、目录树、分组双向关系、排序重建 |
 | `src/store.zig` | `Library`、`load` / `loadFile`，解析 map 形式的样本 / 分组 / 目录并装配索引 |
 | `src/query.zig` | 目录递归过滤、分组过滤、文件名子串过滤、排序、子树枚举 |
+| `src/annotations.zig` | 以 `StableKey`（身份优先）为键的注释表：`AnnotationTable` / `resolve` 旧库迁移 |
 | `src/tests.zig` | 集成测试（4 个 fixture + 1000 条合成数据耗时打印） |
 | `src/store_test.zig` | `store` 的单元测试（内联 JSON） |
+| `src/annotations_test.zig` | 身份 / 注释表的集成测试（改名不丢、fallback、`resolve` 迁移、identity 加载） |
 | `fixtures/*.json` | 全部为手工构造的合成数据，**不含任何真实用户数据** |
 | `fixtures/fixtures.zig` | 以 `@embedFile` 暴露 fixture 文本 |
 
-单文件均小于 600 行；`zig build test` 当前为 **26 个测试**。
+单文件均小于 600 行；`zig build test` 当前为 **37 个测试**。
 
 ## 公共 API 草图
 
 ```zig
 // model.zig
+pub const FileIdentity = struct {
+    volume_serial: u32,   // 卷序列号
+    file_index: u64,      // 卷内文件索引（NTFS/ReFS 的 File ID）
+    pub fn eql(self: FileIdentity, other: FileIdentity) bool;
+    pub fn hash(self: FileIdentity) u64;
+};
+
+pub const FallbackKey = struct {
+    path: []const u8,     // 按字节比较，口岸负责归一化
+    size: u64 = 0,
+    mtime: i64 = 0,       // Unix 毫秒，0 = 未知
+    pub fn eql(self: FallbackKey, other: FallbackKey) bool;
+    pub fn hash(self: FallbackKey) u64;
+};
+
+pub const StableKey = union(enum) {
+    identity: FileIdentity,
+    fallback: FallbackKey,
+    pub fn eql(self: StableKey, other: StableKey) bool;
+    pub fn hash(self: StableKey) u64;
+    pub fn isIdentity(self: StableKey) bool;
+};
+
 pub const Sample = struct {
     id: []const u8,
     file_name: []const u8,
@@ -62,7 +87,10 @@ pub const Sample = struct {
     file_size: u64 = 0,
     group_ids: []const []const u8 = &.{},
     imported_at: i64 = 0,
+    mtime: i64 = 0,                       // L0 目录项，0 = 未知
+    identity: ?FileIdentity = null,       // 口岸填；null 时注释键退回 fallback
     pub fn inGroup(self: Sample, group_id: []const u8) bool;
+    pub fn stableKey(self: Sample) StableKey;
 };
 
 pub const SampleGroup = struct {
@@ -127,6 +155,27 @@ pub fn byGroup(allocator: std.mem.Allocator, library: *const store.Library, grou
 pub fn byFileName(allocator: std.mem.Allocator, library: *const store.Library, needle: []const u8) ![]const Sample;
 pub fn folderSubtreeIds(allocator: std.mem.Allocator, library: *const store.Library, root_id: []const u8) ![]const []const u8;
 pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool;
+
+// annotations.zig
+pub const Annotations = struct {
+    group_ids: []const []const u8 = &.{},
+    tags: []const []const u8 = &.{},
+    rating: u8 = 0,                  // 0 = 未评分，1..5 = 星级
+};
+
+pub const AnnotationTable = struct {
+    pub fn init(backing_allocator: std.mem.Allocator) AnnotationTable;
+    pub fn deinit(self: *AnnotationTable) void;
+    pub fn count(self: *const AnnotationTable) usize;
+    pub fn get(self: *const AnnotationTable, key: StableKey) ?Annotations;
+    pub fn contains(self: *const AnnotationTable, key: StableKey) bool;
+    pub fn put(self: *AnnotationTable, key: StableKey, annotations: Annotations) error{OutOfMemory}!void;
+    pub fn remove(self: *AnnotationTable, key: StableKey) bool;
+    pub fn entries(self: *const AnnotationTable) []const Entry;   // { key, annotations }
+};
+
+pub fn merge(allocator: std.mem.Allocator, base: Annotations, extra: Annotations) error{OutOfMemory}!Annotations;
+pub fn resolve(table: *AnnotationTable, samples: []const Sample) error{OutOfMemory}!ResolveReport;
 ```
 
 所有权约定：
@@ -135,6 +184,53 @@ pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool;
 - `load` / `loadFile` 会把输入 JSON 里的字符串复制进 arena，**调用方可以立即释放输入缓冲**。
 - `query.*` 返回的切片由调用方用同一个 `allocator` 释放；切片中的 `Sample` 是浅拷贝，
   字符串仍归 `Library` 所有。
+- `AnnotationTable` 写入时把键（退化键里的路径）与注释字符串都拷贝进自己的 arena；
+  `deinit()` 后 `get` / `entries` 返回的切片失效。`entries` 的顺序不保证（`remove` 会重排）。
+
+## 身份与注释
+
+宪章「七」：**路径是地址，不是身份**。数据层只定义身份这个数据类型，值的来源在
+口岸（`zig/ports/`）；`zig/core` 里没有任何平台代码、不读文件系统、不铸号。
+
+| 层 | 数据层里的表示 | 来源 |
+| --- | --- | --- |
+| 身份 | `FileIdentity{ volume_serial, file_index }` | OS 发放（NTFS/ReFS 上跨改名、跨同卷移动不变） |
+| 地址 | `Sample.file_path` | 可从身份重建，属于口岸 |
+| 退化身份 | `FallbackKey{ path, size, mtime }` | FAT32 / exFAT / 部分网络盘的兜底 |
+
+注释键的选择只有一条规则，封装在 `Sample.stableKey()` 里：
+
+- `identity != null` → `StableKey.identity`；
+- 否则 → `StableKey.fallback`（`path` + `size` + `mtime` 三元组，**三者全等才算同一个键**）。
+
+所以同一个文件改名 / 同卷移动后，注释照样命中；反过来，没有身份时只有三元组
+完全一致的两条样本才会共用注释（换路径、改大小、改 mtime 都会分叉）。
+
+### `resolve`：旧数据迁移
+
+`resolve(table, samples)` 把表里**只有 fallback 键**的注释搬到对应的 identity 键上，
+返回 `ResolveReport`（各分支计数）。判定顺序：
+
+| 情况 | 处理 | 计数 |
+| --- | --- | --- |
+| 键本来就是 identity | 不动 | `identity_entries` |
+| 同路径上没有任何带 identity 的样本 | 保留 fallback | `unmatched` |
+| 同路径上有多个**不同** identity | 保留 fallback（搬给谁都不对） | `ambiguous` |
+| fallback 的 size 与样本 size 都已知且不等 | 保留 fallback（多半是换了文件） | `size_mismatch` |
+| fallback 的 mtime 与样本 mtime 都已知且不等 | 保留 fallback | `mtime_mismatch` |
+| 以上都不触发 | 合并进 identity 键，删除 fallback 条目 | `migrated`（其中目标键已有注释时 `merged`） |
+
+合并规则（`merge`）：分组 / 标签取**保序并集去重**，两边都不丢；评分以 identity 侧为准，
+identity 未评分（0）时才继承旧 fallback 的评分。`size` / `mtime` 为 0 表示未知，当作通配。
+
+`resolve` 幂等：迁移完成后不再有可迁移的 fallback 条目，再跑一次是空操作。
+路径只按字节比较（口径与 `file_path` 一致，归一化是口岸的事）。
+
+### 边界
+
+- File ID 的稳定性只在 NTFS/ReFS 上有保证；FAT32、exFAT、部分网络共享会退化，
+  UI 应据此提示「此素材的身份不稳定」；
+- 注释表本身还没有持久化格式（见「还没做的」）；换机 / 换卷时的导出导入不在本块。
 
 ## 兼容性决策
 
@@ -148,6 +244,7 @@ pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool;
 | `groupIds` / `sampleIds` / `childFolderIds` 缺失 | 空数组 | 旧版本没有分组 / 目录字段 |
 | `originalId` 缺失 | 等于 `id` | 现有 hydrate 的 `s.originalId ?? s.id` |
 | `isCopy` / `copyIndex` / 数值字段缺失 | `false` / `0` | 与 `App.tsx` 的默认值一致 |
+| `identity` 缺失 / 不是对象 / `volumeSerial` 或 `fileIndex` 缺失、负数、非整数 | `identity = null`，注释键退回 `FallbackKey` | 身份是可选增强：缺了退回退化键，绝不因一个身份字段丢整条样本 |
 | `id` 缺失 | 用 samples / groups / folders map 的键 | electron-store 以键存储，键就是 id |
 | 键与对象内 `id` 不一致 | 以对象内 `id` 为准，计入 `id_key_mismatches` | 内存模型用的是对象内 id；App 直接 `Object.values` |
 | 重复 `id` | 保留先出现的，后者丢弃并计数 | 避免索引覆盖导致关系错位；首条通常是真实数据 |
@@ -186,13 +283,16 @@ pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool;
 
 ## 测试覆盖
 
-`zig build test` 共 26 个测试，其中：
+`zig build test` 共 37 个测试，其中：
 
 - `legacy_v1.json`：没有 `folderId` / `groupIds` 的旧数据补默认值、路径推导、扁平目录归位；
 - `dangling_refs.json`：目录 / 分组 / 父目录 / 排序表里的悬空引用全部清理并计数；
 - `duplicate_ids.json`：重复 sample id、重复 folder id、重复排序项去重；
 - `subfolders.json`：三层目录递归 / 非递归过滤、分组、大小写不敏感、中文子串、组合过滤、设置；
 - 内联 JSON：非法 JSON、samples 类型错误、`loadFile`（tmpDir）、settings 默认值；
+- 身份 / 注释：同一身份跨路径共用注释、无身份走 fallback 三元组、`resolve` 迁移与保留分支、
+  `AnnotationTable` 的 put / 替换 / remove / 下标对齐、`merge` 并集与评分继承、
+  JSON 有 / 没有 `identity` 都能加载、老 fixture 加载后 `identity` 全为 null；
 - 1000 条合成数据：只打印加载耗时，不做性能断言。
 
 ## 性能粗测
@@ -218,4 +318,8 @@ pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool;
 - **运行时字段**：`waveformData` / `isDecoded` / `isFileValid` 归调用方；`load` 不会
   访问磁盘校验文件是否存在。
 - **其它 store 键**：`dragCounts`、`importUndoState`、`folderState` 的其他 UI 状态。
+- **注释表的持久化**：`AnnotationTable` 已能用身份做键，但还没有落盘格式与导出 / 导入
+  （宪章「七」要求注释表可导出，换机 / 换卷不是死路）。
+- **身份的口岸侧实现**：数据层只定义 `FileIdentity`，取值（含 `volumeSerial` / `fileIndex`
+  的读取）与「由身份反解路径」属于 `zig/ports/`，本块没有平台代码。
 - **写回 / 撤销**：`commitLibraryImport` / `undo` 的逻辑不在本块范围内。

@@ -318,6 +318,33 @@ fn parseSample(
         .file_size = json.uint64(object, "fileSize", 0),
         .group_ids = group_ids,
         .imported_at = json.int64(object, "importedAt", 0),
+        .identity = parseIdentity(object),
+    };
+}
+
+/// 读取可选的文件身份：`{"identity": {"volumeSerial": 123, "fileIndex": 456}}`。
+///
+/// 容错口径与其它标量字段一致：缺失 / 不是对象 / 两个字段缺任意一个 /
+/// 类型或取值不合法 -> null（退回 fallback 键），绝不因为一个身份字段
+/// 丢掉整条样本。
+fn parseIdentity(object: std.json.ObjectMap) ?model.FileIdentity {
+    const identity = json.objectField(object, "identity") orelse return null;
+    const volume_serial = jsonU64(identity, "volumeSerial") orelse return null;
+    const file_index = jsonU64(identity, "fileIndex") orelse return null;
+    return .{
+        .volume_serial = std.math.cast(u32, volume_serial) orelse return null,
+        .file_index = file_index,
+    };
+}
+
+/// JSON 里的非负 64 位整数。负数 / 浮点 / 非数字一律 null；
+/// 超出 i64 的整数在 std.json 里是 `number_string`，这里也认。
+fn jsonU64(object: std.json.ObjectMap, key: []const u8) ?u64 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .integer => |number| if (number >= 0) @intCast(number) else null,
+        .number_string => |text| std.fmt.parseInt(u64, text, 10) catch null,
+        else => null,
     };
 }
 
