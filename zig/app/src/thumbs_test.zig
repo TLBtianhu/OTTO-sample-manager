@@ -80,3 +80,22 @@ test "载荷头：尺寸 / 跨度往返，长度不够就是 null" {
     try testing.expect(thumbs.decodeHeader(&payload) == null);
     try testing.expect(thumbs.decodeHeader(payload[0..4]) == null);
 }
+
+test "L3 摘要：同一 L2 键串稳定、不同键串不同、正好 32 字节" {
+    const first = thumbs.diskKeyFor("id|00000001|0000000000000002|111|64");
+    const second = thumbs.diskKeyFor("id|00000001|0000000000000002|111|64");
+    try testing.expectEqualSlices(u8, &first, &second);
+    try testing.expectEqual(@as(usize, 32), first.len);
+
+    // mtime 变一位就必须换键：旧像素不能拿来当新内容的命中。
+    const other = thumbs.diskKeyFor("id|00000001|0000000000000002|112|64");
+    try testing.expect(!std.mem.eql(u8, &first, &other));
+
+    // 由 keyFor 产出的键串同样稳定（同一路径 + mtime + 尺寸调两次）。
+    var buffer: [thumbs.max_key_bytes]u8 = undefined;
+    const sample = sampleWith(null, 5, "C:\\lib\\a.bmp");
+    const key = thumbs.keyFor(sample, 64, &buffer);
+    const a = thumbs.diskKeyFor(key);
+    const b = thumbs.diskKeyFor(key);
+    try testing.expectEqualSlices(u8, &a, &b);
+}

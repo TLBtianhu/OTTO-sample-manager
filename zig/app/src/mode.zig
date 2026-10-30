@@ -148,6 +148,26 @@ pub fn defaultLibraryPath(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return libraryPathFor(allocator, mode, exe_path, appdata);
 }
 
+/// 缩略图 L3 缓存目录的纯路径：`<dataDir>\cache\thumbs`；没有 dataDir 就是 null
+/// （dev 形态不写盘，避免污染工程目录）。
+pub fn cacheDirFor(allocator: std.mem.Allocator, data_dir: ?[]const u8) !?[]u8 {
+    const base = data_dir orelse return null;
+    return try std.fs.path.join(allocator, &.{ base, "cache", "thumbs" });
+}
+
+/// 启动时的 L3 缓存目录：按运行形态取 dataDir 再拼 `cache/thumbs`。
+/// dev 返回 null；其它形态拿不到 dataDir（例如 installed 没有 %APPDATA%）也返回
+/// null——缓存只是加速层，不值得让启动失败。
+pub fn thumbsCacheDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+    const exe_path = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe_path);
+    const mode = try detect(allocator, io, exe_path);
+    if (mode == .dev) return null;
+    const data_dir = (try dataDir(allocator, io, mode, exe_path)) orelse return null;
+    defer allocator.free(data_dir);
+    return cacheDirFor(allocator, data_dir);
+}
+
 /// `%APPDATA%` 的薄封装。
 ///
 /// `std.process.Init.environ_map` 只在 `main` 的签名里可见，而这里的函数签名
@@ -261,4 +281,12 @@ test "薄封装：installed 的数据目录真的落在 %APPDATA% 下" {
     defer testing.allocator.free(dir);
     try testing.expect(std.mem.endsWith(u8, dir, installed_dir_name));
     try testing.expect(std.fs.path.isAbsolute(dir));
+}
+
+test "L3 缓存目录：dataDir 下的 cache/thumbs；没有 dataDir 就是 null（dev 不写盘）" {
+    try testing.expect((try cacheDirFor(testing.allocator, null)) == null);
+
+    const dir = (try cacheDirFor(testing.allocator, "C:\\Users\\me\\AppData\\Roaming\\OTTO")).?;
+    defer testing.allocator.free(dir);
+    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\cache\\thumbs", dir);
 }

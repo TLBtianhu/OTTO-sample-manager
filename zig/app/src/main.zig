@@ -501,7 +501,7 @@ pub fn main(init: std.process.Init) !void {
                 "      otto-lite --version\n" ++
                 "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
-                "      otto-lite --thumb-bench <dir> [--no-isolation]\n" ++
+                "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n" ++
                 "      otto-lite --convert <in.json> <out.otto>\n" ++
@@ -530,25 +530,27 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ library_path, @errorName(err) });
         std.process.exit(1);
     };
-    defer { library.deinit(); init.gpa.destroy(library); }
+    defer {
+        library.deinit();
+        init.gpa.destroy(library);
+    }
     const root = try watchRoot(init, allocator, options, library_path);
-
     // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。
     var live = try init.gpa.create(live_mod.Live);
     errdefer init.gpa.destroy(live);
     live.* = try live_mod.Live.init(init.gpa, library, root);
-    defer { live.deinit(); init.gpa.destroy(live); }
-
-    // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）：
-    // 工作线程要拿它分配像素、路径与缓存条目，不能用进程级 arena。
-    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation });
+    defer {
+        live.deinit();
+        init.gpa.destroy(live);
+    }
+    // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
+    // 运行形态决定：dev 没有 dataDir → null（不写盘）。
+    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation, .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null, .disk_cache_budget = options.disk_cache_budget_bytes });
     defer thumbs.deinit();
-
     // 预览条也用 `init.gpa`：工作线程要用它分配位图/文本。注册表只有一张
     // （`providers/root.zig`），`--preview` 自检与 UI 看到的是同一份顺序。
     const panel = try preview_panel.Panel.init(init.gpa, init.io, &preview_providers.registry, .{});
     defer panel.deinit();
-
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite" });
     defer app.destroy();
 
@@ -568,7 +570,6 @@ pub fn main(init: std.process.Init) !void {
     defer state.transport.deinit();
     state.selection.resize(init.gpa, state.samples.len) catch {};
     if (options.select) |text| state.seedSelection(text);
-
     var title_buffer: [96]u8 = undefined;
     const title = version_mod.windowTitle(&title_buffer, state.samples.len);
     state.window = try app.newWindow(.{
@@ -577,7 +578,6 @@ pub fn main(init: std.process.Init) !void {
         .height = 700,
         .content = .{ .view = .init(&state, State.view) },
     });
-
     // snapshot 模式没有消息循环，定时器不会跑到；离屏出图只画初始视图。
     // 想看到后台取到的图，加 `--nanoui-wait=<秒>`：事件循环会跑、tick 会重画。
     nanoui.App.after(tick_ms, &state, State.tick);

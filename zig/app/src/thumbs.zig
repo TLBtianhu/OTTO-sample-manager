@@ -9,14 +9,22 @@
 //!   * 本文件回答**可调度**：门禁、缓存、后台线程、账号（requested / ready /
 //!     no_handler / cached / failed / dropped），UI 只问 `acquire`。
 //!
-//! 三道关（按顺序，越早越便宜）：
-//!   1. **缓存**：`core.cache.Cache`（kind = `.thumbnail`）命中就直接返回，零 IO；
+//! 四道关（按顺序，越早越便宜）：
+//!   1. **L2 内存缓存**：`core.cache.Cache`（kind = `.thumbnail`）命中就直接返回，零 IO；
 //!   2. **能力门禁**：`caps.forPath`。`has_handler == false` 立刻返回「无预览」，
 //!      **绝不**调 `thumb.get`——没有 handler 的文件在 Shell 里只会退回一个通用
 //!      文件图标，那既不是缩略图，还会白白加载一遍 Shell；
-//!   3. **后台队列**：只有真的登记了 handler 的才进有界队列，由唯一一条工作线程
+//!   3. **L3 磁盘缓存**（M4 第二块，`diskcache.zig`）：L2 没命中就进队列，由工作
+//!      线程先查 `<dataDir>/cache/thumbs`。命中就把像素回填 L2，**完全不碰 helper**；
+//!      读文件在工作线程上做，UI 线程一帧都不等；
+//!   4. **后台队列**：L3 也没有的、且真的登记了 handler 的，由唯一一条工作线程
 //!      同步调隔离层（默认 `thumb_host.get`）。第三方 handler 卡死时卡的是 helper
 //!      进程，超时由客户端杀掉，UI 线程与列表都不受影响。
+//!
+//! L3 的键由 L2 的键串派生（四轮 Wyhash → 32 字节，见 `thumbs_codec.zig`）：
+//! 同一路径 + 同一 mtime + 同一请求边长跨进程稳定，所以第二次打开库仍然命中。
+//! dev 形态没有数据目录，`Options.disk_cache_dir` 为 null，L3 整层关闭（不污染
+//! 工程目录）；缓存目录建不出来也只是「本次没有 L3」，不影响取图。
 //!
 //! 缓存键（`keyFor`）：
 //!   * 有文件身份（NTFS / ReFS 的卷序列号 + 文件索引）：`id|<卷>|<索引>|<mtime>|<边长>`。
@@ -44,124 +52,41 @@
 //!
 //! 本文件不依赖 UI（不 import nanoui），`--demo-thumbs` 可以脱离窗口直接驱动。
 //!
-//! 只依赖 Zig 0.17 标准库与两个口岸，没有 @cImport。
+//! 只依赖 Zig 0.17 标准库与几个口岸，没有 @cImport。
 
 const std = @import("std");
 const core = @import("otto_core");
 const caps = @import("otto_caps");
 const thumb = @import("otto_thumb");
 const thumb_host = @import("otto_thumb_host");
+const codec = @import("thumbs_codec.zig");
+const l3 = @import("thumbs_disk.zig");
 
-/// 请求的边长（像素）。列表那格是 32 点，Windows 的窗口在 150% / 200% 缩放下是
-/// 2x，所以按 64 请求：2x 屏上正好 1:1，1x 屏由图集缩到 32 点，不会糊。
-pub const default_size_px: u32 = 64;
+const types = @import("thumbs_types.zig");
 
-/// 有界队列容量。一屏 380×700 / 44px ≈ 17 行，32 条留了一屏半的余量：
-/// 正常滚动不会丢，只有一次性塞进更多请求时才会触发「丢最旧」。
-pub const default_queue_capacity: usize = 32;
-
-/// 缩略图缓存预算。一张 64×64 BGRA 是 16 KiB，32 MiB 装得下两千张左右，
-/// 远多于一屏的可见行数。
-pub const default_budget_bytes: usize = 32 * 1024 * 1024;
-
-/// 失败记忆的条数上限；满了丢最旧的。
-pub const default_failure_memory: usize = 64;
+pub const default_size_px: u32 = types.default_size_px;
+pub const default_queue_capacity: usize = types.default_queue_capacity;
+pub const default_budget_bytes: usize = types.default_budget_bytes;
+pub const default_failure_memory: usize = types.default_failure_memory;
+pub const Options = types.Options;
+pub const View = types.View;
+pub const Lookup = types.Lookup;
+pub const Stats = types.Stats;
+const Job = types.Job;
+const SpinLock = types.SpinLock;
+const Pinned = types.Pinned;
 
 /// 缓存键的栈上缓冲。Windows 长路径可能超过它，超了走哈希退化（见文件头）。
-pub const max_key_bytes: usize = 512;
+pub const max_key_bytes: usize = codec.max_key_bytes;
 
 /// 缓存载荷的前缀：宽 / 高 / 行跨度，各 4 字节小端，之后才是 BGRA 像素。
 /// 尺寸必须和像素一起进缓存，否则命中的是一个不知道多大、跨度多少的字节块。
-pub const header_bytes: usize = 12;
+pub const header_bytes: usize = codec.header_bytes;
 
-pub const Options = struct {
-    /// 请求的边长，1–`thumb.max_size_px`；超出按口岸上限夹住。
-    size_px: u32 = default_size_px,
-    queue_capacity: usize = default_queue_capacity,
-    budget_bytes: usize = default_budget_bytes,
-    failure_memory: usize = default_failure_memory,
-    /// 是否把"碰 Shell"交给 `otto-thumb-host.exe`（M4 第一块）。
-    /// 默认 `true`：第三方 handler 崩了/卡死/弹框只带走 helper，OTTO 列表照常滚；
-    /// `false` 是显式对照开关（`--no-isolation`），退回进程内 `thumb.get`。
-    isolation: bool = true,
-};
-
-/// 一次成功命中的借用视图。`key` 与 `pixels` 都归缓存所有，pin 期间有效。
-pub const View = struct {
-    /// 缓存键；`ui.image` 用它做图集的名字（同键同尺寸只解码一次）。
-    key: []const u8,
-    /// BGRA8、预乘 alpha、顶行在前（`thumb.Thumbnail` 的契约）。
-    pixels: []const u8,
-    width: u32,
-    height: u32,
-    stride: usize,
-};
-
-/// `acquire` 的四种答案。UI 对后三种都画占位，只是图标不同：
-///   * `pending`   —— 已进队列 / 正在取，等一次 redraw；
-///   * `no_handler`—— 能力门禁说这台机器没有 handler（正常态，不是错误）；
-///   * `failed`    —— 文件没了 / Shell 失败 / 队列里丢了；已经记进失败表。
-pub const Lookup = union(enum) {
-    ready: View,
-    pending,
-    no_handler,
-    failed,
-};
-
-/// 取图层的账。UI / `--demo-thumbs` 只读这个快照。
-pub const Stats = struct {
-    /// 真正进了队列的取图请求（能力门禁挡下的不算）。
-    requested: u32 = 0,
-    /// 取图成功、已放进缓存的次数（= `readyCount()`）。
-    ready: u32 = 0,
-    /// 被能力门禁挡下的查询次数（每次都算，含负缓存）。
-    no_handler: u32 = 0,
-    /// 缓存命中次数。
-    cached: u32 = 0,
-    /// 调了 `thumb.get` 但失败的次数（含文件不存在、Shell 出错）。
-    failed: u32 = 0,
-    /// 队列满时被顶掉的最旧请求数。
-    dropped: u32 = 0,
-    /// 还没落地的请求：队列里的 + 正在取的那一条。
-    pending: u32 = 0,
-    /// 缓存里当前的条目数 / 字节数。
-    entries: usize = 0,
-    bytes: usize = 0,
-};
-
-/// 一个待取的请求。key / path 都是本层复制的，跨线程传递安全。
-const Job = struct {
-    key: []u8,
-    path: []u8,
-    size_px: u32,
-};
-
-/// 自适应自旋锁：临界区只有查表、拷几十字节、入 / 出队，没有 IO。
-/// 照 `ports/watch.zig` 的做法（Zig 0.17 没有不需要 Io 实例的 std.Thread.Mutex）。
-const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
-
-/// pin 住的一个键。键串是本层复制的：缓存释放条目时不会连带释放它，
-/// 而 `beginFrame` 必须拿着键原文才能 `cache.unpin`。
-const Pinned = struct {
-    key: []u8,
-};
+pub const keyFor = codec.keyFor;
+pub const encodeHeader = codec.encodeHeader;
+pub const decodeHeader = codec.decodeHeader;
+pub const diskKeyFor = codec.diskKeyFor;
 
 pub const InitError = std.mem.Allocator.Error || std.Thread.SpawnError || error{HelperUnavailable};
 
@@ -173,6 +98,8 @@ pub const Thumbs = struct {
     /// 取图走隔离 helper（默认）还是进程内 `thumb.get`（`--no-isolation`）。
     isolation: bool,
     cache: core.cache.Cache,
+    /// L3 磁盘缓存。只在工作线程上读写（启动时的 prune 例外，在起线程之前）。
+    disk: ?l3.L3 = null,
 
     lock: SpinLock = .{},
     /// 有界环形队列。`slots.len` 就是容量；满了由 `pushLocked` 丢最旧。
@@ -238,8 +165,28 @@ pub const Thumbs = struct {
             };
         }
 
+        // L3 磁盘缓存是**可选加速层**：目录建不出来、prune 失败都只打一行日志，
+        // 不让应用起不来。dev 形态由调用方传 null（不写工程目录）。
+        if (options.disk_cache_dir) |dir| {
+            self.disk = l3.L3.open(self.allocator, self.io, dir, options.disk_cache_budget) catch |err| blk: {
+                std.debug.print("otto-lite: L3 缓存不可用（{s}），本次只用内存缓存。\n", .{@errorName(err)});
+                break :blk null;
+            };
+            if (self.disk) |*disk| {
+                if (disk.prune()) |report| {
+                    std.debug.print(
+                        "otto-lite: L3 缓存 dir={s} budget={d}B 启动裁剪 scanned={d} evicted={d} bytes={d}->{d}\n",
+                        .{ dir, options.disk_cache_budget, report.scanned, report.evicted, report.bytes_before, report.bytes_after },
+                    );
+                } else |err| {
+                    std.debug.print("otto-lite: L3 启动裁剪失败（{s}），继续。\n", .{@errorName(err)});
+                }
+            }
+        }
+
         self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch |err| {
             self.cache.deinit();
+            if (self.disk) |*disk| disk.deinit();
             return err;
         };
         return self;
@@ -267,6 +214,7 @@ pub const Thumbs = struct {
         for (self.failed_keys.items) |key| self.allocator.free(key);
         self.failed_keys.deinit(self.allocator);
         self.cache.deinit();
+        if (self.disk) |*disk| disk.deinit();
         self.allocator.free(self.slots);
         self.allocator.destroy(self);
     }
@@ -290,6 +238,8 @@ pub const Thumbs = struct {
     pub fn acquire(self: *Thumbs, sample: core.model.Sample) Lookup {
         var buffer: [max_key_bytes]u8 = undefined;
         const key = keyFor(sample, self.size_px, &buffer);
+        // L3 摘要只依赖上面的键串：同一路径 + mtime + 边长跨进程稳定。
+        const disk_key: ?l3.Key = if (self.disk != null) diskKeyFor(key) else null;
 
         self.lock.acquire();
         if (self.cachedViewLocked(key)) |view| {
@@ -321,7 +271,7 @@ pub const Thumbs = struct {
             return .no_handler;
         }
 
-        return self.enqueue(key, sample.file_path);
+        return self.enqueue(key, sample.file_path, disk_key);
     }
 
     /// 取图成功次数（完成一次 = 放进缓存并加一）。UI 的 tick 看它变没变来决定重画。
@@ -334,6 +284,7 @@ pub const Thumbs = struct {
         self.lock.acquire();
         defer self.lock.release();
         const cache_stats = self.cache.stats();
+        const disk_stats: l3.Stats = if (self.disk) |*disk| disk.stats() else .{};
         return .{
             .requested = self.requested.load(.monotonic),
             .ready = self.ready.load(.monotonic),
@@ -344,6 +295,12 @@ pub const Thumbs = struct {
             .pending = @intCast(self.len + @intFromBool(self.inflight != null)),
             .entries = cache_stats.entries,
             .bytes = cache_stats.bytes,
+            .l3_hit = disk_stats.hits,
+            .l3_miss = disk_stats.misses,
+            .l3_write = disk_stats.writes,
+            .l3_evicted = disk_stats.evicted,
+            .l3_bytes = disk_stats.bytes,
+            .l3_corrupt = disk_stats.corrupt,
         };
     }
 
@@ -407,13 +364,18 @@ pub const Thumbs = struct {
     }
 
     /// 复制键与路径后入队；满了先丢最旧（计 `dropped`）。
-    fn enqueue(self: *Thumbs, key: []const u8, path: []const u8) Lookup {
+    fn enqueue(self: *Thumbs, key: []const u8, path: []const u8, disk_key: ?l3.Key) Lookup {
         const owned_key = self.allocator.dupe(u8, key) catch return .failed;
         errdefer self.allocator.free(owned_key);
         const owned_path = self.allocator.dupe(u8, path) catch return .failed;
 
         self.lock.acquire();
-        self.pushLocked(.{ .key = owned_key, .path = owned_path, .size_px = self.size_px });
+        self.pushLocked(.{
+            .key = owned_key,
+            .path = owned_path,
+            .size_px = self.size_px,
+            .disk_key = disk_key,
+        });
         _ = self.requested.fetchAdd(1, .monotonic);
         self.lock.release();
 
@@ -475,6 +437,9 @@ pub const Thumbs = struct {
     /// 真正碰 Shell 的地方：锁外执行；隔离时卡住的是 helper 进程（3 秒后被客户端杀掉），
     /// `--no-isolation` 时才是这条工作线程。
     fn fetch(self: *Thumbs, job: Job) void {
+        // L3 先于 helper：第二次打开库时 8 张图全部从这里返回，一个进程都不起。
+        if (self.loadFromDisk(job)) return;
+
         const result = self.fetchImage(job) catch {
             self.recordFailure(job);
             return;
@@ -504,8 +469,40 @@ pub const Thumbs = struct {
         _ = self.ready.fetchAdd(1, .release);
         self.lock.release();
 
+        // L3 写在锁外：L2 已经可画，UI 不必等这一笔磁盘 IO。
+        // 缓存写失败只意味着下次重新取图，绝不影响本次结果。
+        if (job.disk_key) |disk_key| {
+            if (self.disk) |*disk| disk.put(disk_key, payload) catch {};
+        }
+
         self.allocator.free(job.key);
         self.allocator.free(job.path);
+    }
+
+    /// L3 命中：把磁盘像素按 L2 载荷格式回填内存缓存，结束这个请求。
+    /// 命中（含回填失败）返回 true；miss / IO 错误返回 false，调用方继续走 helper。
+    fn loadFromDisk(self: *Thumbs, job: Job) bool {
+        const disk = if (self.disk) |*value| value else return false;
+        const disk_key = job.disk_key orelse return false;
+        const payload = (disk.get(self.allocator, disk_key) catch return false) orelse return false;
+
+        self.lock.acquire();
+        self.inflight = null;
+        self.cache.put(job.key, .thumbnail, payload) catch {
+            self.lock.release();
+            self.allocator.free(payload);
+            _ = self.failed.fetchAdd(1, .monotonic);
+            self.allocator.free(job.key);
+            self.allocator.free(job.path);
+            return true;
+        };
+        _ = self.ready.fetchAdd(1, .release);
+        self.lock.release();
+
+        self.allocator.free(payload);
+        self.allocator.free(job.key);
+        self.allocator.free(job.path);
+        return true;
     }
 
     /// 取一张图的唯一分叉点：隔离（默认）还是进程内（`--no-isolation`）。
@@ -536,58 +533,3 @@ pub const Thumbs = struct {
         };
     }
 };
-
-// ---------------------------------------------------------------------------
-// 缓存键与载荷头：纯函数，测试不用起线程、不用碰 Shell
-// ---------------------------------------------------------------------------
-
-/// 一条样本的缓存键。规则见文件头；结果写进 `buffer`，返回它的切片。
-pub fn keyFor(sample: core.model.Sample, size_px: u32, buffer: *[max_key_bytes]u8) []const u8 {
-    return switch (sample.stableKey()) {
-        .identity => |identity| std.fmt.bufPrint(
-            buffer,
-            "id|{x:0>8}|{x:0>16}|{d}|{d}",
-            .{ identity.volume_serial, identity.file_index, sample.mtime, size_px },
-        ) catch unreachable,
-        .fallback => |fallback| std.fmt.bufPrint(
-            buffer,
-            "fb|{d}|{d}|{s}|{d}|{d}",
-            .{ fallback.size, fallback.mtime, fallback.path, sample.mtime, size_px },
-        ) catch hashedKey(sample, size_px, buffer),
-    };
-}
-
-/// 路径太长时的退化键：稳定、定长，内容里仍有 stableKey 的哈希、mtime 和尺寸。
-fn hashedKey(sample: core.model.Sample, size_px: u32, buffer: *[max_key_bytes]u8) []const u8 {
-    return std.fmt.bufPrint(
-        buffer,
-        "hash|{x:0>16}|{d}|{d}",
-        .{ sample.stableKey().hash(), sample.mtime, size_px },
-    ) catch unreachable;
-}
-
-/// 把尺寸写进载荷头（宽 / 高 / 跨度，各 4 字节小端）。
-pub fn encodeHeader(payload: []u8, width: u32, height: u32, stride: usize) void {
-    std.debug.assert(payload.len >= header_bytes);
-    std.mem.writeInt(u32, payload[0..4], width, .little);
-    std.mem.writeInt(u32, payload[4..8], height, .little);
-    std.mem.writeInt(u32, payload[8..12], @intCast(stride), .little);
-}
-
-pub const Dims = struct {
-    width: u32,
-    height: u32,
-    stride: usize,
-};
-
-/// 解析载荷头；尺寸为 0 或长度对不上（载荷被截断）时返回 null。
-pub fn decodeHeader(payload: []const u8) ?Dims {
-    if (payload.len < header_bytes) return null;
-    const width = std.mem.readInt(u32, payload[0..4], .little);
-    const height = std.mem.readInt(u32, payload[4..8], .little);
-    const stride: usize = std.mem.readInt(u32, payload[8..12], .little);
-    if (width == 0 or height == 0) return null;
-    if (stride < @as(usize, width) * 4) return null;
-    if (payload.len < header_bytes + stride * height) return null;
-    return .{ .width = width, .height = height, .stride = stride };
-}
