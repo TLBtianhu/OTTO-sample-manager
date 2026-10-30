@@ -7,7 +7,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const font = @import("font.zig");
 const fontindex = @import("fontindex.zig");
+const fontmap = @import("fontmap.zig");
 const trace = @import("../trace.zig");
+
+/// A face's bytes; `fontmap` maps them read-only instead of copying when it can.
+const Bytes = fontmap.Bytes;
+const mapFile = fontmap.mapFile;
+const freeBytes = fontmap.freeBytes;
 
 /// What the last `scan` cost, split by phase. Filled only while
 /// `ui.trace` is on (otherwise every counter stays zero and no clock is
@@ -64,14 +70,20 @@ pub const Face = struct {
     /// A font the app brought (`ui.registerFont`): its bytes, not a file.
     memory: ?[]const u8 = null,
 
-    fn read(f: Face, db: *Db) ![]u8 {
-        if (f.memory) |m| return db.gpa.dupe(u8, m);
-        return std.Io.Dir.cwd().readFileAlloc(db.io, f.path, db.gpa, .limited(256 << 20));
+    fn read(f: Face, db: *Db) ?Bytes {
+        if (f.memory) |m| {
+            const copy = db.gpa.dupe(u8, m) catch return null;
+            return .{ .data = copy };
+        }
+        if (mapFile(f.path)) |mapped| return mapped;
+        const data = std.Io.Dir.cwd().readFileAlloc(db.io, f.path, db.gpa, .limited(256 << 20)) catch return null;
+        return .{ .data = data };
     }
 };
 
 const Loaded = struct {
     data: []u8,
+    mapped: bool = false,
     font: font.Font,
 };
 
@@ -148,7 +160,7 @@ pub const Db = struct {
         db.faces.deinit(db.gpa);
         var it = db.loaded.valueIterator();
         while (it.next()) |l| {
-            db.gpa.free(l.*.data);
+            freeBytes(db.gpa, .{ .data = l.*.data, .mapped = l.*.mapped });
             db.gpa.destroy(l.*);
         }
         db.loaded.deinit(db.gpa);
@@ -478,16 +490,16 @@ pub const Db = struct {
         const traced = trace.on();
         const started = if (traced) trace.stamp() else 0;
         const f = db.faces.items[face];
-        const data = f.read(db) catch return null;
-        const parsed = font.Font.init(data, f.index) catch {
-            db.gpa.free(data);
+        const bytes = f.read(db) orelse return null;
+        const parsed = font.Font.init(bytes.data, f.index) catch {
+            freeBytes(db.gpa, bytes);
             return null;
         };
         const l = db.gpa.create(Loaded) catch {
-            db.gpa.free(data);
+            freeBytes(db.gpa, bytes);
             return null;
         };
-        l.* = .{ .data = data, .font = parsed };
+        l.* = .{ .data = bytes.data, .mapped = bytes.mapped, .font = parsed };
         l.font.data = l.data;
         db.loaded.put(db.gpa, face, l) catch {};
         if (traced) {
@@ -497,9 +509,23 @@ pub const Db = struct {
         return &l.font;
     }
 
+    /// Bytes of font files held in memory: each loaded face keeps its whole
+    /// file (a CJK collection is tens of megabytes), so this is what the
+    /// text system costs beyond its atlases. Read by `--mem-probe`.
+    pub fn loadedBytes(db: *const Db) usize {
+        var total: usize = 0;
+        var it = db.loaded.valueIterator();
+        while (it.next()) |l| total += l.*.data.len;
+        return total;
+    }
+
+    /// The faces loaded so far, by index (for diagnostics).
+    pub fn loadedCount(db: *const Db) usize {
+        return db.loaded.count();
+    }
+
     /// A face that has `cp`, for text its font lacks.
-    pub fn fallback(db: *Db, cp: u21, weight: u16) ?u32 {
-        if (db.found.get(cp)) |f| return f;
+    pub fn fallback(db: *Db, cp: u21, weight: u16) ?u32 {        if (db.found.get(cp)) |f| return f;
         const traced = trace.on();
         const started = if (traced) trace.stamp() else 0;
         const f = db.findFallback(cp, weight);
@@ -526,9 +552,9 @@ pub const Db = struct {
             if (i > 0 and std.mem.eql(u8, db.faces.items[i - 1].style.name(), db.faces.items[i].style.name())) continue;
             tries += 1;
             const face = db.faces.items[i];
-            const data = face.read(db) catch continue;
-            defer db.gpa.free(data);
-            const f = font.Font.init(data, face.index) catch continue;
+            const bytes = face.read(db) orelse continue;
+            defer freeBytes(db.gpa, bytes);
+            const f = font.Font.init(bytes.data, face.index) catch continue;
             if (f.glyphIndex(cp) != 0) return @intCast(i);
         }
         return null;

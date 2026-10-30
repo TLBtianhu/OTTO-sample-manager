@@ -185,7 +185,9 @@ pub const Thumbs = struct {
             }
         }
 
-        self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch |err| {
+        // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：工作线程只做缓存查询、helper
+        // 往返与一次 96×96 的拷贝，少掉的 15 MiB 是提交而不是保留。
+        self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, workerMain, .{self}) catch |err| {
             self.cache.deinit();
             if (self.disk) |*disk| disk.deinit();
             return err;

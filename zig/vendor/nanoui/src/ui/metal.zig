@@ -40,6 +40,8 @@ pub const Renderer = struct {
     /// The image atlas on the GPU, copied when its generation changes.
     images_texture: ?objc.Object = null,
     images_generation: u64 = std.math.maxInt(u64),
+    /// The image atlas texture's side, to notice the atlas growing.
+    images_side: u64 = 0,
     layer_texture: ?objc.Object = null,
     layer_w: usize = 0,
     layer_h: usize = 0,
@@ -131,10 +133,17 @@ pub const Renderer = struct {
 
     pub fn syncImages(self: *Renderer, im: *Images) void {
         if (im.sink != null or im.pixels.len == 0 or im.generation == self.images_generation) return;
-        const side: objc.NSUInteger = @import("images.zig").size;
+        const side: objc.NSUInteger = im.side;
+        // A grown (or first) atlas needs a new texture: its size changed.
+        if (self.images_texture != null and self.images_side != side) {
+            objc.release(self.images_texture);
+            self.images_texture = null;
+            self.images_generation = std.math.maxInt(u64);
+        }
         if (self.images_texture == null) {
             const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{ pixel_format, side, side, objc.NO });
             self.images_texture = objc.msg(objc.Object, self.device, "newTextureWithDescriptor:", .{desc});
+            self.images_side = side;
         }
         const Region = extern struct { x: usize, y: usize, z: usize, w: usize, h: usize, d: usize };
         // Only the rows that changed, unless the texture is new.

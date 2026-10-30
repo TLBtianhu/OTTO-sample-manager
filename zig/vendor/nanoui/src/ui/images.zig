@@ -12,7 +12,12 @@ const png_decode = @import("png_decode.zig");
 const portable = build_options.portable or !(builtin.os.tag == .macos or builtin.os.tag == .ios);
 const imageio = if (portable) void else @import("image.zig");
 
-pub const size: u32 = 2048;
+pub const max_size: u32 = 2048;
+/// The first atlas is this big: 512² BGRA is 1 MiB, room for a screenful of
+/// 64 px row thumbnails. Growing (up to `max_size`) is what a full-size
+/// preview picture asks for; before 2026-10 every app paid 16 MiB for a
+/// 2048² atlas even if it only ever drew 32 pt icons.
+pub const min_size: u32 = 512;
 /// The longest side a picture keeps.
 pub const max_side: u32 = 1024;
 const pad: u32 = 1;
@@ -103,8 +108,11 @@ pub const Images = struct {
     /// Rows of `pixels` changed since the GPU's copy was made.
     dirty: ?[2]u32 = null,
     sink: ?Sink = null,
-    /// BGRA, `size` × `size`; empty until a picture comes.
+    /// BGRA, `side` × `side`; empty until a picture comes.
     pixels: []u8 = &.{},
+    /// The atlas's side in pixels (0: not made yet). It grows to fit the
+    /// biggest picture drawn so far, never past `max_size`.
+    side: u32 = 0,
     entries: std.AutoHashMapUnmanaged(SizedKey, KeptEntry) = .empty,
     frame: u64 = 0,
     /// Pictures drawn from SVG (`ui.svg`), by key: the size and color they
@@ -143,7 +151,7 @@ pub const Images = struct {
         im.frame +%= 1;
         im.decodes_left = 8;
         im.wants_frame = false;
-        if (im.shelf_y + im.shelf_h > size * 3 / 4) im.repackLive();
+        if (im.side > 0 and im.shelf_y + im.shelf_h > im.side * 3 / 4) im.repackLive();
     }
 
     /// The picture `k`'s native dimensions (from `bytes` the first time), or
@@ -197,7 +205,7 @@ pub const Images = struct {
 
     /// The atlas as the CPU renderer reads it.
     pub fn pictures(im: *const Images) @import("raster.zig").Pictures {
-        return .{ .pixels = im.pixels, .size = if (im.pixels.len > 0) size else 0 };
+        return .{ .pixels = im.pixels, .size = im.side };
     }
 
     pub fn key(name: []const u8) u64 {
@@ -254,32 +262,26 @@ pub const Images = struct {
         }
     }
     fn pack(im: *Images, d: Decoded) !Entry {
-        if (im.pixels.len == 0 and im.sink == null) {
-            im.pixels = try im.gpa.alloc(u8, size * size * 4);
-            @memset(im.pixels, 0);
-        }
-        if (!im.fits(d.w, d.h)) {
-            im.empty();
-            im.reset_during_frame = true;
-        }
-        if (im.shelf_x + d.w + pad > size) {
+        try im.ensureRoom(d.w + pad, d.h + pad);
+        if (im.shelf_x + d.w + pad > im.side) {
             im.shelf_y += im.shelf_h + pad;
             im.shelf_x = 0;
             im.shelf_h = 0;
         }
         const x = im.shelf_x;
         const y = im.shelf_y;
+        const side = im.side;
         if (im.sink) |sk| {
             sk.upload(sk.ctx, x, y, d.w, d.h, d.bgra);
         } else for (0..d.h) |row| {
             const src = d.bgra[row * d.w * 4 ..][0 .. d.w * 4];
-            @memcpy(im.pixels[((y + row) * size + x) * 4 ..][0 .. d.w * 4], src);
+            @memcpy(im.pixels[((y + row) * side + x) * 4 ..][0 .. d.w * 4], src);
         }
         im.shelf_x += d.w + pad;
         im.shelf_h = @max(im.shelf_h, d.h);
         im.generation +%= 1;
         im.dirty = if (im.dirty) |r| .{ @min(r[0], y), @max(r[1], y + d.h) } else .{ y, y + d.h };
-        const s: f32 = @floatFromInt(size);
+        const s: f32 = @floatFromInt(side);
         return .{
             .uv = .{ @as(f32, @floatFromInt(x)) / s, @as(f32, @floatFromInt(y)) / s, @as(f32, @floatFromInt(x + d.w)) / s, @as(f32, @floatFromInt(y + d.h)) / s },
             .width = d.width,
@@ -287,9 +289,46 @@ pub const Images = struct {
         };
     }
 
+    /// Room for a `w` × `h` picture: the atlas starts at `min_size` and doubles
+    /// until the picture fits (up to `max_size`). Growing moves every packed
+    /// picture, so what was drawn before it must be painted again.
+    fn ensureRoom(im: *Images, w: u32, h: u32) !void {
+        if (im.side == 0) return im.resizeAtlas(if (w <= min_size and h <= min_size) min_size else growTo(0, w, h));
+        if (w <= im.side and h <= im.side) return;
+        try im.resizeAtlas(growTo(im.side, w, h));
+    }
+
+    fn growTo(from: u32, w: u32, h: u32) u32 {
+        var n = @max(from, min_size);
+        while (n < max_size and (w > n or h > n)) n *= 2;
+        return n;
+    }
+
+    fn resizeAtlas(im: *Images, side: u32) !void {
+        const had = im.side != 0;
+        if (im.sink == null) {
+            const px = try im.gpa.alloc(u8, @as(usize, side) * side * 4);
+            @memset(px, 0);
+            if (im.pixels.len > 0) im.gpa.free(im.pixels);
+            im.pixels = px;
+        }
+        im.side = side;
+        im.generation +%= 1;
+        im.dirty = null;
+        if (had) {
+            // Every earlier uv points somewhere else now.
+            im.entries.clearRetainingCapacity();
+            im.shelf_x = 0;
+            im.shelf_y = 0;
+            im.shelf_h = 0;
+            im.resets +%= 1;
+            im.reset_during_frame = true;
+        }
+    }
+
     fn fits(im: *const Images, w: u32, h: u32) bool {
-        if (im.shelf_x + w + pad <= size) return im.shelf_y + @max(im.shelf_h, h) <= size;
-        return im.shelf_y + im.shelf_h + pad + h <= size;
+        if (im.shelf_x + w + pad <= im.side) return im.shelf_y + @max(im.shelf_h, h) <= im.side;
+        return im.shelf_y + im.shelf_h + pad + h <= im.side;
     }
 
     fn empty(im: *Images) void {
@@ -443,7 +482,7 @@ test "raw pixels pack with their stride, and a key keeps its first picture" {
     const e = im.get(k, source, 2).?;
     try std.testing.expectEqual(@as(u32, 2), e.width);
     try std.testing.expectEqualSlices(u8, buf[0..8], im.pixels[0..8]);
-    try std.testing.expectEqualSlices(u8, buf[16..24], im.pixels[size * 4 ..][0..8]);
+    try std.testing.expectEqualSlices(u8, buf[16..24], im.pixels[im.side * 4 ..][0..8]);
     // The first source a key gives wins: changing the pixels changes nothing.
     @memset(buf[0..32], 7);
     _ = im.get(k, source, 2);

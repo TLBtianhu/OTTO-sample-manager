@@ -341,6 +341,28 @@ be looked at:
 zig-out/bin/otto-lite.exe <dir>/library.json --nanoui-wait=2 --nanoui-snapshot=thumbs.png
 ```
 
+### Real-window memory (the charter's ≤ 50 MiB line)
+
+`--mem-probe` measures the memory a *real window* holds, not a headless tester:
+it builds the same state as a normal start in a 380×700 HWND that is never shown
+(no popup, no focus, no taskbar entry), builds the first frame (font scan, glyph
+atlas), presents once, scrolls the list until 8 / 50 / 100 thumbnails are cached
+and drawn, then idles for `--mem-probe-idle` seconds while the app's own 150 ms
+tick keeps running. Each moment prints `WorkingSetSize`, `PrivateUsage`, the
+resident pages split by type (image / mapped / private, via
+`K32QueryWorkingSet` + `VirtualQuery`), and the layers' own accounts (L2
+thumbnails, image atlas, glyph atlas, loaded fonts, canvas, threads, modules).
+
+```powershell
+# one command: builds a probe library (2000 rows over 100 real image files) and
+# runs the probe twice, isolation on and off  — see zig/MEMORY.md for the tables
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\mem.ps1 -Release
+```
+
+Frames are presented through GDI by default: measured against the D3D11 flip
+swap chain it is 27 MiB smaller and 18× cheaper per present (0.22 ms vs 4.16 ms),
+at the cost of vsync. `--d3d` switches back to the flip swap chain.
+
 ## Version and run modes
 
 `build.zig.zon` is the only place the version is written. `build.zig` reads

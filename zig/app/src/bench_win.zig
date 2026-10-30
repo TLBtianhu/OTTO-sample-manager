@@ -43,6 +43,11 @@ pub const Resident = struct {
     working_set: usize,
     /// `PrivateUsage`：不含共享页的私有提交，用来解释「为什么 WS 比想象的大」。
     private_bytes: usize,
+    /// 提交的峰值与换页文件占用：解释「WS 小但提交大」的情况（保留的分配器页、
+    /// 线程栈的提交部分）。`--bench` 只读前两个字段，这里只做加法。
+    peak_working_set: usize = 0,
+    pagefile_usage: usize = 0,
+    peak_pagefile: usize = 0,
 };
 
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
@@ -60,6 +65,9 @@ pub fn resident() ?Resident {
     return .{
         .working_set = counters.working_set_size,
         .private_bytes = counters.private_usage,
+        .peak_working_set = counters.peak_working_set_size,
+        .pagefile_usage = counters.pagefile_usage,
+        .peak_pagefile = counters.peak_pagefile_usage,
     };
 }
 
