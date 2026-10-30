@@ -45,6 +45,10 @@ pub const Options = struct {
     import_library: ?[]const u8 = null,
     /// `--import` 的输出路径（OTTOLIB v1，原子写）。
     save_path: ?[]const u8 = null,
+    /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
+    no_isolation: bool = false,
+    /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
+    thumb_bench_dir: ?[]const u8 = null,
 };
 
 pub fn parse(args: anytype) error{MissingValue}!Options {
@@ -140,6 +144,14 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.save_path = args[index];
         } else if (std.mem.startsWith(u8, arg, "--save=")) {
             options.save_path = arg["--save=".len..];
+        } else if (std.mem.eql(u8, arg, "--no-isolation")) {
+            options.no_isolation = true;
+        } else if (std.mem.eql(u8, arg, "--thumb-bench")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.thumb_bench_dir = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--thumb-bench=")) {
+            options.thumb_bench_dir = arg["--thumb-bench=".len..];
         } else if (!std.mem.startsWith(u8, arg, "--")) {
             options.library_path = arg;
         }
@@ -299,4 +311,24 @@ test "--import-into：两种写法都收，不占位置参数，--save 可省略
     try testing.expectEqualStrings("out.otto", joined.save_path.?);
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--import-into" }));
+}
+
+test "--no-isolation 是开关；--thumb-bench 两种写法都收" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(!plain.no_isolation);
+    try testing.expect(plain.thumb_bench_dir == null);
+
+    const off = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--no-isolation" });
+    try testing.expect(off.no_isolation);
+    try testing.expectEqualStrings("lib.json", off.library_path.?);
+
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--thumb-bench", "C:\\samples" });
+    try testing.expectEqualStrings("C:\\samples", spaced.thumb_bench_dir.?);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--thumb-bench=C:\\samples", "--no-isolation" });
+    try testing.expectEqualStrings("C:\\samples", joined.thumb_bench_dir.?);
+    try testing.expect(joined.no_isolation);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--thumb-bench" }));
 }

@@ -501,6 +501,7 @@ pub fn main(init: std.process.Init) !void {
                 "      otto-lite --version\n" ++
                 "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
+                "      otto-lite --thumb-bench <dir> [--no-isolation]\n" ++
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n" ++
                 "      otto-lite --convert <in.json> <out.otto>\n" ++
@@ -540,7 +541,7 @@ pub fn main(init: std.process.Init) !void {
 
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）：
     // 工作线程要拿它分配像素、路径与缓存条目，不能用进程级 arena。
-    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{});
+    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation });
     defer thumbs.deinit();
 
     // 预览条也用 `init.gpa`：工作线程要用它分配位图/文本。注册表只有一张

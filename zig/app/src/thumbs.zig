@@ -4,8 +4,8 @@
 //! 分工（CHARTER「一、可发现 / 可解码 / 可调度」）：
 //!   * `otto_caps` 回答**可发现**（这台机器登记了该扩展名的 IThumbnailProvider 吗），
 //!     只读注册表，不加载第三方 DLL；
-//!   * `otto_thumb` 回答**可解码**（真的把像素交出来），会加载第三方 handler，
-//!     可能被它卡住；
+//!   * `otto_thumb` 回答**可解码**（真的把像素交出来），会加载第三方 handler；
+//!     M4 起这一步默认发生在 `otto-thumb-host.exe` 里，崩溃/卡死只带走 helper；
 //!   * 本文件回答**可调度**：门禁、缓存、后台线程、账号（requested / ready /
 //!     no_handler / cached / failed / dropped），UI 只问 `acquire`。
 //!
@@ -15,7 +15,8 @@
 //!      **绝不**调 `thumb.get`——没有 handler 的文件在 Shell 里只会退回一个通用
 //!      文件图标，那既不是缩略图，还会白白加载一遍 Shell；
 //!   3. **后台队列**：只有真的登记了 handler 的才进有界队列，由唯一一条工作线程
-//!      同步调 `thumb.get`。第三方 handler 卡死时卡的是这条线程，不是 UI 线程。
+//!      同步调隔离层（默认 `thumb_host.get`）。第三方 handler 卡死时卡的是 helper
+//!      进程，超时由客户端杀掉，UI 线程与列表都不受影响。
 //!
 //! 缓存键（`keyFor`）：
 //!   * 有文件身份（NTFS / ReFS 的卷序列号 + 文件索引）：`id|<卷>|<索引>|<mtime>|<边长>`。
@@ -49,6 +50,7 @@ const std = @import("std");
 const core = @import("otto_core");
 const caps = @import("otto_caps");
 const thumb = @import("otto_thumb");
+const thumb_host = @import("otto_thumb_host");
 
 /// 请求的边长（像素）。列表那格是 32 点，Windows 的窗口在 150% / 200% 缩放下是
 /// 2x，所以按 64 请求：2x 屏上正好 1:1，1x 屏由图集缩到 32 点，不会糊。
@@ -78,6 +80,10 @@ pub const Options = struct {
     queue_capacity: usize = default_queue_capacity,
     budget_bytes: usize = default_budget_bytes,
     failure_memory: usize = default_failure_memory,
+    /// 是否把"碰 Shell"交给 `otto-thumb-host.exe`（M4 第一块）。
+    /// 默认 `true`：第三方 handler 崩了/卡死/弹框只带走 helper，OTTO 列表照常滚；
+    /// `false` 是显式对照开关（`--no-isolation`），退回进程内 `thumb.get`。
+    isolation: bool = true,
 };
 
 /// 一次成功命中的借用视图。`key` 与 `pixels` 都归缓存所有，pin 期间有效。
@@ -157,13 +163,15 @@ const Pinned = struct {
     key: []u8,
 };
 
-pub const InitError = std.mem.Allocator.Error || std.Thread.SpawnError;
+pub const InitError = std.mem.Allocator.Error || std.Thread.SpawnError || error{HelperUnavailable};
 
 /// 取图层。对象在堆上：工作线程持有它的指针，`Thumbs` 本身不能搬家。
 pub const Thumbs = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     size_px: u32,
+    /// 取图走隔离 helper（默认）还是进程内 `thumb.get`（`--no-isolation`）。
+    isolation: bool,
     cache: core.cache.Cache,
 
     lock: SpinLock = .{},
@@ -206,12 +214,29 @@ pub const Thumbs = struct {
             .allocator = allocator,
             .io = io,
             .size_px = std.math.clamp(options.size_px, 1, thumb.max_size_px),
+            .isolation = options.isolation,
             .cache = core.cache.Cache.init(allocator, options.budget_bytes),
             .slots = slots,
             .failure_memory = @max(1, options.failure_memory),
         };
         // 缩略图占满整个预算：L2 里缩略图不该被别的 Kind 挤出去（软配额 100%）。
         self.cache.setKindPercent(.thumbnail, 100);
+
+        // 隔离是默认路径：helper exe 不在就是**启动错误**，不是「没有预览」。
+        // 只查文件、不 spawn（懒启动）；也不静默退回进程内（那等于把第三方 handler
+        // 又请回 OTTO 的进程里，而且用户不会知道）。
+        if (self.isolation) {
+            thumb_host.ensurePresent(allocator, .{}) catch |err| {
+                self.cache.deinit();
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                std.debug.print(
+                    "otto-lite: 缩略图隔离 helper 不可用（{s}）；zig build 应同时产出 otto-thumb-host.exe。\n" ++
+                        "          确实要退回进程内取图（第三方 handler 与 OTTO 同生共死）加 --no-isolation。\n",
+                    .{@errorName(err)},
+                );
+                return error.HelperUnavailable;
+            };
+        }
 
         self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch |err| {
             self.cache.deinit();
@@ -225,6 +250,9 @@ pub const Thumbs = struct {
         self.stop.store(true, .release);
         self.wake.post(self.io);
         if (self.thread) |thread| thread.join();
+
+        // 工作线程已停：helper 没有在途请求了，可以收掉整个进程（隔离层的单例）。
+        if (self.isolation) thumb_host.deinit();
 
         // 线程停了，队列 / inflight 只剩没人要的请求，逐个释放。
         self.lock.acquire();
@@ -444,9 +472,10 @@ pub const Thumbs = struct {
         return job;
     }
 
-    /// 真正碰 Shell 的地方：锁外执行，第三方 handler 卡住也只卡这条线程。
+    /// 真正碰 Shell 的地方：锁外执行；隔离时卡住的是 helper 进程（3 秒后被客户端杀掉），
+    /// `--no-isolation` 时才是这条工作线程。
     fn fetch(self: *Thumbs, job: Job) void {
-        const result = thumb.get(self.allocator, job.path, job.size_px) catch {
+        const result = self.fetchImage(job) catch {
             self.recordFailure(job);
             return;
         };
@@ -477,6 +506,13 @@ pub const Thumbs = struct {
 
         self.allocator.free(job.key);
         self.allocator.free(job.path);
+    }
+
+    /// 取一张图的唯一分叉点：隔离（默认）还是进程内（`--no-isolation`）。
+    /// 返回类型用隔离层的错误集（`thumb.Error` 的超集），进程内分支的错误自动并上去。
+    fn fetchImage(self: *Thumbs, job: Job) thumb_host.Error!thumb.Thumbnail {
+        if (self.isolation) return thumb_host.get(self.allocator, job.path, job.size_px);
+        return thumb.get(self.allocator, job.path, job.size_px);
     }
 
     /// 失败：清 inflight、记进失败表（键的所有权转移给表），路径还回去。

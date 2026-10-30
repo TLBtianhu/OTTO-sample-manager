@@ -33,7 +33,7 @@ const demo_files = [_]struct { name: []const u8, what: []const u8 }{
 /// 等请求落地的最长时间。第三方 handler 卡住时由这里兜底（超时 = 失败）。
 const settle_timeout_ms: u64 = 5000;
 
-pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []const u8) !u8 {
+pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []const u8, isolation: bool) !u8 {
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, dir_path);
@@ -71,7 +71,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
 
     var library = try core.store.load(allocator, json_text);
     defer library.deinit();
-    var thumbs = try thumbs_mod.Thumbs.init(allocator, io, .{});
+    var thumbs = try thumbs_mod.Thumbs.init(allocator, io, .{ .isolation = isolation });
     defer thumbs.deinit();
 
     // 期望：有 handler 的才该进队列；没有 handler 的必须被门禁挡下。

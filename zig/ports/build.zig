@@ -36,6 +36,45 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(thumb_library);
 
+    // 缩略图隔离（M4 第一块）：客户端（thumb_host.zig + thumb_host_win.zig）与
+    // helper 可执行文件。helper 是同一个包的第二个 exe，`zig build` 与客户端一起产出——
+    // 不引脚本、不借外部工具，构建系统本身就是"一次出两个"的地方。
+    const thumb_host_module = b.addModule("otto_thumb_host", .{
+        .root_source_file = b.path("src/thumb_host.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    thumb_host_module.addImport("otto_thumb", thumb_module);
+
+    const thumb_host_main_module = b.addModule("otto_thumb_host_main", .{
+        .root_source_file = b.path("src/thumb_host_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    thumb_host_main_module.addImport("otto_thumb", thumb_module);
+
+    const thumb_host_exe = b.addExecutable(.{
+        .name = "otto-thumb-host",
+        .root_module = thumb_host_main_module,
+    });
+    // 显式拿到安装步：测试步骤要等 helper 真的落到 zig-out/bin（测试从环境变量拿路径）。
+    const install_thumb_host = b.addInstallArtifact(thumb_host_exe, .{});
+    b.getInstallStep().dependOn(&install_thumb_host.step);
+
+    // 测试用的假 helper：只会睡觉、不读不写。验证超时与 TerminateProcess 需要它，
+    // 名字带 `-fake`，不属于发布物（app 的安装步骤只装真 helper）。
+    const thumb_host_fake_module = b.addModule("otto_thumb_host_fake", .{
+        .root_source_file = b.path("src/thumb_host_fake.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const thumb_host_fake_exe = b.addExecutable(.{
+        .name = "otto-thumb-host-fake",
+        .root_module = thumb_host_fake_module,
+    });
+    const install_thumb_host_fake = b.addInstallArtifact(thumb_host_fake_exe, .{});
+    b.getInstallStep().dependOn(&install_thumb_host_fake.step);
+
     // 缩略图能力表口岸：只读注册表判断扩展名有没有 IThumbnailProvider 登记，
     // 不加载任何第三方 DLL。advapi32 只有 Windows 后端（caps_win.zig）需要。
     const caps_module = b.addModule("otto_caps", .{
@@ -232,4 +271,28 @@ pub fn build(b: *std.Build) void {
     const run_folder_picker_tests = b.addRunArtifact(b.addTest(.{ .root_module = folder_picker_test_module }));
     run_folder_picker_tests.step.dependOn(&run_wav_header_tests.step);
     test_step.dependOn(&run_folder_picker_tests.step);
+
+    // 缩略图隔离（M4 第一块）：真 spawn 一个 helper、真写管道、真 TerminateProcess。
+    // 路径通过环境变量给：test runner 只接受它自己的参数，路径没法走 argv。
+    // 值是相对安装前缀的路径，配合下面显式 `setCwd(b.path("."))`（= 包根）使用——
+    // Zig 0.17 的构建脚本拿不到安装前缀的字符串（它只以 LazyPath 存在），
+    // 所以这里约定测试用默认前缀 `zig-out`（`zig build test` 的默认行为）。
+    const thumb_host_test_module = b.createModule(.{
+        .root_source_file = b.path("src/thumb_host_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "otto_thumb", .module = thumb_module },
+            .{ .name = "otto_thumb_host", .module = thumb_host_module },
+        },
+    });
+    const run_thumb_host_tests = b.addRunArtifact(b.addTest(.{ .root_module = thumb_host_test_module }));
+    run_thumb_host_tests.setCwd(b.path("."));
+    run_thumb_host_tests.setEnvironmentVariable("OTTO_THUMB_HOST", "zig-out/bin/otto-thumb-host.exe");
+    run_thumb_host_tests.setEnvironmentVariable("OTTO_THUMB_FAKE", "zig-out/bin/otto-thumb-host-fake.exe");
+    // 先装好两个 helper 再跑：环境变量指向的是安装位置，不是缓存里的编译产物。
+    run_thumb_host_tests.step.dependOn(&install_thumb_host.step);
+    run_thumb_host_tests.step.dependOn(&install_thumb_host_fake.step);
+    run_thumb_host_tests.step.dependOn(&run_folder_picker_tests.step);
+    test_step.dependOn(&run_thumb_host_tests.step);
 }

@@ -109,12 +109,37 @@ Every row asks `src/thumbs.zig` for one 64px thumbnail (32 points) on its left:
 2. **capability gate** (`otto_caps`) — no registered thumbnail handler means
    "no preview", and `thumb.get` is never called;
 3. **bounded queue + one worker thread** — only files with a handler are
-   fetched, off the UI thread, so a third-party shell handler can't freeze the
-   window. The queue drops the oldest request when full (and counts it).
+   fetched, off the UI thread; the queue drops the oldest request when full
+   (and counts it).
 
 Pixels are owned by the cache. Rows pin their entry while the frame is drawn
 (`view` → `paint`) and unpin at the start of the next frame. `tick` redraws when
 the atomic ready counter changes.
+
+### Third-party handlers run in a separate process (M4)
+
+`IShellItemImageFactory::GetImage` loads the handler DLL into the calling
+process; a crashing or hanging handler would take OTTO with it. Since M4 the
+worker thread calls `ports/thumb_host.zig` instead of `thumb.get` directly:
+
+- `otto-thumb-host.exe` is built by the same `zig build` (two exes, no script);
+- the protocol is bytes only: `u32 path_len | path` in, `status | width |
+  height | stride | bytes | BGRA` out; no COM pointers cross the boundary;
+- lazy start (`CREATE_NO_WINDOW`, hidden, no message loop), one process serves
+  every request, per-request timeout of 3 s, one restart + retry when the
+  helper dies, and a `KILL_ON_JOB_CLOSE` job so OTTO being killed leaves no
+  orphan helper.
+
+`--no-isolation` is the only way back to in-process fetching; it exists for
+side-by-side comparison, not as a supported mode. A missing helper is a startup
+error with a named message, never a silent fallback.
+
+```powershell
+# byte-for-byte parity + 200-image timing, in-process vs helper (no window)
+zig-out/bin/otto-lite.exe --thumb-bench C:\src\otto-testkit\samples
+# same fixture through the in-process path, for comparison
+zig-out/bin/otto-lite.exe --demo-thumbs <dir> --no-isolation
+```
 
 ## Preview and selection
 
@@ -298,6 +323,10 @@ zig-out/bin/otto-lite.exe --demo <dir>
 # thumbnail layer: creates red.bmp (real 64×64 BMP), tone.wav and mystery.xyz
 # (no handler), fetches them twice, prints the account and exits 0/1
 zig-out/bin/otto-lite.exe --demo-thumbs <dir>
+
+# in-process vs isolated helper: per-file byte parity, then 200 images timed
+# through both backends (the helper's one process start amortized over 200)
+zig-out/bin/otto-lite.exe --thumb-bench C:\src\otto-testkit\samples
 ```
 
 `--demo-thumbs` also writes `<dir>/library.json`, so the picture it just made can
@@ -339,9 +368,14 @@ The script refuses to build when `-Version` does not match `build.zig.zon`, then
 verifies the built exe reports the same version. It produces exactly two
 artifacts in `zig/dist/`:
 
-- `otto-lite-0.0.1-portable.zip` — `otto-lite.exe`, `otto-portable.flag`,
-  `README.txt`, `LICENSE`;
+- `otto-lite-0.0.1-portable.zip` — `otto-lite.exe`, `otto-thumb-host.exe`,
+  `otto-portable.flag`, `README.txt`, `LICENSE`;
 - `otto-lite-0.0.1-setup.exe` — NSIS installer (Chinese + English), installs to
   `Program Files\OTTO Lite`, writes no data there, keeps `%APPDATA%\OTTO` on
   uninstall. It is **not** code-signed: SmartScreen will warn on first run.
+
+Both artifacts ship the thumbnail helper next to the main exe; `otto-lite.exe`
+refuses to start (with a named error) if `otto-thumb-host.exe` is missing, so a
+stripped-down package fails loudly instead of quietly loading third-party
+handlers into the app again.
 
