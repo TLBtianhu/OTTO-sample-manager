@@ -1,0 +1,32 @@
+﻿.\zig-out\bin\otto-lite.exe : bench: library=.\fixtures\library.json
+At line:1 char:161
++ ... up\zig\app; .\zig-out\bin\otto-lite.exe --bench .\fixtures\library.js ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (bench: library=.\fixtures\library.json:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+bench: build=safe（release 用 -Drelease=true）
+bench: 素材目录=C:\src\otto-testkit\samples
+[thumb-host] helper 启动 pid=27388 size=64（累计 spawn=1）
+[thumb-host:27388] 启动 size=64
+bench: 缩略图冷 100 张 p50=18.36 p95=21.09 max=140.24 ms（首张含 helper 启动 140.24 ms，失败 0）
+bench: 缩略图热 100 张 p50=6.37 p95=7.48 max=8.06 ms（失败 0）
+bench: 内存 WS=35.68 MiB private=33.35 MiB（库 2000 条 + 缩略图 100 张 3.52 MiB，3 次取最大）
+bench: 搜索 200 次 needle="wo" 命中=67 p50=0.016 p95=0.016 ms（2000 条）
+bench: 库加载 5 次 ms: 10.43 11.20 8.35 7.57 7.95
+bench: 首帧子进程墙钟 3 次 ms: 346.04 313.49 338.95（子进程 main 内中位 253.39 ms）
+bench: 完整 UI（首帧子进程）WS=70.29 MiB —— 不计入内存行：该行按任务口径只含库+缩略图。
+bench: 音频 20 次 p50=14.46 p95=18.78 max=19.64 ms wav=tone_1320.wav 失败=0
+
+指标          实测                          目标              结果  备注
+库加载        8.35 ms（中位）               ≤ 100 ms          PASS  library_io read+decode ×5
+冷启动→首帧   338.95 ms                     ≤ 100 ms          FAIL  含 CreateProcess；main 内 253.4 ms = setup 66.6 + frame 180
+.6
+常驻内存      35.68 MiB                     ≤ 50 MiB          PASS  WS 3 次最大；private 33.4 MiB；库 2000 条 + 100 图；完整 UI 首帧另测 7
+0.3 MiB
+搜索延迟      p50 0.016 / p95 0.016 ms      p95 ≤ 20 ms       PASS  matchingIndices ×200，needle="wo"，命中 67/2000
+缩略图        冷 p95 21.09 / 热 p95 7.48 ms 冷 p95 ≤ 80 ms    PASS  冷 100 新路径（首张 140.24 ms 含 helper 启动）/ 热 100 同路径；L3 未启
+音频起播      p95 18.78 ms                  p95 ≤ 50 ms       PASS  play() → position>0 ×20，p50 14.46 ms，wav=tone_1320.wav
+
+bench: 汇总 PASS=5 FAIL=1 SKIP=0（共 6 项）退出码=1
+bench: 表外：滚动帧率需要真实窗口/合成器；安装包大小由 zig/package.ps1 的产物量。

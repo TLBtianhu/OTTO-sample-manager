@@ -63,6 +63,7 @@ const codec = @import("thumbs_codec.zig");
 const l3 = @import("thumbs_disk.zig");
 
 const types = @import("thumbs_types.zig");
+const trace = @import("trace.zig");
 
 pub const default_size_px: u32 = types.default_size_px;
 pub const default_queue_capacity: usize = types.default_queue_capacity;
@@ -189,6 +190,7 @@ pub const Thumbs = struct {
             if (self.disk) |*disk| disk.deinit();
             return err;
         };
+        trace.mark("setup.thumbs");
         return self;
     }
 

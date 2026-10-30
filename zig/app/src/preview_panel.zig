@@ -40,6 +40,7 @@ const preview = @import("preview.zig");
 const preview_audio = @import("preview_audio.zig");
 const sample_facts = @import("sample_facts.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
+const trace = @import("trace.zig");
 const ui = nanoui.ui;
 
 /// 预览条高度（点）。任务要求 120–160；160 = 96 图位 + 两行事实 + 内边距/间隔，
@@ -148,6 +149,7 @@ pub const Panel = struct {
             self.* = undefined;
             return err;
         };
+        trace.mark("setup.preview");
         return self;
     }
 

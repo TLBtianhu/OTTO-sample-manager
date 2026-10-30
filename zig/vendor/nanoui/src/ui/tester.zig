@@ -24,6 +24,7 @@ const Theme = @import("theme.zig").Theme;
 const ctx_mod = @import("context.zig");
 const Context = ctx_mod.Context;
 const View = @import("ui.zig").View;
+const trace = @import("trace.zig");
 
 const runFor = @import("../platform.zig").runFor;
 
@@ -71,7 +72,9 @@ pub const Tester = struct {
         t.text.setScale(opts.scale);
         t.ctx = .init(gpa, &t.text);
         t.ctx.clipboard = .{ .ctx = t, .write = clipWrite };
+        trace.mark("tester.text");
         t.frame();
+        trace.mark("tester.frame");
     }
 
     fn clipWrite(ctx: ?*anyopaque, text_: []const u8) void {

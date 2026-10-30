@@ -17,21 +17,19 @@
 //! 退出码：全部 PASS/SKIP 为 0，任何一项 FAIL 为 1。`zig/bench.ps1` 直接转发它。
 //!
 //! 无窗口：本文件在 `commands.run` 里返回，连 `nanoui.App` 都不创建（除了第 2 项的
-//! 子进程，它建 App 但 `gui=false`，不 show、不抢焦点）。不 import 任何 UI 视图，
-//! 只 import `nanoui` 的 `ui.Tester` 来在子进程里建一帧。
+//! 子进程，它建 App 但 `gui=false`，不 show、不抢焦点；那一帧的构建与分解在
+//! `bench_first_frame.zig`，本文件不 import 任何 UI 视图）。
 //!
 //! 只在 Windows 目标上成立：内存读数直接调 kernel32 导出。app 的 build.zig 本来就
 //! 链接 ole32，非 Windows 目标不在本里程碑的验收范围；没有 fallback 数字。
 
 const std = @import("std");
-const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const bench_audio = @import("bench_audio.zig");
 const bench_stats = @import("bench_stats.zig");
 const bench_thumbs = @import("bench_thumbs.zig");
 const bench_win = @import("bench_win.zig");
 const library_io = @import("library_io.zig");
-const ui = nanoui.ui;
 
 pub const Args = struct {
     library: []const u8,
@@ -247,46 +245,9 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, args: Args) !u8
 // 首帧：由 `--bench` 起子进程调用（见 bench_win.measureFirstFrame）
 // ---------------------------------------------------------------------------
 
-/// 第一帧视图构建：把正常启动建出来的窗口内容用 `ui.Tester` 离屏跑一帧。
-///
-/// 尺寸用窗口声明的 380×700（不是 1×1）：列表在 1 点高时一行都排不出来，
-/// 量到的只是"空树"的价钱，不是用户看到的第一帧。离屏、`gui=false`，
-/// 不 show、不抢焦点。
-pub fn firstFrame(
-    init: std.process.Init,
-    app: *nanoui.App,
-    started: std.Io.Clock.Timestamp,
-) !void {
-    if (app.windows.items.len == 0) return error.NoWindow;
-    const native = app.windows.items[0].nativeView() orelse return error.NoNativeView;
-
-    // 到窗口建好为止（库、监听、取图层、预览条、nanoui App）——不含第一帧。
-    const setup_ms = bench_stats.sinceMs(init.io, started);
-
-    var tester: ui.Tester = undefined;
-    try tester.init(init.gpa, native.view, .{
-        .width = native.width,
-        .height = native.height,
-        .scale = native.scale,
-        .theme = native.theme,
-    });
-    defer tester.deinit();
-
-    const elapsed = bench_stats.sinceMs(init.io, started);
-    const memory = bench_win.resident();
-    std.debug.print(
-        "bench-first-frame: first_frame_ms={d:.2} setup_ms={d:.2} frame_ms={d:.2} size={d:.0}x{d:.0} scale={d:.0} ws_mib={d:.2}\n",
-        .{
-            elapsed,
-            setup_ms,
-            elapsed - setup_ms,
-            native.width,
-            native.height,
-            native.scale,
-            if (memory) |value| @as(f64, @floatFromInt(value.working_set)) / mib else 0,
-        },
-    );
-}
+/// 第一帧视图构建 + 帧内分解；实现在 `bench_first_frame.zig`（本文件只转出去，
+/// `main.zig` 的调用点不变）。尺寸、离屏、不抢焦点等约定见那边的文件头。
+pub const firstFrame = @import("bench_first_frame.zig").firstFrame;
 
 // ---------------------------------------------------------------------------
 // 各项测量
@@ -410,12 +371,12 @@ fn printTable(input: TableInput) u8 {
     var note: [192]u8 = undefined;
     const frame_note = if (input.first_frame_internal) |ms| blk: {
         if (input.first_frame_setup != null and input.first_frame_frame != null) {
-            break :blk text(&note, "含 CreateProcess；main 内 {d:.1} ms = setup {d:.1} + frame {d:.1}", .{
+            break :blk text(&note, "CreateProcess→首帧行；main 内 {d:.1} ms = setup {d:.1} + frame {d:.1}", .{
                 ms, input.first_frame_setup.?, input.first_frame_frame.?,
             });
         }
-        break :blk text(&note, "含 CreateProcess；main 内 {d:.1} ms", .{ms});
-    } else text(&note, "含 CreateProcess；子进程未报 main 内计时", .{});
+        break :blk text(&note, "CreateProcess→首帧行；main 内 {d:.1} ms", .{ms});
+    } else text(&note, "CreateProcess→首帧行；子进程未报 main 内计时", .{});
     printRow(
         "冷启动→首帧",
         if (input.first_frame_ran) text(&buf, "{d:.2} ms", .{input.first_frame_wall}) else "测不到",

@@ -6,6 +6,55 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const font = @import("font.zig");
+const trace = @import("../trace.zig");
+
+/// What the last `scan` cost, split by phase. Filled only while
+/// `ui.trace` is on (otherwise every counter stays zero and no clock is
+/// read); printed by the scan's own `font.scan` mark, and readable by an
+/// app that wants the numbers without the log.
+pub const ScanStats = struct {
+    /// Directory entries visited (files and links, before the extension
+    /// filter), files read, and faces found.
+    entries: usize = 0,
+    files: usize = 0,
+    faces: usize = 0,
+    dirs: usize = 0,
+    /// Enumerating the directories, opening and measuring the files,
+    /// reading their headers, the extra table reads, and parsing the
+    /// family/style records.
+    walk_ms: f64 = 0,
+    open_ms: f64 = 0,
+    header_ms: f64 = 0,
+    table_ms: f64 = 0,
+    style_ms: f64 = 0,
+    /// The rest of a file's pass: mapping, parsing the table directory.
+    alloc_ms: f64 = 0,
+    parse_ms: f64 = 0,
+    /// The furthest byte any font made a scan read, when the face's
+    /// records were past the header window (what the small buffer sizes
+    /// were chosen against).
+    max_end: usize = 0,
+};
+
+/// A stopwatch that costs nothing when `ui.trace` is off: one test at
+/// construction, `lap` returns 0 and reads no clock.
+const Lap = struct {
+    traced: bool,
+    at: f64,
+
+    fn init() Lap {
+        const traced = trace.on();
+        return .{ .traced = traced, .at = if (traced) trace.stamp() else 0 };
+    }
+
+    fn lap(self: *Lap) f64 {
+        if (!self.traced) return 0;
+        const now = trace.stamp();
+        const ms = (now - self.at) * 1000;
+        self.at = now;
+        return ms;
+    }
+};
 
 pub const Face = struct {
     path: []const u8,
@@ -26,6 +75,15 @@ const Loaded = struct {
 };
 
 const android = builtin.abi.isAndroid();
+/// How much of a font file a scan reads whole: its table directory, which
+/// every face starts from, and the head/OS-2/name records that usually sit
+/// beside it. Anything past this is read where its table says it is.
+const scan_window: usize = 64 * 1024;
+/// The tables a scan reads to know a face's family, weight and italics.
+const scan_tables = [_][]const u8{ "head", "os2", "name" };
+/// The most of a name table a scan reads into its small buffer: records
+/// come first, and a damaged directory may claim any length.
+const max_name_read: usize = 1 << 20;
 /// Families tried when the theme names none (or one not installed):
 /// Android's own first there.
 const sans = (if (android) [_][]const u8{"Roboto"} else [_][]const u8{}) ++ [_][]const u8{ "Inter", "Geist", "Segoe UI", "Noto Sans", "Cantarell", "Ubuntu", "DejaVu Sans", "Liberation Sans", "Arial", "Helvetica" };
@@ -55,6 +113,19 @@ pub const Db = struct {
     found: std.AutoHashMapUnmanaged(u21, ?u32) = .empty,
     /// How many of the app's fonts (`font_registry`) are added.
     bundled: usize = 0,
+    /// What the last `scan` cost, per phase (zeros unless traced).
+    scan_stats: ScanStats = .{},
+    /// Fonts read from disk and parsed, first-use fallback lookups, and
+    /// what they cost (zeros unless traced).
+    loads: usize = 0,
+    load_ms: f64 = 0,
+    fallback_searches: usize = 0,
+    fallback_ms: f64 = 0,
+    /// One reused buffer for reading the parts of a font a scan needs,
+    /// sized for the largest file seen (`page_allocator`, freed with the
+    /// database). Allocating a whole file per font instead cost more than
+    /// reading it: 69 ms of commits and 35 ms of releases over 372 files.
+    file_buf: []u8 = &.{},
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) Db {
         return .{ .gpa = gpa, .io = io };
@@ -70,6 +141,7 @@ pub const Db = struct {
         }
         db.loaded.deinit(db.gpa);
         db.found.deinit(db.gpa);
+        if (db.file_buf.len > 0) std.heap.page_allocator.free(db.file_buf);
     }
 
     /// Adds the faces of fonts the app registered since last asked.
@@ -95,6 +167,11 @@ pub const Db = struct {
         db.addBundled();
         if (db.scanned) return;
         db.scanned = true;
+        const traced = trace.on();
+        if (traced) {
+            db.scan_stats = .{};
+            trace.mark("font.scan.start");
+        }
         var buf: [1024]u8 = undefined;
         switch (builtin.os.tag) {
             .windows => {
@@ -116,6 +193,18 @@ pub const Db = struct {
                 }
             },
         }
+        db.traceScan();
+    }
+
+    /// One line with what the scan cost, when `ui.trace` is on.
+    fn traceScan(db: *const Db) void {
+        if (!trace.on()) return;
+        const s = db.scan_stats;
+        trace.markf(
+            "font.scan",
+            "dirs={d} entries={d} files={d} faces={d} bundled={d} walk_ms={d:.2} open_ms={d:.2} alloc_ms={d:.2} header_ms={d:.2} parse_ms={d:.2} table_ms={d:.2} style_ms={d:.2} max_end={d}",
+            .{ s.dirs, s.entries, s.files, s.faces, db.bundled, s.walk_ms, s.open_ms, s.alloc_ms, s.header_ms, s.parse_ms, s.table_ms, s.style_ms, s.max_end },
+        );
     }
 
     pub fn scanDir(db: *Db, path: []const u8) void {
@@ -123,7 +212,14 @@ pub const Db = struct {
         defer dir.close(db.io);
         var walker = dir.walk(db.gpa) catch return;
         defer walker.deinit();
-        while (walker.next(db.io) catch null) |e| {
+        const traced = trace.on();
+        if (traced) db.scan_stats.dirs += 1;
+        while (true) {
+            const walked_at = if (traced) trace.stamp() else 0;
+            const next = walker.next(db.io) catch null;
+            if (traced) db.scan_stats.walk_ms += trace.msSince(walked_at);
+            const e = next orelse break;
+            if (traced) db.scan_stats.entries += 1;
             if (e.kind != .file and e.kind != .sym_link) continue;
             const ext = std.fs.path.extension(e.basename);
             if (!std.ascii.eqlIgnoreCase(ext, ".ttf") and !std.ascii.eqlIgnoreCase(ext, ".ttc")) continue;
@@ -134,28 +230,116 @@ pub const Db = struct {
     }
 
     /// Reads a file's faces' styles, touching only the tables they need.
+    ///
+    /// One read of the header window covers the table directory, and most
+    /// faces' head/OS-2/name records too. A face whose records sit further
+    /// in is read table by table into a buffer the size of the records
+    /// (`readStyleFar`): a file-sized mapping per font cost 69 ms of
+    /// commits and 35 ms of releases over one Windows font folder, and
+    /// commit is working set, so it bought nothing to keep.
     pub fn addFile(db: *Db, path: []const u8) void {
+        var lap: Lap = .init();
         var file = std.Io.Dir.cwd().openFile(db.io, path, .{}) catch return;
         defer file.close(db.io);
         const len = file.length(db.io) catch return;
         if (len < 12 or len > 256 << 20) return;
-        // Untouched pages of an anonymous mapping cost nothing: the
-        // tables read land at their offsets, the rest stays unread.
-        const data = std.heap.page_allocator.alloc(u8, len) catch return;
-        defer std.heap.page_allocator.free(data);
-        _ = file.readPositionalAll(db.io, data[0..@min(len, 64 * 1024)], 0) catch return;
+        db.scan_stats.open_ms += lap.lap();
+        const window: usize = @min(len, scan_window);
+        const data = db.scanBuffer(window) orelse return;
+        db.scan_stats.alloc_ms += lap.lap();
+        // Only the first window of the file is read whole: it holds the
+        // table directory every face starts from.
+        _ = file.readPositionalAll(db.io, data[0..window], 0) catch return;
+        db.scan_stats.files += 1;
+        db.scan_stats.header_ms += lap.lap();
+
         for (0..font.faces(data)) |i| {
+            const faces_at = if (lap.traced) trace.stamp() else 0;
             const t = font.Tables.read(data, i) catch continue;
-            inline for (.{ "head", "os2", "name" }) |name| {
-                const off = @field(t, name);
-                const want: usize = if (std.mem.eql(u8, name, "name")) t.name_len else 100;
-                if (off != 0 and off < len) _ = file.readPositionalAll(db.io, data[off..@min(len, off + want)], off) catch {};
-            }
-            const style = font.Style.read(data, t);
-            if (style.family_len == 0) continue;
+            if (lap.traced) db.scan_stats.parse_ms += trace.msSince(faces_at);
+            const style_at = if (lap.traced) trace.stamp() else 0;
+            const style = if (farTables(t, len, window))
+                db.readStyleFar(file, t, len, &lap)
+            else
+                font.Style.read(data, t);
+            if (lap.traced) db.scan_stats.style_ms += trace.msSince(style_at);
+            const s = style orelse continue;
+            if (s.family_len == 0) continue;
             const owned = db.gpa.dupe(u8, path) catch return;
-            db.faces.append(db.gpa, .{ .path = owned, .index = @intCast(i), .style = style }) catch db.gpa.free(owned);
+            db.faces.append(db.gpa, .{ .path = owned, .index = @intCast(i), .style = s }) catch db.gpa.free(owned);
+            if (lap.traced) db.scan_stats.faces += 1;
         }
+    }
+
+    /// Whether any table a scan needs reaches past the header window.
+    fn farTables(t: font.Tables, len: usize, window: usize) bool {
+        inline for (scan_tables) |name| {
+            if (tableSpan(t, name, len)) |span| {
+                if (span[1] > window) return true;
+            }
+        }
+        return false;
+    }
+
+    /// A face's style when the tables it needs are past the header window:
+    /// head, OS/2 and the name table are read into a buffer of their own
+    /// with the table offsets moved to it.
+    fn readStyleFar(db: *Db, file: std.Io.File, t: font.Tables, len: usize, lap: *Lap) ?font.Style {
+        const name_span = tableSpan(t, "name", len);
+        // A damaged directory can claim any length: the records sit at the
+        // front of the table, so the first megabyte is all a scan reads.
+        const name_len: usize = if (name_span) |span| @min(span[1] - span[0], max_name_read) else 0;
+        const local = db.gpa.alloc(u8, 2 * 100 + name_len) catch return null;
+        defer db.gpa.free(local);
+        var shifted = t;
+        var at: usize = 0;
+        inline for (.{ "head", "os2" }) |name| {
+            if (tableSpan(t, name, len)) |span| {
+                @memset(local[at..][0..100], 0);
+                const n = @min(span[1] - span[0], 100);
+                const read_at = if (lap.traced) trace.stamp() else 0;
+                _ = file.readPositionalAll(db.io, local[at..][0..n], span[0]) catch {};
+                if (lap.traced) db.scan_stats.table_ms += trace.msSince(read_at);
+                @field(shifted, name) = @intCast(at);
+                at += 100;
+            } else @field(shifted, name) = 0;
+        }
+        if (name_span) |span| {
+            const read_at = if (lap.traced) trace.stamp() else 0;
+            _ = file.readPositionalAll(db.io, local[at..][0..name_len], span[0]) catch {};
+            if (lap.traced) {
+                db.scan_stats.table_ms += trace.msSince(read_at);
+                db.scan_stats.max_end = @max(db.scan_stats.max_end, span[1]);
+            }
+            shifted.name = @intCast(at);
+            at += name_len;
+        } else shifted.name = 0;
+        return font.Style.read(local[0..at], shifted);
+    }
+
+    /// A face's table a scan needs, as `{ offset, end }` clamped to the
+    /// file (null when the face has none).
+    fn tableSpan(t: font.Tables, comptime name: []const u8, len: usize) ?[2]usize {
+        const off: usize = @field(t, name);
+        if (off == 0 or off >= len) return null;
+        const want: usize = if (comptime std.mem.eql(u8, name, "name")) t.name_len else 100;
+        return .{ off, @min(len, off + want) };
+    }
+
+    /// The reused header-window buffer: the first `scan_window` bytes of
+    /// whichever file is being read.
+    ///
+    /// Bytes no read filled still hold an earlier file's: a scan reads only
+    /// the ranges the current file's table directory names, and
+    /// `font.Style` keeps its records inside the name table it read, so a
+    /// scan never sees another font's bytes.
+    fn scanBuffer(db: *Db, at_least: usize) ?[]u8 {
+        if (db.file_buf.len < at_least) {
+            const grown = std.heap.page_allocator.alloc(u8, at_least) catch return null;
+            if (db.file_buf.len > 0) std.heap.page_allocator.free(db.file_buf);
+            db.file_buf = grown;
+        }
+        return db.file_buf[0..@min(db.file_buf.len, at_least)];
     }
 
     /// The face of `family` nearest `weight` and `italic`, null when the
@@ -189,6 +373,8 @@ pub const Db = struct {
     /// A face's font, loaded on first use (null if it cannot be read).
     pub fn load(db: *Db, face: u32) ?*const font.Font {
         if (db.loaded.get(face)) |l| return &l.font;
+        const traced = trace.on();
+        const started = if (traced) trace.stamp() else 0;
         const f = db.faces.items[face];
         const data = f.read(db) catch return null;
         const parsed = font.Font.init(data, f.index) catch {
@@ -202,14 +388,24 @@ pub const Db = struct {
         l.* = .{ .data = data, .font = parsed };
         l.font.data = l.data;
         db.loaded.put(db.gpa, face, l) catch {};
+        if (traced) {
+            db.loads += 1;
+            db.load_ms += trace.msSince(started);
+        }
         return &l.font;
     }
 
     /// A face that has `cp`, for text its font lacks.
     pub fn fallback(db: *Db, cp: u21, weight: u16) ?u32 {
         if (db.found.get(cp)) |f| return f;
+        const traced = trace.on();
+        const started = if (traced) trace.stamp() else 0;
         const f = db.findFallback(cp, weight);
         db.found.put(db.gpa, cp, f) catch {};
+        if (traced) {
+            db.fallback_searches += 1;
+            db.fallback_ms += trace.msSince(started);
+        }
         return f;
     }
 
