@@ -3,10 +3,14 @@
 //! 用拖拽口岸把选中的素材交给别的程序。
 //!
 //!   otto-lite [library.json] [--watch <dir>] [--select=0,1]
+//!   otto-lite --version              打印版本与运行形态（dev/portable/installed）
 //!   otto-lite --demo <dir>           文件监听自检（不取缩略图）
 //!   otto-lite --demo-thumbs <dir>    缩略图取图层自检（不开窗）
 //!   otto-lite --demo-transport       选择/路径/拖拽快照自检（不开窗、不碰剪贴板）
 //!   otto-lite --copy-now <file>      显式把 1 个文件写进剪贴板（CF_HDROP）
+//!
+//! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
+//! 便携版用 `<exe 目录>\data\library.json`，安装版用 `%APPDATA%\OTTO\library.json`。
 //!
 //! 选择：点一行 = 只选它；Ctrl+点击 = 切换；Shift+点击 = 从锚点连选；
 //! 空白处点击 = 清空。选中行有可见底色，表头是「N 个素材 · M 选中」。
@@ -27,10 +31,12 @@ const demo_transport = @import("demo_transport.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_watch = @import("demo_watch.zig");
 const live_mod = @import("live.zig");
+const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
 const selection_mod = @import("selection.zig");
 const thumbs_mod = @import("thumbs.zig");
 const transport_mod = @import("transport.zig");
+const version_mod = @import("version.zig");
 const ui = nanoui.ui;
 
 /// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中。监听线程自己
@@ -463,10 +469,10 @@ fn placeholderIcon(sample: core.model.Sample) []const u8 {
     return "doc";
 }
 
+/// 窗口标题：`OTTO Lite <版本> — <行数>`（见 `version.windowTitle`）。
 fn setTitle(window: *nanoui.Window, total: usize) void {
-    var buffer: [64]u8 = undefined;
-    const title = std.fmt.bufPrint(&buffer, "OTTO Lite — {d}", .{total}) catch "OTTO Lite";
-    window.setTitle(title);
+    var buffer: [96]u8 = undefined;
+    window.setTitle(version_mod.windowTitle(&buffer, total));
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -475,12 +481,23 @@ pub fn main(init: std.process.Init) !void {
     const options = options_mod.parse(args) catch {
         std.debug.print(
             "用法：otto-lite [library.json] [--watch <dir>] [--select=0,1]\n" ++
+                "      otto-lite --version\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
                 "      otto-lite --copy-now <file>\n",
             .{},
         );
         return error.InvalidArguments;
     };
+
+    // `--version` 不能碰库文件：便携版解压出来还没有 data\，安装版第一次启动也一样。
+    if (options.version_requested) {
+        const exe_path = try std.process.executablePathAlloc(init.io, allocator);
+        const mode = try mode_mod.detect(allocator, init.io, exe_path);
+        var line_buffer: [128]u8 = undefined;
+        const line = try version_mod.versionLine(&line_buffer, mode.label());
+        try std.Io.File.stdout().writeStreamingAll(init.io, line);
+        return;
+    }
 
     // 选择/拖拽快照/参数校验自检：不开窗，也不碰剪贴板。
     if (options.demo_transport) {
@@ -505,8 +522,10 @@ pub fn main(init: std.process.Init) !void {
 
     if (options.demo_dir) |dir_path| return demo_watch.run(init, allocator, dir_path);
 
-    const library = try core.store.loadCwdFile(allocator, init.io, options.library_path);
-    const root = try watchRoot(init, allocator, options);
+    // 位置参数优先；没有就按运行形态给默认库（见文件头）。
+    const library_path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
+    const library = try core.store.loadCwdFile(allocator, init.io, library_path);
+    const root = try watchRoot(init, allocator, options, library_path);
 
     // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。
     var live = try live_mod.Live.init(allocator, &library, root);
@@ -532,8 +551,8 @@ pub fn main(init: std.process.Init) !void {
     state.selection.resize(init.gpa, state.samples.len) catch {};
     if (options.select) |text| state.seedSelection(text);
 
-    var title_buffer: [64]u8 = undefined;
-    const title = try std.fmt.bufPrint(&title_buffer, "OTTO Lite — {d}", .{state.samples.len});
+    var title_buffer: [96]u8 = undefined;
+    const title = version_mod.windowTitle(&title_buffer, state.samples.len);
     state.window = try app.newWindow(.{
         .title = title,
         .width = 380,
@@ -547,11 +566,16 @@ pub fn main(init: std.process.Init) !void {
     try app.run();
 }
 
-/// 监听根：`--watch` 优先，否则用库文件所在目录；都解析成绝对路径，保证
+/// 监听根：`--watch` 优先，否则用解析后的库文件所在目录；都解析成绝对路径，保证
 /// join 出来的路径能和库里的 `filePath` 按字节比较。
-fn watchRoot(init: std.process.Init, allocator: std.mem.Allocator, options: options_mod.Options) ![]const u8 {
+fn watchRoot(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    options: options_mod.Options,
+    library_path: []const u8,
+) ![]const u8 {
     const cwd = std.Io.Dir.cwd();
     if (options.watch_dir) |dir| return try cwd.realPathFileAlloc(init.io, dir, allocator);
-    const parent = std.fs.path.dirname(options.library_path) orelse ".";
+    const parent = std.fs.path.dirname(library_path) orelse ".";
     return try cwd.realPathFileAlloc(init.io, parent, allocator);
 }

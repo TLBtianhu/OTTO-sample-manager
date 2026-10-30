@@ -10,6 +10,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // 版本号的唯一来源是 build.zig.zon 的 .version：配置阶段读出来注入成
+    // `@import("build_options").version`。源码里不再抄第二份。
+    const app_version = manifestVersion(b);
     const core_dep = b.dependency("otto_core", .{
         .target = target,
         .optimize = optimize,
@@ -51,6 +54,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = app_imports,
     });
+    // 版本号走 build options，app 与测试两个 module 都要能 import。
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", app_version);
+    app_module.addOptions("build_options", build_options);
     const exe = b.addExecutable(.{
         .name = "otto-lite",
         .root_module = app_module,
@@ -81,7 +88,39 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
         },
     });
+    test_module.addOptions("build_options", build_options);
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     const test_step = b.step("test", "运行 live 适配层与 thumbs 取图层的单元测试");
     test_step.dependOn(&run_tests.step);
+}
+
+/// 读 `build.zig.zon` 的 `.version`，供编译期注入。
+///
+/// `b.root` 是当前包的构建根（`Build` 自己报错时也用它拼 `build.zig.zon`），
+/// 所以不受调用者 cwd 影响。ZON 用 `std.zon.parse` 解析，只声明需要的一个字段，
+/// 其余字段用 `ignore_unknown_fields` 跳过：清单以后加字段不会弄坏构建脚本。
+fn manifestVersion(b: *std.Build) []const u8 {
+    const manifest_path = b.root.joinString(b.allocator, "build.zig.zon") catch @panic("OOM");
+    const manifest = b.root.root_dir.handle.readFileAlloc(
+        b.graph.io,
+        manifest_path,
+        b.allocator,
+        .limited(64 * 1024),
+    ) catch |err| @panic(b.fmt("读取 {s} 失败：{t}", .{ manifest_path, err }));
+
+    // std.zon 要求 [:0]const u8。
+    const source = b.allocator.dupeSentinel(u8, manifest, 0) catch @panic("OOM");
+
+    const Manifest = struct { version: []const u8 };
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const parsed: Manifest = std.zon.parse.fromSlice(Manifest, .{
+        .gpa = b.allocator,
+        .arena = b.allocator,
+        .source = source,
+        .diagnostics = &diagnostics,
+        .ignore_unknown_fields = true,
+    }) catch {
+        diagnostics.fatal(manifest_path);
+    };
+    return b.dupe(parsed.version);
 }
