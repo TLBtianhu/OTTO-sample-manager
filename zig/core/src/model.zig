@@ -160,6 +160,9 @@ pub const Sample = struct {
     mtime: i64 = 0,
     /// 文件身份；null = 旧数据 / 口岸还没取到 / 退化盘，此时注释键退回三元组。
     identity: ?FileIdentity = null,
+    /// 这条样本的 L1 元数据（时长 / 采样率 / 声道）还没人读过，等后台扫描补齐。
+    /// 从 JSON 载入的样本是 false；`index.Index` 因 created 事件插入的样本是 true。
+    pending_metadata: bool = false,
 
     /// 注释表用的键：有身份用身份，没有身份才退回 `路径 + 大小 + mtime`。
     /// 返回的 fallback 键里的路径指向 `self.file_path`，生命周期跟随 `Sample`。

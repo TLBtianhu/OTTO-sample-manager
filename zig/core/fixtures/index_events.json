@@ -1,0 +1,55 @@
+{
+  "samples": {
+    "kick": {
+      "fileName": "Kick",
+      "fileExt": ".wav",
+      "filePath": "D:/packs/Kick.wav",
+      "folderId": "folder_packs",
+      "fileSize": 1024,
+      "importedAt": 10,
+      "identity": {
+        "volumeSerial": 439041101,
+        "fileIndex": 4294967297
+      }
+    },
+    "snare": {
+      "fileName": "Snare",
+      "fileExt": ".wav",
+      "filePath": "D:/packs/Snare.wav",
+      "folderId": "folder_packs",
+      "fileSize": 2048,
+      "importedAt": 20,
+      "identity": {
+        "volumeSerial": 439041101,
+        "fileIndex": 4294967298
+      }
+    },
+    "hat": {
+      "fileName": "Hat",
+      "fileExt": ".wav",
+      "filePath": "D:/packs/Hat.wav",
+      "folderId": "folder_packs",
+      "fileSize": 512,
+      "importedAt": 30,
+      "identity": {
+        "volumeSerial": 439041101,
+        "fileIndex": 4294967299
+      }
+    }
+  },
+  "folderState": {
+    "folders": {
+      "folder_packs": {
+        "id": "folder_packs",
+        "name": "packs",
+        "path": "D:/packs",
+        "sampleIds": [],
+        "childFolderIds": [],
+        "parentId": null
+      }
+    },
+    "folderOrder": [
+      "folder_packs"
+    ]
+  }
+}
