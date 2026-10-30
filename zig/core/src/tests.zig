@@ -19,6 +19,8 @@ test {
     _ = @import("diagnostics.zig");
     _ = @import("store_test.zig");
     _ = @import("cache_test.zig");
+    _ = @import("annotations.zig");
+    _ = @import("annotations_test.zig");
 }
 
 fn expectIds(expected: []const []const u8, samples: []const model.Sample) !void {

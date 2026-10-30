@@ -11,6 +11,124 @@ const std = @import("std");
 /// 这里用一个中性灰保证 UI 仍然可以渲染。
 pub const default_group_color = "#6b7280";
 
+/// 文件身份：卷序列号 + 文件索引，由操作系统在文件创建时发放。
+///
+/// 数据层**只定义类型，不铸号、不读文件系统**：值由口岸取到后填进来
+/// （NTFS/ReFS 上跨改名、跨同卷移动保持不变）。取值方式属于平台细节，
+/// 见 `zig/ports/`；这里没有任何平台代码，也不做路径归一化。
+pub const FileIdentity = struct {
+    /// 卷序列号：同一台机器上区分卷。
+    volume_serial: u32,
+    /// 文件索引：卷内唯一，对应 NTFS/ReFS 的 64 位 File ID。
+    file_index: u64,
+
+    /// 是否指同一个文件。身份里没有路径，所以这里不比较路径。
+    pub fn eql(self: FileIdentity, other: FileIdentity) bool {
+        return self.volume_serial == other.volume_serial and self.file_index == other.file_index;
+    }
+
+    /// 分桶用；相等性以 `eql` 为准（哈希只负责把相等的键落到同一个桶）。
+    pub fn hash(self: FileIdentity) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        // 逐字段喂进去：结构体可能有填充字节，`asBytes(self)` 会把垃圾也哈希掉。
+        hasher.update(std.mem.asBytes(&self.volume_serial));
+        hasher.update(std.mem.asBytes(&self.file_index));
+        return hasher.final();
+    }
+};
+
+/// 退化身份：FAT32 / exFAT / 网络盘上 OS 不保证 File ID 稳定时使用的三元组
+/// （宪章「七」：路径 + 大小 + mtime）。
+///
+/// 只在真实身份不可用、又必须保住用户注释时才用；UI 应据此标注
+/// 「此素材的身份不稳定」。
+pub const FallbackKey = struct {
+    /// 完整路径，按字节比较（口岸负责把分隔符 / 大小写归一化后再写进来）。
+    path: []const u8,
+    /// 文件大小（字节）。
+    size: u64 = 0,
+    /// 修改时间（Unix 毫秒）；0 表示未知（尚未扫描）。
+    mtime: i64 = 0,
+
+    pub fn eql(self: FallbackKey, other: FallbackKey) bool {
+        return self.size == other.size and
+            self.mtime == other.mtime and
+            std.mem.eql(u8, self.path, other.path);
+    }
+
+    pub fn hash(self: FallbackKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&self.size));
+        hasher.update(std.mem.asBytes(&self.mtime));
+        // 先喂长度，避免 ("ab", ...) 与 ("abc", ...) 之类的拼接歧义。
+        const length: u64 = self.path.len;
+        hasher.update(std.mem.asBytes(&length));
+        hasher.update(self.path);
+        return hasher.final();
+    }
+};
+
+/// 注释表的主键：有身份用身份，没有身份才退回三元组。
+///
+/// 「用户注释键在身份上，不键在路径上」——改名、同卷移动、索引重建都不会
+/// 让注释变成孤儿；退化盘上才退到 `FallbackKey`，且那种键不跨改名存活。
+pub const StableKey = union(enum) {
+    identity: FileIdentity,
+    fallback: FallbackKey,
+
+    pub fn eql(self: StableKey, other: StableKey) bool {
+        return switch (self) {
+            .identity => |identity| switch (other) {
+                .identity => |other_identity| identity.eql(other_identity),
+                .fallback => false,
+            },
+            .fallback => |fallback| switch (other) {
+                .fallback => |other_fallback| fallback.eql(other_fallback),
+                .identity => false,
+            },
+        };
+    }
+
+    pub fn hash(self: StableKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        switch (self) {
+            .identity => |identity| {
+                hasher.update(&[_]u8{0});
+                const value = identity.hash();
+                hasher.update(std.mem.asBytes(&value));
+            },
+            .fallback => |fallback| {
+                hasher.update(&[_]u8{1});
+                const value = fallback.hash();
+                hasher.update(std.mem.asBytes(&value));
+            },
+        }
+        return hasher.final();
+    }
+
+    pub fn isIdentity(self: StableKey) bool {
+        return switch (self) {
+            .identity => true,
+            .fallback => false,
+        };
+    }
+
+    pub fn isFallback(self: StableKey) bool {
+        return !self.isIdentity();
+    }
+};
+
+/// `std.HashMapUnmanaged` 的上下文：`StableKey` 里有切片，必须按内容比较。
+pub const StableKeyContext = struct {
+    pub fn hash(_: StableKeyContext, key: StableKey) u64 {
+        return key.hash();
+    }
+
+    pub fn eql(_: StableKeyContext, a: StableKey, b: StableKey) bool {
+        return a.eql(b);
+    }
+};
+
 /// 一个采样（对应 TS `Sample`）。
 pub const Sample = struct {
     /// 唯一 id。electron-store 里 samples 是 id -> 对象的 map；
@@ -37,6 +155,22 @@ pub const Sample = struct {
     group_ids: []const []const u8 = &.{},
     /// 导入时间（Unix 毫秒）。
     imported_at: i64 = 0,
+    /// 修改时间（Unix 毫秒），与大小同属 L0 目录项；0 表示未知（尚未扫描）。
+    /// 由口岸在扫描时填写，数据层不读文件系统。
+    mtime: i64 = 0,
+    /// 文件身份；null = 旧数据 / 口岸还没取到 / 退化盘，此时注释键退回三元组。
+    identity: ?FileIdentity = null,
+
+    /// 注释表用的键：有身份用身份，没有身份才退回 `路径 + 大小 + mtime`。
+    /// 返回的 fallback 键里的路径指向 `self.file_path`，生命周期跟随 `Sample`。
+    pub fn stableKey(self: Sample) StableKey {
+        if (self.identity) |identity| return .{ .identity = identity };
+        return .{ .fallback = .{
+            .path = self.file_path,
+            .size = self.file_size,
+            .mtime = self.mtime,
+        } };
+    }
 
     pub fn inGroup(self: Sample, group_id: []const u8) bool {
         for (self.group_ids) |id| {
@@ -198,4 +332,65 @@ test "模型默认值与成员判断" {
     const group = SampleGroup{ .id = "g1", .sample_ids = &.{"s1"} };
     try std.testing.expect(group.containsSample("s1"));
     try std.testing.expectEqualStrings(default_group_color, group.color);
+}
+
+test "StableKey：有身份用身份，无身份退回 路径+大小+mtime" {
+    const identity = FileIdentity{ .volume_serial = 0x1a2b_3c4d, .file_index = 0x0000_0001_0000_9c4e };
+    const kick = Sample{
+        .id = "s1",
+        .file_name = "Kick",
+        .file_ext = ".wav",
+        .file_path = "D:/packs/Kick.wav",
+        .file_size = 1024,
+        .identity = identity,
+    };
+    const renamed = Sample{
+        .id = "s1",
+        .file_name = "Kick renamed",
+        .file_ext = ".wav",
+        .file_path = "E:/archive/2026/Kick renamed.wav",
+        .file_size = 2048,
+        .identity = identity,
+    };
+
+    const key = kick.stableKey();
+    try std.testing.expect(key.isIdentity());
+    try std.testing.expect(!key.isFallback());
+    // 路径 / 大小都变了，身份没变 -> 同一个键。
+    try std.testing.expect(key.eql(renamed.stableKey()));
+    try std.testing.expectEqual(key.hash(), renamed.stableKey().hash());
+
+    // 同卷同索引才算同一身份；卷或索引不同都不算。
+    try std.testing.expect(!identity.eql(.{ .volume_serial = 0x1a2b_3c4d, .file_index = 0x9c4f }));
+    try std.testing.expect(!identity.eql(.{ .volume_serial = 0x1a2b_3c4e, .file_index = 0x9c4e }));
+
+    // 没有身份：退回三元组，mtime 未知时按 0 参与比较。
+    const no_identity = Sample{
+        .id = "s2",
+        .file_name = "Kick",
+        .file_ext = ".wav",
+        .file_path = "D:/packs/Kick.wav",
+        .file_size = 1024,
+    };
+    const fallback_key = no_identity.stableKey();
+    try std.testing.expect(fallback_key.isFallback());
+    try std.testing.expect(fallback_key.eql(.{ .fallback = .{
+        .path = "D:/packs/Kick.wav",
+        .size = 1024,
+        .mtime = 0,
+    } }));
+
+    // 大小或 mtime 不同 -> 不是同一个退化身份。
+    try std.testing.expect(!fallback_key.eql(.{ .fallback = .{ .path = "D:/packs/Kick.wav", .size = 2048 } }));
+    try std.testing.expect(!fallback_key.eql(.{ .fallback = .{
+        .path = "D:/packs/Kick.wav",
+        .size = 1024,
+        .mtime = 1,
+    } }));
+    // 路径不同当然也不同。
+    try std.testing.expect(!fallback_key.eql(.{ .fallback = .{ .path = "D:/packs/Snare.wav", .size = 1024 } }));
+
+    // 身份键与退化键永远不相等（哪怕路径 / 数值看起来能对上）。
+    try std.testing.expect(!key.eql(fallback_key));
+    try std.testing.expect(!fallback_key.eql(key));
 }
