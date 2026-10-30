@@ -3,17 +3,11 @@
 //! 用拖拽口岸把选中的素材交给别的程序。
 //!
 //!   otto-lite [library.json] [--watch <dir>] [--select=0,1]
-//!   otto-lite --version              打印版本与运行形态（dev/portable/installed）
-//!   otto-lite --demo <dir> / --demo-rescan <dir>  监听与溢出重扫自检（不开窗）
-//!   otto-lite --demo-thumbs <dir>    缩略图取图层自检（不开窗）
-//!   otto-lite --preview <file>       预览自检（不开窗，打印事实 + kind/outcome/摘要）
-//!   otto-lite --play-test <file>     音频试听自检（解码 + 播 300ms + 断言位置前进）
-//!   otto-lite --demo-transport       选择/路径/拖拽快照自检（不开窗、不碰剪贴板）
-//!   otto-lite --copy-now <file>      显式把 1 个文件写进剪贴板（CF_HDROP）
-//!   otto-lite --convert <in> <out>   旧 JSON → OTTOLIB v1（原子写，打印条数/字节数）
-//!   otto-lite --library-info <file>  按 magic 打印 format=json|otto 与条数/字节数
+//!   otto-lite --version | --convert <in> <out> | --library-info <file>
+//!   otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport
+//!   otto-lite --preview <file> | --play-test <file> | --copy-now <file>
 //!   otto-lite --import <folder> [--library <file>] --save <out.otto>
-//!                                    扫描 + L1 头部解析 + 去重 + 合并 + 原子写
+//!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点。
 //!
 //! 列表下方是一条固定高度的预览区（`preview_panel.zig`）：选中行变化时把样本交给
 //! 注册表，按 `Outcome` 的五个分支画图/文字/占位/原因；名称/大小/时长/路径是样本
@@ -34,10 +28,9 @@
 //! 光标尽量停在原样本的新行，原样本不在了才回落到第 0 行。↑↓（越界不环绕）、
 //! Home/End、Enter（音频行触发播放）、Esc（先清搜索再清选择）都在 `search_ui.zig`。
 //!
-//! 拖出：在行上按住移动超过 6 px 就进入"待拖拽"（`State.rowInput`）。帧里只做
-//! **快照**（`Transport.stage` 把路径复制出帧的生命周期），帧结束后由
-//! `nanoui.App.after(0, …)` 的定时器调 `Transport.execute`——`DoDragDrop` 会阻塞
-//! 到用户松手，绝不能在 `view` 里调（见 `transport.zig` 的文件头）。
+//! 拖出：在行上按住移动超过 6 px 就进入"待拖拽"（`State.rowInput`）。帧里只做快照
+//! （`Transport.stage` 把路径复制出帧的生命周期），帧结束后由 `nanoui.App.after(0, …)`
+//! 的定时器调 `Transport.execute`——`DoDragDrop` 会阻塞到用户松手，绝不能在 `view` 里调。
 //! 拖哪些：该行在选中集合里 → 整个集合；否则只有这一行。
 //!
 //! Ctrl+C：选中集合（没有选中就当前行）写剪贴板，表头闪 1.5 秒提示。
@@ -61,6 +54,7 @@ const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
 const thumbs_mod = @import("thumbs.zig");
 const thumbs_report = @import("thumbs_report.zig");
+const trace = @import("trace.zig");
 const transport_mod = @import("transport.zig");
 const version_mod = @import("version.zig");
 const window_util = @import("window_util.zig");
@@ -498,6 +492,7 @@ pub fn main(init: std.process.Init) !void {
     // `--bench` 的子进程用这个时间戳量"main 入口 → 第一帧建完"；普通启动只多一次
     // 单调时钟读取。
     const started = std.Io.Clock.Timestamp.now(init.io, .awake);
+    trace.begin(init);
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     const options = options_mod.parse(args) catch {
@@ -536,6 +531,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ library_path, @errorName(err) });
         std.process.exit(1);
     };
+    trace.mark("setup.library");
     defer {
         library.deinit();
         init.gpa.destroy(library);
@@ -545,6 +541,7 @@ pub fn main(init: std.process.Init) !void {
     var live = try init.gpa.create(live_mod.Live);
     errdefer init.gpa.destroy(live);
     live.* = try live_mod.Live.init(init.gpa, init.io, library, root);
+    trace.mark("setup.live");
     defer {
         live.deinit();
         init.gpa.destroy(live);
@@ -558,6 +555,7 @@ pub fn main(init: std.process.Init) !void {
     const panel = try preview_panel.Panel.init(init.gpa, init.io, &preview_providers.registry, .{});
     defer panel.deinit();
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite" });
+    trace.mark("setup.app");
     defer app.destroy();
 
     var state = State{
@@ -570,6 +568,7 @@ pub fn main(init: std.process.Init) !void {
         .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
         .transport = transport_mod.Transport.init(init.gpa),
     };
+    trace.mark("setup.state");
     defer state.import.deinit();
     defer state.selection.deinit(init.gpa);
     defer state.search.deinit();
@@ -586,6 +585,7 @@ pub fn main(init: std.process.Init) !void {
         .height = 700,
         .content = .{ .view = .init(&state, State.view) },
     });
+    trace.mark("setup.window");
     if (options.bench_first_frame) {
         try bench_mod.firstFrame(init, app, started);
         // 一次性探针：打印完就退出，不 join 缩略图/预览工作线程。它们可能正在

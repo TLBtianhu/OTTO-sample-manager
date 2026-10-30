@@ -53,6 +53,9 @@ pub const App = struct {
         const flags = try dev.Flags.parse(init);
         self.* = .{ .gpa = gpa, .io = init.io, .options = options, .flags = flags, .debug = init.environ_map.get("NANOUI_DEBUG") != null };
         self.gui = flags.snapshot == null and flags.generate_dir == null;
+        // Cold-start marks on stderr, for apps that do not turn them on
+        // themselves (`ui.trace.enabled`); off by default.
+        if (init.environ_map.get("NANOUI_TRACE") != null) ui.trace.enabled = true;
         // Pixels, not stretched bitmaps: nanoui draws at the monitor's DPI.
         if (self.gui) _ = w.SetProcessDPIAware();
         // Where other threads' calls for the main thread arrive (`onMain`).

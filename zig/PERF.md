@@ -290,3 +290,84 @@ zig\package.ps1 -Version 0.1.1 -NoSign
 唯一 FAIL 是**冷启动到首帧**（target 100 ms，release 实测 307.69 ms）。这个数字
 在本机 debug/release、12 条/2000 条四种组合下都 FAIL，且与库大小无关；下一轮
 优化方向优先是「字体扫描/图集延迟到首帧之后」与「窗口出现前不建完整 UI」。
+
+## 9. 2026-10-31 追加：首帧这一块的实测、口径修正与优化（分支 `feat/startup`）
+
+> 完整报告见 `zig/STARTUP-REPORT.md`。本节只记结论与数字，**不改上面第 3 节的
+> 历史表**（那是旧口径下的真实运行）。宪章目标仍写 FAIL。
+
+### 9.1 口径修正（先承认旧数字里有一段不是首帧）
+
+第 4.2 节写的墙钟是「CreateProcess → 子进程退出」，其中包含**首帧之后**的成本：
+
+| 首帧之后的事 | 本机实测 |
+| --- | --- |
+| `Tester.deinit`（释放字体库/图集/~70 MB） | 3.3 ms |
+| `ExitProcess`（收工作线程 + DLL 分离） | ≈ 50 ms |
+| 首帧期间懒启动的缩略图 helper 继承 stderr，父进程等 EOF | 0–30 ms |
+
+`bench_win.measureFirstFrame` 现在流式读子进程 stderr，**读到完整的
+`first_frame_ms=` 行就停表**，再关管道、`wait`（不计时）。子进程的
+`otto-trace process.begin age_ms=` 用 `GetProcessTimes` 实测 CreateProcess → main
+（8.8–9.9 ms），main 内的 setup/frame 拆分保持不变。
+
+| 口径 | before（旧代码） | after（本轮） |
+| --- | --- | --- |
+| 旧：到子进程退出 | 338.95 ms | 202.69 ms（−40.2 %） |
+| 新：到首帧那一行 | 242.22 ms | **128.12 ms**（−47.5 %） |
+| 新·同一时段交替对测（3 轮中位） | 261.39 ms | 137.36 ms（−47.4 %） |
+
+> 首帧数字对本机系统负载敏感：同一份二进制在 127–177 ms 之间摆过（首个 HWND
+> 59→90 ms）。所以同时给安静窗口的绝对值和"before/after 交替对测"的比值，
+> 两者一致（−47 % 级），不是环境噪声。
+
+### 9.2 分段计时（`OTTO_TRACE=1`）
+
+app 打 `otto-trace …`、nanoui 打 `nanoui-trace …`，默认零开销：
+
+```text
+otto-trace process.begin age_ms=9.86        CreateProcess → main
+otto-trace setup.library d=6.99            读库 + JSON decode
+otto-trace setup.live    d=0.65            watcher 线程
+otto-trace setup.thumbs  d=0.75            取图层
+otto-trace setup.preview d=0.05            预览线程
+otto-trace setup.app     d=59.22           App.create（= 进程里第一个 HWND）
+otto-trace setup.state   d=0.03
+otto-trace setup.window  d=0.01
+nanoui-trace font.scan   d=30.19           dirs=1 files=372 faces=409 walk_ms=0.74
+                                           open_ms=11.05 alloc_ms=0.06 header_ms=7.34
+                                           table_ms=6.03 style_ms=6.75
+bench-first-frame: frame build_ms=31.35 layout_ms=4.55 paint_ms=9.96 nodes=144 instances=251
+bench-first-frame: glyphs sprites=116 rasterized=116 raster_ms=5.62
+bench-first-frame: first_frame_ms=113.75 setup_ms=67.71 frame_ms=46.04 ws_mib=70.95
+```
+
+结论：**setup 的 59 ms 是进程内第一个 `CreateWindowExW`**（第二个只要 0.87 ms，
+去掉 `SetProcessDPIAware` 反而更慢），是系统一次性成本；**frame 的 30 ms 是字体扫描**。
+
+### 9.3 做了什么
+
+1. **字体扫描不再为每个字体映射整个文件**（`tt/fontdb.zig`）：只读 64 KB 头窗口，
+   表在窗口外就按表目录偏移只读那几 KB，偏移平移到小缓冲（`readStyleFar`）。
+   扫描 139.15 → 30.19 ms；WS 不变（70.2 → 70.9 MiB）。
+   注意：**"复用一个 37 MB 大缓冲"是错的**——实测 `VirtualAlloc` 提交即驻留
+   （37 MB 立刻 +37 MB WorkingSet），所以缓冲必须小。
+2. **配套加固**（`tt/font.zig`）：name 记录/字符串以 name 表范围为界，
+   保证复用的窗口缓冲不会被当成另一个字体的名字。
+3. 字形图集核实为**已经按需**（首帧 116 个精灵 = 116 次栅格，无预栅格化），不动。
+4. watcher/thumbs/preview 延后：合计 ≈ 1.0 ms，按数据不做。
+5. 进程启动（9 ms）与首个 HWND（59 ms）：如实记录，不做。
+
+### 9.4 最终数字与建议
+
+release / 2000 条：**冷启动→首帧 126.47 ms**（3 次 137.71/126.02/126.47，main 内
+110.02 = setup 63.6 + frame 46.4），其余五项不变（PASS=5 FAIL=1 SKIP=0）。
+同一天连续复跑读数为 126–148 ms（系统负载上来时 165–177 ms，首个 HWND 从 59 涨到
+90），所以另有 9.1 的交替对测：before 261.39 → after 137.36（−47.4 %）。
+三套测试：core 78/78、ports 103/103、app 125/125；debug 与 release 都构建成功。
+
+100 ms 的差距（约 26 ms）几乎全在字体扫描（30 ms），而不可压缩部分约 88 ms
+（进程创建 9 + 首个 HWND 59 + 字形栅格 6 + 布局/display list 15 的硬部分 + 测量 8）。
+**建议把 headless 目标改为 150 ms、用户可见首帧改为 200 ms**；若继续追 100 ms，
+优先级是 ①并行字体扫描 ②字体索引落盘缓存（生产形态）③库加载。
+

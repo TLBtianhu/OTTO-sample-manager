@@ -1,0 +1,40 @@
+﻿.\zig-out\bin\otto-lite.exe : otto-trace setup.library d=7.36 t=7.36
+At line:1 char:318
++ ... _TRACE='1'; .\zig-out\bin\otto-lite.exe .\fixtures\library.json --ben ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (otto-trace setup.library d=7.36 t=7.36:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+otto-trace setup.live d=0.66 t=8.02
+otto-trace setup.thumbs d=0.30 t=8.32
+otto-trace setup.preview d=0.03 t=8.35
+nanoui-trace app.create d=8.36 t=8.36
+nanoui-trace app.dpi d=0.38 t=8.73
+nanoui-trace app.fdwatch d=66.32 t=75.06
+otto-trace setup.app d=66.73 t=75.07
+otto-trace setup.state d=0.02 t=75.10
+otto-trace setup.window d=0.01 t=75.11
+nanoui-trace tester.text d=0.21 t=75.27
+otto-lite: filter="" matched=2000/2000
+nanoui-trace font.scan.start d=0.76 t=76.02
+nanoui-trace font.scan d=139.15 t=215.17 dirs=1 entries=570 files=372 faces=409 bundled=0 walk_ms=1.32 open_ms=13.41 al
+loc_ms=70.04 header_ms=8.68 parse_ms=0.05 table_ms=10.22 style_ms=0.08 release_ms=0.21
+otto-lite: 缩略图 ready=0 本帧画图=0 requested=21 no_handler=0 cached=0 failed=0 pending=21 l3_hit=0 l3_miss=0 l3_write=0 l3_e
+victed=0 l3_bytes=0 l3_corrupt=0
+[thumb-host] helper 启动 pid=19720 size=64（累计 spawn=1）
+nanoui-trace tester.frame d=14.66 t=229.84
+bench-first-frame: frame build_ms=140.42 layout_ms=4.14 paint_ms=10.00 other_ms=0.18 passes=1 nodes=144 instances=251
+bench-first-frame: glyphs sprites=116 rasterized=116 raster_ms=5.67 phases=6
+bench-first-frame: font files=372 faces=409 walk_ms=1.32 open_ms=13.41 alloc_ms=70.04 header_ms=8.68 parse_ms=0.05 tabl
+e_ms=10.22 style_ms=0.08 release_ms=0.21 loads=2 load_ms=4.06 fallback=38 fallback_ms=3.81 found=38 layouts=67
+bench-first-frame: qpc_ms=229.87
+bench-first-frame: first_frame_ms=229.85 setup_ms=75.11 frame_ms=154.74 size=380x700 scale=2 ws_mib=70.21
+[thumb-host:19720] 启动 size=64
+[thumb-host:19720] D:/lib/voicebank/1/s_0.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/2/s_1.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/3/s_2.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/4/s_3.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/5/s_4.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/6/s_5.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/7/s_6.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:19720] D:/lib/voicebank/8/s_7.wav -> file_missing（HRESULT=0x80070003）

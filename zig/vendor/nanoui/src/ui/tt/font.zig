@@ -123,11 +123,16 @@ pub const Style = struct {
         if (t.name == 0) return;
         const count = be16(data, t.name + 2);
         const strings = t.name + be16(data, t.name + 4);
+        // A record and its string must lie inside the name table: a scan
+        // reads a file's tables where they are, not the whole file, so
+        // anything past the table is not this font's.
+        const end = @min(data.len, t.name + t.name_len);
         // The typographic family (16) over the legacy one (1), Windows
         // Unicode names over Mac Roman ones.
         var best: u8 = 0;
         for (0..count) |i| {
             const r = t.name + 6 + 12 * i;
+            if (r + 12 > end) break;
             const platform = be16(data, r);
             const id = be16(data, r + 6);
             if (id != 1 and id != 16) continue;
@@ -137,7 +142,7 @@ pub const Style = struct {
             if (rank <= best) continue;
             const len = be16(data, r + 8);
             const off = strings + be16(data, r + 10);
-            if (off + len > data.len) continue;
+            if (off + len > end) continue;
             best = rank;
             s.family_len = 0;
             if (unicode) {

@@ -9,6 +9,11 @@
 //! 都发生在 `main` 之前或之内，只有**从 CreateProcess 到子进程打印第一帧耗时**
 //! 这一段墙钟才包含它们。父进程量的正是这一段；子进程自己再报一个 `main` 内的
 //! 数（不含进程创建），两个数都给，报告里不会把两者混为一谈。
+//!
+//! 计时终止点是**子进程打出 `bench-first-frame:`（含 `first_frame_ms=`）那一行**，
+//! 不是子进程退出：退出路径（收工作线程、DLL 分离、被懒启动的缩略图 helper 继承
+//! 管道而拖住 EOF）在本机稳定贡献 50–90 ms，和"冷启动到首帧"无关。见
+//! `measureFirstFrame` 的注释与 `PERF.md` §4.2。
 
 const std = @import("std");
 const stats = @import("bench_stats.zig");
@@ -69,7 +74,7 @@ pub fn residentMax(times: usize) ?Resident {
 }
 
 pub const FirstFrame = struct {
-    /// 父进程看到的墙钟：CreateProcess → 子进程退出（含正常收尾）。
+    /// 父进程看到的墙钟：CreateProcess → 子进程打出首帧那一行（不含退出）。
     wall_ms: f64,
     /// 子进程在 `main` 里自量的：入口 → 第一帧构建完成。解析不到就是 null。
     internal_ms: ?f64,
@@ -84,42 +89,82 @@ pub const FirstFrame = struct {
 
 pub const FirstFrameError = error{ FirstFrameChildFailed, MissingExecutable };
 
+/// The child prints this once the first frame is built; the clock stops there.
+const first_frame_marker = "first_frame_ms=";
+
 /// `argv[0]` 必须是本 exe 的绝对路径（`--bench` 自己的路径）。
+///
+/// **计时终点是子进程打出 `first_frame_ms=` 那一行，不是子进程退出。**
+/// 旧写法用 `std.process.run` 等管道 EOF，于是把"首帧之后"的东西也算进了首帧：
+///   * `Tester.deinit` 之类收尾（本机实测 3 ms）；
+///   * 进程退出本身（本机实测约 50 ms：ExitProcess 收 3 个工作线程 + 等 DLL 分离）；
+///   * 首帧期间被懒启动的缩略图 helper 进程——它继承了 stderr，父进程要等它退出
+///     才看到 EOF。
+/// 后两项与"冷启动到首帧"无关，却稳定贡献 50–90 ms。这里改成流式读 stderr，
+/// 看到那一行就停表并收掉子进程；退出码不再参与判定（子进程是被主动结束的）。
 pub fn measureFirstFrame(
     io: std.Io,
     allocator: std.mem.Allocator,
     exe: []const u8,
     library: []const u8,
 ) FirstFrameError!FirstFrame {
+    _ = allocator;
     const argv = [_][]const u8{ exe, library, "--bench-first-frame" };
     const started = stats.now(io);
-    const result = std.process.run(allocator, io, .{
+    var child = std.process.spawn(io, .{
         .argv = &argv,
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(256 * 1024),
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .pipe,
         .create_no_window = true,
     }) catch |err| {
         std.debug.print("bench: 首帧子进程起不来（{s}）exe={s}\n", .{ @errorName(err), exe });
         return error.FirstFrameChildFailed;
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    const wall_ms = stats.sinceMs(io, started);
+    const pipe = child.stderr orelse return error.FirstFrameChildFailed;
+    var log: [64 * 1024]u8 = undefined;
+    var len: usize = 0;
+    var wall_ms: ?f64 = null;
+    while (true) {
+        var chunk: [4096]u8 = undefined;
+        const n = pipe.readStreaming(io, &.{chunk[0..]}) catch break; // EndOfStream
+        const take = @min(n, log.len - len);
+        @memcpy(log[len..][0..take], chunk[0..take]);
+        len += take;
+        if (completeLine(log[0..len], first_frame_marker)) {
+            wall_ms = stats.sinceMs(io, started);
+            break;
+        }
+    }
+    // The probe's work is done: stop reading here instead of waiting for
+    // EOF, which would count the process's teardown. Waiting for the child
+    // itself is cheap and closes its handles (and with them the thumbnail
+    // helper's job), so nothing is left behind.
+    if (child.stderr) |file| file.close(io);
+    child.stderr = null;
+    _ = child.wait(io) catch {};
 
-    if (!result.term.success()) {
+    const wall = wall_ms orelse {
         std.debug.print(
-            "bench: 首帧子进程失败（{s}）\n--- child stderr ---\n{s}\n",
-            .{ @errorName(error.FirstFrameChildFailed), result.stderr },
+            "bench: 首帧子进程没打出 {s}\n--- child stderr ---\n{s}\n",
+            .{ first_frame_marker, log[0..len] },
         );
         return error.FirstFrameChildFailed;
-    }
-    return .{
-        .wall_ms = wall_ms,
-        .internal_ms = parseNumber(result.stderr, "first_frame_ms="),
-        .setup_ms = parseNumber(result.stderr, "setup_ms="),
-        .frame_ms = parseNumber(result.stderr, " frame_ms="),
-        .ws_mib = parseNumber(result.stderr, "ws_mib="),
     };
+    return .{
+        .wall_ms = wall,
+        .internal_ms = parseNumber(log[0..len], first_frame_marker),
+        .setup_ms = parseNumber(log[0..len], "setup_ms="),
+        .frame_ms = parseNumber(log[0..len], " frame_ms="),
+        .ws_mib = parseNumber(log[0..len], "ws_mib="),
+    };
+}
+
+/// Whether `text` holds `marker` and then a whole line after it: the value
+/// is parsed from that line, so half a number must not stop the clock.
+fn completeLine(text: []const u8, marker: []const u8) bool {
+    const at = std.mem.indexOf(u8, text, marker) orelse return false;
+    return std.mem.indexOfScalarPos(u8, text, at, '\n') != null;
 }
 
 /// 子进程把 `bench-first-frame: first_frame_ms=12.34 ...` 打在 stderr 上。

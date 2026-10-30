@@ -9,6 +9,7 @@ const font = @import("tt/font.zig");
 const tt_raster = @import("tt/raster.zig");
 const icons = @import("icons.zig");
 const windows = @import("dwrite.zig");
+const trace = @import("trace.zig");
 
 const initial_size: u32 = 512;
 const max_size: u32 = 4096;
@@ -62,6 +63,10 @@ pub const Atlas = struct {
     scratch: std.ArrayList(u8) = .empty,
     native: windows.Cache = .{},
     phase_counts: std.AutoHashMapUnmanaged(u16, u8) = .empty,
+    /// Atlas misses and what rasterizing them cost, counted only while
+    /// `ui.trace` is on: what a first frame spends on its glyphs.
+    rasterized: usize = 0,
+    raster_ms: f64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) Atlas {
         const px = gpa.alloc(u8, @as(usize, initial_size) * initial_size) catch return .{ .gpa = gpa, .pixels = &.{}, .native_pixels = &.{}, .size = 0 };
@@ -186,7 +191,13 @@ pub const Atlas = struct {
             .bin = bin,
         };
         if (a.sprites.get(key)) |sp| return sp;
+        const traced = trace.on();
+        const started = if (traced) trace.stamp() else 0;
         const sp = a.rasterize(rf, g, bin);
+        if (traced) {
+            a.rasterized += 1;
+            a.raster_ms += trace.msSince(started);
+        }
         a.sprites.put(a.gpa, key, sp) catch {};
         return sp;
     }
