@@ -1,0 +1,10 @@
+.{
+    .name = .otto_watch,
+    .version = "0.1.0",
+    .fingerprint = 0x503c012da391ad3b,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
