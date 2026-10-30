@@ -48,6 +48,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
         // 库文件口岸：原子写 / 整读（容器格式在 core 的 library_binary）。
         .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
+        // 导入流水线的两个口岸：L0 扫描（真 Win32 属性/身份）与 L1 头部探测。
+        .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
+        .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
+        // WAV 头部解析：解码器（audio/wav.zig）与 probe 共用同一份块扫描。
+        .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
     };
 
     const app_module = b.createModule(.{
@@ -92,6 +97,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_caps", .module = caps_dep.module("otto_caps") },
             .{ .name = "otto_drag", .module = drag_dep.module("otto_drag") },
             .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
+            .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
+            .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
+            .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
         },
     });
     test_module.addOptions("build_options", build_options);

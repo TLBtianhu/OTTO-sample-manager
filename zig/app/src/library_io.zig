@@ -47,8 +47,14 @@ pub fn formatOf(bytes: []const u8) Format {
 /// 读取上限取两套格式上限的较大者；JSON 再有 `store.max_file_bytes` 的独立
 /// 检查，保持原来"超大 JSON 明确报 FileTooLarge"的行为。
 pub fn load(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8) LoadError!core.store.Library {
+    return loadWith(init.io, allocator, path);
+}
+
+/// `load` 的 io 版本：不开窗的命令行流水线（`--import`）与测试只需要 `std.Io`，
+/// 不必伪造一个 `std.process.Init`。
+pub fn loadWith(io: std.Io, allocator: std.mem.Allocator, path: []const u8) LoadError!core.store.Library {
     const read_limit = @max(core.library_binary.max_file_bytes, core.store.max_file_bytes) + 1;
-    const bytes = try library_file.readAll(allocator, init.io, path, read_limit);
+    const bytes = try library_file.readAll(allocator, io, path, read_limit);
     defer allocator.free(bytes);
 
     if (formatOf(bytes) == .otto) return core.library_binary.decode(allocator, bytes);
@@ -63,9 +69,19 @@ pub fn save(
     path: []const u8,
     library: *const core.store.Library,
 ) SaveError!usize {
+    return saveWith(init.io, allocator, path, library);
+}
+
+/// `save` 的 io 版本（同上）。
+pub fn saveWith(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    library: *const core.store.Library,
+) SaveError!usize {
     const bytes = try core.library_binary.encode(allocator, library);
     defer allocator.free(bytes);
-    try library_file.writeAtomic(allocator, init.io, path, bytes);
+    try library_file.writeAtomic(allocator, io, path, bytes);
     return bytes.len;
 }
 
@@ -73,8 +89,13 @@ pub fn save(
 /// 损坏文件在这里就会拿到 `BadMagic` / `UnknownVersion` / `Truncated` /
 /// `ChecksumMismatch` / `TooLarge` 这些具名错误。
 pub fn inspect(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8) LoadError!Info {
+    return inspectWith(init.io, allocator, path);
+}
+
+/// `inspect` 的 io 版本（导入测试用它读回 `.otto` 核对条数）。
+pub fn inspectWith(io: std.Io, allocator: std.mem.Allocator, path: []const u8) LoadError!Info {
     const read_limit = @max(core.library_binary.max_file_bytes, core.store.max_file_bytes) + 1;
-    const bytes = try library_file.readAll(allocator, init.io, path, read_limit);
+    const bytes = try library_file.readAll(allocator, io, path, read_limit);
     defer allocator.free(bytes);
 
     const format = formatOf(bytes);

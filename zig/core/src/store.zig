@@ -61,7 +61,74 @@ pub const Library = struct {
         const position = self.folder_index.get(folder_id) orelse return null;
         return &self.folders[position];
     }
+
+    /// 把 `incoming` 追加进库，返回真正追加的条数。
+    ///
+    /// 字符串全部**拷贝进自己的 arena**：调用方可以立刻释放来源（导入流水线的扫描
+    /// 结果是临时 arena，扫描结束后就没了）。id 已存在的条目被跳过——导入层会先做
+    /// 路径/身份去重，这里只是防御，不替调用方记账。
+    ///
+    /// 只追加样本，不碰分组与目录：新样本没有 `group_ids` / `folder_id`，
+    /// `rebuildFolderMembership` 那一套关系修复不需要重跑。
+    pub fn appendSamples(self: *Library, incoming: []const model.Sample) error{OutOfMemory}!usize {
+        const allocator = self.arena.allocator();
+        var samples: std.ArrayList(model.Sample) = .empty;
+        try samples.ensureTotalCapacity(allocator, self.samples.len + incoming.len);
+        try samples.appendSlice(allocator, self.samples);
+
+        var added: usize = 0;
+        for (incoming) |sample| {
+            if (self.sample_index.contains(sample.id)) continue;
+            const copy = try cloneSample(allocator, sample);
+            try samples.append(allocator, copy);
+            try self.sample_index.put(allocator, copy.id, @intCast(samples.items.len - 1));
+            added += 1;
+        }
+
+        if (added != 0) {
+            self.samples = try samples.toOwnedSlice(allocator);
+            self.report.samples_loaded = self.samples.len;
+        }
+        return added;
+    }
 };
+
+/// 新建一个空库。导入流水线在没给 `--library` 时用它，不必先写一个空 JSON。
+///
+/// 返回值和 `load` 一样自带 arena；调用方 `deinit()` 一次即可。
+pub fn empty(backing: std.mem.Allocator) error{OutOfMemory}!Library {
+    return .{
+        .arena = std.heap.ArenaAllocator.init(backing),
+        .samples = &.{},
+        .groups = &.{},
+        .folders = &.{},
+        .sample_index = .{},
+        .group_index = .{},
+        .folder_index = .{},
+        .folder_order = &.{},
+        .group_order = &.{},
+        .settings = .{},
+        .report = .{},
+    };
+}
+
+/// 深拷贝一条样本：id / 名称 / 扩展名 / 路径 / 目录 / 原始 id / 分组 id 全部进
+/// `allocator`（库的 arena），标量字段直接复制。
+fn cloneSample(allocator: std.mem.Allocator, sample: model.Sample) error{OutOfMemory}!model.Sample {
+    var copy = sample;
+    copy.id = try allocator.dupe(u8, sample.id);
+    copy.file_name = try allocator.dupe(u8, sample.file_name);
+    copy.file_ext = try allocator.dupe(u8, sample.file_ext);
+    copy.file_path = try allocator.dupe(u8, sample.file_path);
+    if (sample.folder_id) |folder_id| copy.folder_id = try allocator.dupe(u8, folder_id);
+    copy.original_id = try allocator.dupe(u8, sample.original_id);
+    const group_ids = try allocator.alloc([]const u8, sample.group_ids.len);
+    for (sample.group_ids, 0..) |group_id, index| {
+        group_ids[index] = try allocator.dupe(u8, group_id);
+    }
+    copy.group_ids = group_ids;
+    return copy;
+}
 
 /// 从 JSON 文本加载。失败时不留下任何分配。
 pub fn load(backing: std.mem.Allocator, text: []const u8) LoadError!Library {
