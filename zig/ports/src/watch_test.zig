@@ -1,4 +1,4 @@
-﻿//! 监听口岸测试：真文件系统 + 真 Win32，没有 mock。
+//! 监听口岸测试：真文件系统 + 真 Win32，没有 mock。
 //!
 //! 规矩：所有等待都是「轮询 + 超时」（每步最多 2 秒、10ms 一次），不用固定 sleep
 //! 假装事件已经到了；Windows 的变更通知本来就会合并、会延迟。
@@ -518,4 +518,23 @@ test "解码：内核溢出先降级悬挂 OLD，再报 overflow" {
     try std.testing.expectEqualStrings("half.txt", collector.items[0].path());
     try std.testing.expectEqual(win.Action.overflow, collector.items[1].action);
     try std.testing.expectEqual(@as(u32, 0), collector.items[1].lost);
+}
+
+test "读缓冲按 DWORD 对齐：bump 分配器也不会把监听打死" {
+    // ReadDirectoryChangesW 的缓冲区地址不是 4 的倍数时，Windows 直接返回
+    // ERROR_NOACCESS(998)，线程当场退出。调用方给的是 arena/bump 时地址可能落在
+    // 2 mod 4 上，所以这条性质由口岸自己保证，而不是靠调用方的分配器碰巧对齐。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(io, &buffer);
+
+    var context = try win.Context.open(arena.allocator(), buffer[0..length]);
+    defer context.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(context.buffer.ptr) % @alignOf(u32));
 }
