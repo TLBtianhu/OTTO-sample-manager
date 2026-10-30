@@ -1,4 +1,4 @@
-﻿# 一条命令产出两个分发物（都在 dist\ 下）：
+# 一条命令产出两个分发物（都在 dist\ 下）：
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\package.ps1 -Version 0.0.1
 #
@@ -16,7 +16,9 @@ param(
   [string]$Zig = 'C:\Users\30680\zig\zig-x86_64-windows-0.17.0\zig.exe',
   [string]$Nsis = 'C:\Program Files (x86)\NSIS\makensis.exe',
   [string]$AppDir = '',
-  [string]$OutDir = ''
+  [string]$OutDir = '',
+  [string]$SignKey = 'C:\Users\30680\otto-keys\otto-lite.key',
+  [switch]$NoSign
 )
 
 $ErrorActionPreference = 'Stop'
@@ -185,14 +187,53 @@ if (-not (Test-Path $setup)) { throw "安装包没有生成: $setup" }
 Remove-Item $installerStage -Recurse -Force
 
 # ---------------------------------------------------------------------------
-# 5) 账目：只有两个分发物，尺寸打出来
+# 5) 签名：用私钥签，公钥只负责验证（zig/keys/README.md）
+# ---------------------------------------------------------------------------
+
+$signatures = @()
+if (-not $NoSign -and (Test-Path $SignKey)) {
+  $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw $SignKey
+  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+  try {
+    foreach ($artifact in @($zip, $setup)) {
+      Write-Output ('== 签名 ' + (Split-Path -Leaf $artifact))
+      # npx 会往 stderr 打 Info 行；在 $ErrorActionPreference='Stop' 下这台 Windows
+      # PowerShell 会把它当成终止错误，所以这一段单独放宽。
+      $previous = $ErrorActionPreference
+      $ErrorActionPreference = 'Continue'
+      npx --yes '@tauri-apps/cli@2' signer sign --app-version $Version $artifact 2>&1 | Out-Null
+      $code = $LASTEXITCODE
+      $ErrorActionPreference = $previous
+      if ($code -ne 0) { throw "签名失败（退出码 $code）: $artifact" }
+      $sig = $artifact + '.sig'
+      if (-not (Test-Path $sig)) { throw "签名文件没有生成: $sig" }
+      $signatures += $sig
+    }
+  } finally {
+    Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+  }
+} else {
+  Write-Warning "未签名：没有私钥（$SignKey）或指定了 -NoSign。发布时请附 SHA-256。"
+}
+
+# ---------------------------------------------------------------------------
+# 6) 账目：只有两个分发物（外加签名），尺寸打出来
 # ---------------------------------------------------------------------------
 
 Write-Output ''
 Write-Output '== 产物 =='
-foreach ($artifact in @($zip, $setup)) {
+foreach ($artifact in @($zip, $setup) + $signatures) {
   $item = Get-Item $artifact
-  '{0,-40} {1,12:N0} B' -f $item.Name, $item.Length
+  '{0,-44} {1,12:N0} B' -f $item.Name, $item.Length
+}
+if ($signatures.Count -gt 0) {
+  Write-Output ''
+  Write-Output '== 校验（任意一台装了 Node 的机器）=='
+  foreach ($sig in $signatures) {
+    $target = $sig.Substring(0, $sig.Length - 4)
+    Write-Output ("  node zig\tools\verify-minisign.js zig\keys\otto-lite.key.pub " + (Split-Path -Leaf $sig) + ' ' + (Split-Path -Leaf $target))
+  }
 }
 Write-Output ''
 Write-Output ("输出目录: " + $OutDir)
