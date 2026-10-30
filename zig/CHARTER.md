@@ -27,6 +27,19 @@ PR 里说明理由，而不是顺手做掉。
 | 三维 | blend / fbx | Windows Shell 缩略图（装了 Blender 就有） | 缩略图位图 |
 | 其它 | 任意有 shell handler 的文件 | Windows Shell 缩略图 | 缩略图位图 |
 
+**注意"缩略图"的真实性质：它是一个插件生态，不是我们的解码器。**
+
+- 能不能出图，取决于**这台机器上装了什么缩略图 handler**：PS 装 PSD/AI，codec pack
+  装 MKV，Blender 注册 .blend。同一份代码在两台机器上覆盖率可以完全不同。
+- 因此 API 必须区分三种状态：**有图 / 没有 handler / 出错**。"没有预览"是一个诚实的
+  答案，不是失败；但把"没有 handler"和"读文件失败"合并成一种，就永远说不清。
+- **handler 是第三方进程内 COM 组件**，会被加载进我们的地址空间，崩了、挂了都不是
+  我们的 bug。所以调用方不该假设它永远同进程——将来换到 helper 进程里跑，签名不变。
+- "没有 handler" 要能**负缓存**并带过期：用户随时可能装一个 codec pack，把结论变成
+  假的。
+- 反过来，如果某个格式真的很重要却没有 handler，**写一个 `IThumbnailProvider` 比写
+  解码器便宜得多**，而且 Explorer 也会跟着受益。
+
 **关键决定：通用预览走 Windows Shell 的缩略图 API（`IShellItemImageFactory`），
 不走 FFmpeg。**
 
