@@ -6,8 +6,14 @@
 //!   otto-lite --version              打印版本与运行形态（dev/portable/installed）
 //!   otto-lite --demo <dir>           文件监听自检（不取缩略图）
 //!   otto-lite --demo-thumbs <dir>    缩略图取图层自检（不开窗）
+//!   otto-lite --preview <file>       预览自检（不开窗，打印事实 + kind/outcome/摘要）
 //!   otto-lite --demo-transport       选择/路径/拖拽快照自检（不开窗、不碰剪贴板）
 //!   otto-lite --copy-now <file>      显式把 1 个文件写进剪贴板（CF_HDROP）
+//!
+//! 列表下方是一条固定高度的预览区（`preview_panel.zig`）：选中行变化时把样本交给
+//! 注册表，按 `Outcome` 的五个分支画图/文字/占位/原因；名称/大小/时长/路径是样本
+//! 自带的事实，无条件显示在预览区下方。本文件不认识任何媒体类型，也不判断扩展名
+//! ——换一个 provider 不需要改这里（ROADMAP M1 的验收）。
 //!
 //! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
 //! 便携版用 `<exe 目录>\data\library.json`，安装版用 `%APPDATA%\OTTO\library.json`。
@@ -27,12 +33,16 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
+const demo_preview = @import("demo_preview.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_watch = @import("demo_watch.zig");
 const live_mod = @import("live.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
+const preview_panel = @import("preview_panel.zig");
+const preview_providers = @import("providers/root.zig");
+const row_thumb = @import("row_thumb.zig");
 const selection_mod = @import("selection.zig");
 const thumbs_mod = @import("thumbs.zig");
 const transport_mod = @import("transport.zig");
@@ -43,9 +53,7 @@ const ui = nanoui.ui;
 /// 阻塞在 ReadDirectoryChangesW 上，这里只是把队列搬进 Index。
 const tick_ms: u64 = 150;
 
-/// 每一行左侧缩略图的边长（点）。真正向系统请求的像素是 64（2x 屏上的 32 点），
-/// 缓存键里拼的是请求像素数，不是这里的点数。
-const thumb_side: f32 = 32;
+// 每一行左侧缩略图的边长在 `row_thumb.zig`（32 点）；向系统请求 64px（2x 屏 1:1）。
 
 /// 按住行后移动多少点算拖拽。和资源管理器一样，小于阈值的手抖仍按点击处理。
 const drag_threshold: f32 = 6;
@@ -60,6 +68,8 @@ const State = struct {
     /// 当前视图；每次 poll 之后都要重新取——`Index.apply` 的扩容会让数组搬家。
     samples: []const core.model.Sample,
     thumbs: *thumbs_mod.Thumbs,
+    /// 底部预览条：注册表 + 工作线程 + 五分支渲染（见 `preview_panel.zig`）。
+    preview: *preview_panel.Panel,
     /// 选择模型（下标 + 锚点 + 当前行）；帧里只改它，不碰磁盘。
     selection: selection_mod.Selection = .{},
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
@@ -120,7 +130,6 @@ const State = struct {
         // 上一帧的 hot 落在行上，容器的 interact 不会 clicked（见 nanoui
         // `context_hooks.interact` 的 top/active 规则）。
         const body = ui.div(c).sizeFull();
-        defer body.end();
         const body_it = body.interaction();
 
         var rows = ui.list(c, .{ .count = s.samples.len, .row_height = 44 });
@@ -140,6 +149,13 @@ const State = struct {
             // 松手（或按钮已经不在了）就放弃这次按压：定时器若还没跑，会看到空计划。
             if (c.input.released or !c.input.down) s.cancelPress();
         }
+        // 列表到此为止：预览条必须是它的兄弟，不能变成列表的子节点。
+        body.end();
+
+        // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由
+        // `tick` 接手，这里只按 Outcome 的五个分支画。
+        s.preview.sync(s.previewRow());
+        s.preview.draw(c);
 
         s.report();
     }
@@ -163,7 +179,7 @@ const State = struct {
         const it = ui.pressable(c, style, hover_color);
         defer ui.end(c);
 
-        if (drawThumb(c, s.thumbs, sample)) s.rows_with_image += 1;
+        if (row_thumb.draw(c, s.thumbs, sample)) s.rows_with_image += 1;
         ui.textf(c, .{ .size = 11 }, "{d:0>4}", .{i + 1});
         ui.text(c, sample.file_name, .{ .size = 13 });
         ui.textf(c, .{ .size = 11 }, "{d:.2}s", .{sample.duration});
@@ -274,6 +290,14 @@ const State = struct {
         };
     }
 
+    /// 底部预览条要预览的那一行：最近点击的"当前行"；没有选中/越界就是 null。
+    /// 用 `cursor` 而不是"选中集合的第一个"，这样 Ctrl+点取消选中时预览条不闪。
+    fn previewRow(s: *const State) ?*const core.model.Sample {
+        const row = s.selection.cursor orelse return null;
+        if (row >= s.samples.len) return null;
+        return &s.samples[row];
+    }
+
     /// `--select=0,1`：截图/自检用的预置选择，不是给最终用户的入口。
     fn seedSelection(s: *State, text: []const u8) void {
         var buffer: [64]usize = undefined;
@@ -325,6 +349,13 @@ const State = struct {
         // 拖放循环里不许再碰 UI（连轮询也不做）：等它返回后下一次 tick 再补。
         if (!s.transport.busy) {
             s.refresh();
+            // 预览是异步的：工作线程交回结果就换画面并打一行账。`poll` 只在
+            // UI 线程调；`sync` 在 view 里提交，这里不重复提交。
+            if (s.preview.poll()) {
+                var preview_line: [96]u8 = undefined;
+                std.debug.print("otto-lite: preview {s}\n", .{s.preview.describe(&preview_line)});
+                if (s.window) |window| window.redraw();
+            }
             if (s.flash_left > 0) {
                 s.flash_left -= 1;
                 if (s.flash_left == 0) if (s.window) |window| window.redraw();
@@ -404,71 +435,6 @@ fn nativeHandle(window: ?*nanoui.Window) ?*anyopaque {
     return null;
 }
 
-/// 一行左侧的缩略图槽：有图画图，没有图按原因画占位图标。
-/// 返回 true 表示这一帧真的画上了缩略图（`State.report` 拿它数行）。
-fn drawThumb(c: *ui.Context, thumbs: *thumbs_mod.Thumbs, sample: core.model.Sample) bool {
-    // 先问取图层，再开盒子：占位要按答案选背景，而 `div` 的样式必须在子节点之前设。
-    const outcome = thumbs.acquire(sample);
-
-    const slot = ui.div(c).w(thumb_side).h(thumb_side).rounded(6).itemsCenter().justifyCenter();
-    defer slot.end();
-
-    switch (outcome) {
-        .ready => |view| {
-            const drawn = ui.image(c, .{
-                .key = view.key,
-                .source = .{ .pixels = .{
-                    .bgra = view.pixels,
-                    .width = view.width,
-                    .height = view.height,
-                    .stride = view.stride,
-                } },
-                .max_width = thumb_side,
-                .max_height = thumb_side,
-                // 取图层按 64px 请求（见 thumbs.default_size_px）：这里声明「源图是 2x」，
-                // 于是 2x 屏上 1:1 显示、1x 屏由图集缩到 32 点。
-                .scale = 2,
-                .radius = 6,
-            });
-            if (drawn) return true;
-            // 图集拒了这块像素（理论上不会）：不静默留空，退回占位。
-            placeholder(c, slot, "photo");
-            return false;
-        },
-        .pending => {
-            // 排队 / 正在取：先按类型给占位，取到了下一次 redraw 会换成真图。
-            placeholder(c, slot, placeholderIcon(sample));
-            return false;
-        },
-        .no_handler => {
-            // 能力门禁：这台机器没有该扩展名的 handler。音频用波形，其它用文档。
-            placeholder(c, slot, placeholderIcon(sample));
-            return false;
-        },
-        .failed => {
-            // 文件没了 / Shell 出错：给一个警告三角，别让它看起来像「没有预览」。
-            placeholder(c, slot, "exclamationmark.triangle");
-            return false;
-        },
-    }
-}
-
-fn placeholder(c: *ui.Context, slot: ui.Div, icon_name: []const u8) void {
-    _ = slot.bg(c.theme.track);
-    ui.icon(c, icon_name, .{ .size = 16, .color = c.theme.muted });
-}
-
-/// 没有 handler 时用哪个图标：音频认波形，其余认文档。
-fn placeholderIcon(sample: core.model.Sample) []const u8 {
-    const audio_exts = [_][]const u8{
-        ".wav", ".mp3", ".flac", ".aiff", ".aif", ".ogg", ".m4a", ".wma", ".aac", ".opus", ".caf",
-    };
-    for (audio_exts) |ext| {
-        if (std.ascii.eqlIgnoreCase(sample.file_ext, ext)) return "waveform.path.ecg";
-    }
-    return "doc";
-}
-
 /// 窗口标题：`OTTO Lite <版本> — <行数>`（见 `version.windowTitle`）。
 fn setTitle(window: *nanoui.Window, total: usize) void {
     var buffer: [96]u8 = undefined;
@@ -483,6 +449,7 @@ pub fn main(init: std.process.Init) !void {
             "用法：otto-lite [library.json] [--watch <dir>] [--select=0,1]\n" ++
                 "      otto-lite --version\n" ++
                 "      otto-lite --demo <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
+                "      otto-lite --preview <file>\n" ++
                 "      otto-lite --copy-now <file>\n",
             .{},
         );
@@ -522,6 +489,13 @@ pub fn main(init: std.process.Init) !void {
 
     if (options.demo_dir) |dir_path| return demo_watch.run(init, allocator, dir_path);
 
+    // 预览注册表自检：和 UI 走同一个 registry，但不开窗、不碰 nanoui。
+    if (options.preview_path) |path| {
+        const code = try demo_preview.run(init, init.gpa, path);
+        if (code != 0) std.process.exit(code);
+        return;
+    }
+
     // 位置参数优先；没有就按运行形态给默认库（见文件头）。
     const library_path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
     const library = try core.store.loadCwdFile(allocator, init.io, library_path);
@@ -536,6 +510,11 @@ pub fn main(init: std.process.Init) !void {
     const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{});
     defer thumbs.deinit();
 
+    // 预览条也用 `init.gpa`：工作线程要用它分配位图/文本。注册表只有一张
+    // （`providers/root.zig`），`--preview` 自检与 UI 看到的是同一份顺序。
+    const panel = try preview_panel.Panel.init(init.gpa, init.io, &preview_providers.registry, .{});
+    defer panel.deinit();
+
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite" });
     defer app.destroy();
 
@@ -544,6 +523,7 @@ pub fn main(init: std.process.Init) !void {
         .live = &live,
         .samples = live.samples(),
         .thumbs = thumbs,
+        .preview = panel,
         .transport = transport_mod.Transport.init(init.gpa),
     };
     defer state.selection.deinit(init.gpa);

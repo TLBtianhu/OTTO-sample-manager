@@ -14,6 +14,8 @@ pub const Options = struct {
     version_requested: bool = false,
     demo_dir: ?[]const u8 = null,
     demo_thumbs_dir: ?[]const u8 = null,
+    /// `--preview <file>`：只走注册表打印一次预览摘要，不开窗口。
+    preview_path: ?[]const u8 = null,
     demo_transport: bool = false,
     watch_dir: ?[]const u8 = null,
     copy_now: ?[]const u8 = null,
@@ -33,6 +35,12 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             index += 1;
             if (index == args.len) return error.MissingValue;
             options.demo_thumbs_dir = args[index];
+        } else if (std.mem.eql(u8, arg, "--preview")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.preview_path = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--preview=")) {
+            options.preview_path = arg["--preview=".len..];
         } else if (std.mem.eql(u8, arg, "--demo")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -105,4 +113,14 @@ test "缺值返回 MissingValue" {
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--watch" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--copy-now" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--select" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--preview" }));
+}
+
+test "--preview 两种写法都收；它是开关 + 值，不是布尔" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--preview", "img00.png" });
+    try testing.expectEqualStrings("img00.png", spaced.preview_path.?);
+
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--preview=C:\\samples\\a.wav" });
+    try testing.expectEqualStrings("C:\\samples\\a.wav", joined.preview_path.?);
+    try testing.expect(joined.library_path == null);
 }
