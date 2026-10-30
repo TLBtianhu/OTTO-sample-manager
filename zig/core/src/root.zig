@@ -9,6 +9,7 @@
 //!   * annotations —— 以身份为键的用户注释表（分组 / 标签 / 评分）与旧库迁移
 //!   * cache       —— 统一字节预算缓存（预算 / LRU / pin / 软配额 / 统计）
 //!   * index       —— 在不可变 Library 之上滚动应用文件变更事件的可变视图
+//!   * rescan      —— 局部重扫的纯差分：身份优先，无身份退回 路径+大小+mtime
 //!
 //! 只依赖 Zig 0.17 标准库，没有 @cImport、没有外部依赖。
 
@@ -21,6 +22,7 @@ pub const query = @import("query.zig");
 pub const cache = @import("cache.zig");
 pub const annotations = @import("annotations.zig");
 pub const index = @import("index.zig");
+pub const rescan = @import("rescan.zig");
 
 /// 内核数据层版本号，与 build.zig.zon 保持一致。
 pub const version = "0.1.0";

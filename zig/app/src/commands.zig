@@ -12,6 +12,7 @@ const std = @import("std");
 const demo_filter = @import("demo_filter.zig");
 const demo_play = @import("demo_play.zig");
 const demo_preview = @import("demo_preview.zig");
+const demo_rescan = @import("demo_rescan.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_watch = @import("demo_watch.zig");
@@ -57,6 +58,9 @@ pub fn run(
         try demo_watch.run(init, allocator, dir_path);
         return 0;
     }
+
+    // 溢出重扫自检：删 / 改 / 加 + 强制溢出 + 后台重扫，全链路不开窗。
+    if (options.demo_rescan_dir) |dir_path| return try demo_rescan.run(init, dir_path);
 
     // 预览注册表自检：和 UI 走同一个 registry，但不开窗、不碰 nanoui。
     if (options.preview_path) |path| return try demo_preview.run(init, init.gpa, path);

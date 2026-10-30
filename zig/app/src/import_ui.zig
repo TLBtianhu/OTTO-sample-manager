@@ -321,7 +321,7 @@ pub const Import = struct {
 
         const next_live = try self.allocator.create(live_mod.Live);
         errdefer self.allocator.destroy(next_live);
-        next_live.* = try live_mod.Live.init(self.allocator, next_library, root);
+        next_live.* = try live_mod.Live.init(self.allocator, self.io, next_library, root);
         errdefer next_live.deinit();
 
         old_live.deinit();
@@ -488,7 +488,7 @@ test "start → 工作线程 → 重载：库指针、样本和落盘目标都�
         live_ptr.deinit();
         testing.allocator.destroy(live_ptr);
     }
-    live_ptr.* = try live_mod.Live.init(testing.allocator, library_ptr, watch_root);
+    live_ptr.* = try live_mod.Live.init(testing.allocator, testing.io, library_ptr, watch_root);
     try testing.expectEqual(@as(usize, 0), live_ptr.samples().len);
 
     var import = try Import.init(testing.allocator, testing.io, &library_ptr, &live_ptr, library_path);

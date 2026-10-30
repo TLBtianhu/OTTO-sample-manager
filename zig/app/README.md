@@ -320,6 +320,11 @@ zig-out/bin/otto-lite.exe C:\src\otto-testkit\library.json --filter=
 # file watching: 3 empty wavs → watch → a 4th arrives
 zig-out/bin/otto-lite.exe --demo <dir>
 
+# overflow rescan: 3 files → delete/change/add → injected overflow → debounced
+# re-scan; prints before=3 after=3 added=1 removed=1 modified=1, then a clean
+# second scan must be 0/0/0 (exit 0/1)
+zig-out/bin/otto-lite.exe --demo-rescan <dir>
+
 # thumbnail layer: creates red.bmp (real 64×64 BMP), tone.wav and mystery.xyz
 # (no handler), fetches them twice, prints the account and exits 0/1
 zig-out/bin/otto-lite.exe --demo-thumbs <dir>
