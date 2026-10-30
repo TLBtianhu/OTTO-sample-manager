@@ -43,6 +43,57 @@ Pixels are owned by the cache. Rows pin their entry while the frame is drawn
 (`view` → `paint`) and unpin at the start of the next frame. `tick` redraws when
 the atomic ready counter changes.
 
+## Preview and selection
+
+The strip below the list (150 points) has three parts:
+
+- **the preview area** (left slot + outcome text), driven only by the registry;
+- **the facts footer** (name / size / duration / extension, then the path), taken
+  straight from the `Sample` and always shown, even when there is no preview;
+- the registry decides the preview, not the view:
+
+```
+src/preview.zig          the contract: Kind / Request / Outcome (5 branches) / Provider / Registry
+src/providers/thumb.zig  Windows shell thumbnail, gated by otto_caps
+src/providers/root.zig   the one provider list (order = preference)
+src/preview_snapshot.zig the Sample copy a worker may keep (no dangling strings)
+src/sample_facts.zig     name / size / duration / path / extension — not a provider
+src/preview_panel.zig    worker thread + the five-branch strip (the only view)
+```
+
+`none.*` is a **decline**, not the final answer: a provider declares "I might
+handle this" cheaply in `supports`, and only `open` knows the truth. When `open`
+returns `none.*`, the registry asks the next provider; only a success branch
+(`image / audio / frames / text`) ends the search. If every provider declines,
+the most specific reason wins: `file_missing > failed > no_handler >
+unsupported` (no provider claiming the file at all is `unsupported`). That is
+how a shell handler which claims `.wav` but yields no bitmap stops hiding the
+honest answer.
+
+`Provider.open` is synchronous and may enter a third-party shell handler, so the
+panel runs it on its own thread: one pending request, newest wins, results land
+through `poll` (the same convention as `thumbs.zig`). A stuck handler blocks
+that thread, not the frame. Outcomes are owned by the caller's allocator and
+released with `Outcome.deinit`.
+
+The view switches on `image / audio / frames / text / none` only. It never looks
+at the file extension: adding an audio or frame provider changes
+`providers/root.zig` (and nothing in `main.zig` or `preview_panel.zig`).
+
+`audio` and `frames` are placeholders in M1 (WASAPI and Media Foundation come
+next); the branches exist so the view is written once.
+
+```powershell
+# facts + what the registry answers for one file, without a window:
+zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\img00.png
+#   provider=shell-thumbnail kind=image  →  outcome=image 96x96 stride=384
+zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\tone_440.wav
+#   provider=shell-thumbnail kind=image  →  outcome=none reason=no_handler
+zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
+#   provider=<none> kind=unknown         →  outcome=none reason=unsupported
+#   (its facts are printed before the outcome either way)
+```
+
 ## Headless checks
 
 ```powershell
@@ -62,7 +113,10 @@ the only way to photograph the selected state deterministically. It is a
 debug/screenshot flag, not a user-facing selection feature.
 
 `--nanoui-snapshot` draws before any background fetch can finish, so a real
-thumbnail needs `--nanoui-wait` (seconds). Both keep the window hidden.
+thumbnail (or a preview-strip outcome) needs `--nanoui-wait` (seconds). Both keep
+the window hidden. With `--select=<row>` the strip resolves to that row's
+registry answer; without a selection it reads `选中一行查看预览`, and before the
+worker answers it reads `正在读取预览…`.
 
 ## Selecting and dragging out
 
