@@ -2,6 +2,7 @@
 //! 全部使用内联合成 JSON，不依赖 fixtures/ 与磁盘。
 
 const std = @import("std");
+const model = @import("model.zig");
 const store = @import("store.zig");
 
 test "缺字段的旧数据补默认值" {
@@ -133,4 +134,61 @@ test "loadFile 从磁盘读取 electron-store JSON" {
     defer library.deinit();
     try std.testing.expectEqual(@as(usize, 1), library.samples.len);
     try std.testing.expectEqualStrings("Kick", library.samples[0].file_name);
+}
+
+test "empty + appendSamples：深拷贝、计数、重复 id 防御" {
+    var library = try store.empty(std.testing.allocator);
+    defer library.deinit();
+    try std.testing.expectEqual(@as(usize, 0), library.samples.len);
+    try std.testing.expectEqual(@as(usize, 0), library.report.samples_loaded);
+
+    // 来源字符串放在**可变**缓冲里：追加后改写它，库里的值不能跟着变。
+    var path_buffer = [_]u8{ 'D', ':', '/', 'x', '.', 'w', 'a', 'v' };
+    var incoming = [_]model.Sample{
+        .{
+            .id = "im_0000000000000001",
+            .file_name = "Kick",
+            .file_ext = ".wav",
+            .file_path = &path_buffer,
+            .duration = 0.8,
+            .sample_rate = 22_050,
+            .channels = 1,
+            .file_size = 35_280,
+            .imported_at = 1_700_000_000_000,
+            .mtime = 1_699_000_000_000,
+            .identity = .{ .volume_serial = 0x1a2b_3c4d, .file_index = 0x0000_0001_0000_9c4e },
+            .pending_metadata = false,
+        },
+        .{
+            .id = "im_0000000000000002",
+            .file_name = "Snare",
+            .file_ext = ".wav",
+            .file_path = "D:/x/Snare.wav",
+            .original_id = "im_0000000000000002",
+            .group_ids = &.{ "g1", "g2" },
+            .pending_metadata = true,
+        },
+    };
+
+    try std.testing.expectEqual(@as(usize, 2), try library.appendSamples(&incoming));
+    try std.testing.expectEqual(@as(usize, 2), library.samples.len);
+    try std.testing.expectEqual(@as(usize, 2), library.report.samples_loaded);
+
+    // 现在改写来源缓冲：深拷贝必须不受影响。
+    @memset(&path_buffer, 'z');
+    const kick = library.sampleById("im_0000000000000001").?;
+    try std.testing.expectEqualStrings("D:/x.wav", kick.file_path);
+    try std.testing.expect(kick.duration == 0.8);
+    try std.testing.expectEqual(@as(u32, 22_050), kick.sample_rate);
+    try std.testing.expectEqual(@as(u64, 0x0000_0001_0000_9c4e), kick.identity.?.file_index);
+
+    const snare = library.sampleById("im_0000000000000002").?;
+    try std.testing.expect(snare.pending_metadata);
+    try std.testing.expectEqual(@as(usize, 2), snare.group_ids.len);
+    try std.testing.expectEqualStrings("g1", snare.group_ids[0]);
+
+    // 同一批再追加一次：id 已存在，一条都不加（导入层的路径/身份去重在前，
+    // 这里是内核的防御，不负责计数）。
+    try std.testing.expectEqual(@as(usize, 0), try library.appendSamples(&incoming));
+    try std.testing.expectEqual(@as(usize, 2), library.samples.len);
 }

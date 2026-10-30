@@ -29,6 +29,9 @@ test {
     _ = @import("transport.zig");
     _ = @import("options.zig");
     _ = @import("library_io.zig");
+    // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
+    _ = @import("import_cli.zig");
+    _ = @import("import_cli_test.zig");
     _ = @import("mode.zig");
     _ = @import("version.zig");
     // 预览契约与注册表顺序；`providers/root.zig` 里的 comptime 检查也会在这里跑。

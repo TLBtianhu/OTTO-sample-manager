@@ -53,6 +53,44 @@ zig-out/bin/otto-lite.exe %TEMP%\big.otto --nanoui-wait=2 --nanoui-snapshot=lib.
 `--library-info` prints `format=json|otto samples=… groups=… bytes=…` plus a
 `read_ms` line. This first slice does **not** write back from the UI yet.
 
+## Folder import (headless)
+
+```powershell
+zig-out/bin/otto-lite.exe --import C:\packs\drums --save %TEMP%\kit.otto
+# on top of an existing library (JSON or OTTOLIB, format decided by magic):
+zig-out/bin/otto-lite.exe --import C:\packs\drums --library old.otto --save kit.otto
+```
+
+The pipeline is scan (L0) → probe (L1, header only) → dedupe → merge → atomic
+write; it never creates a window or touches nanoui:
+
+- `ports/scan.zig` walks recursively, skips hidden/system entries and `.tmp`,
+  and records absolute path, name, extension, size, mtime and the NTFS file
+  identity (`GetFileInformationByHandle`). Per-file failures go into a list and
+  do not abort the scan; results are sorted by path and deduplicated.
+- `ports/probe.zig` reads at most the first 64 KiB. WAV headers are parsed by
+  `ports/wav_header.zig`, the same code the player uses (`audio/wav.zig`), so
+  there is exactly one chunk scanner. Non-WAV files return `null` and are stored
+  with `pendingMetadata = true` — no invented durations.
+- ids are `im_` + 16 hex chars of `Wyhash(path)`: stable across runs/machines and
+  independent of scan order; collisions get a `_1` suffix.
+- duplicates: an existing `filePath` is `skipped_path`; an existing
+  volume+file-index under a *different* path (rename/move) is
+  `skipped_identity`.
+
+`--save` is also the fallback base library: re-running the same command loads
+the output and reports `added=0` instead of starting from scratch. A summary
+line goes to stdout:
+
+```text
+scanned=12 added=12 skipped_path=0 skipped_identity=0 failed=0 wrote=… bytes=2110 ms=7.32
+```
+
+On the M3 fixtures this imports 500 WAVs in **85 ms** (36 ms on re-run) and
+2000 WAVs in **297 ms**, including the atomic write. Not in this slice: a folder
+picker UI, progress reporting, thumbnail pre-warming, and L1 for non-WAV
+formats.
+
 ## Thumbnails
 
 Every row asks `src/thumbs.zig` for one 64px thumbnail (32 points) on its left:

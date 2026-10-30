@@ -19,21 +19,16 @@
 //! **不再转换**，只把它交给 `IAudioClient::Initialize`（共享模式由系统混音）。
 
 const std = @import("std");
+const wav_header = @import("otto_wav_header");
 
-pub const Error = error{
+/// 头部错误来自共享的 `otto_wav_header`（probe 也用同一份解析）；本文件只加
+/// 解码特有的两个：`OutOfMemory` 与 `Empty`（0 帧）。
+pub const Error = wav_header.Error || error{
     OutOfMemory,
-    Truncated,
-    NotRiff,
-    NotWave,
-    MissingFmt,
-    MissingData,
-    DataBeforeFmt,
-    UnsupportedFormat,
-    BadFmt,
     Empty,
 };
 
-pub const SampleFormat = enum { pcm, float };
+pub const SampleFormat = wav_header.SampleFormat;
 
 pub const Wav = struct {
     /// 交错 PCM；`channels` 声道、`bits` 位、`sample_rate` Hz。归本结构所有。
@@ -58,63 +53,41 @@ pub const Wav = struct {
     }
 };
 
-const format_pcm: u16 = 1;
-const format_float: u16 = 3;
-const format_extensible: u16 = 0xFFFE;
+const format_pcm = wav_header.format_pcm;
+const format_float = wav_header.format_float;
+const format_extensible = wav_header.format_extensible;
 
-/// KSDATAFORMAT_SUBTYPE_PCM / _IEEE_FLOAT 的磁盘字节序（GUID 的 Data1..Data4
-/// 按小端写出）。`fmt ` 的 SubFormat 字段就是这 16 个字节。
-const guid_pcm = [16]u8{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 };
-const guid_float = [16]u8{ 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 };
-
-const Fmt = struct {
-    channels: u16,
-    sample_rate: u32,
-    bits: u16,
-    format: SampleFormat,
-};
+/// KSDATAFORMAT_SUBTYPE_PCM 的磁盘字节序；测试里的 `fmt ` 构造器要用。
+const guid_pcm = wav_header.guid_pcm;
 
 /// 解析一个完整的 WAV 文件。`bytes` 只在调用期间借用；输出 PCM 新分配。
+///
+/// 块扫描与 `fmt ` 规则在 `otto_wav_header.parse`（与 `--import` 的 probe 共用
+/// 同一份实现）；这里只负责取 `data` 负载、换算帧数并（多声道时）下混。
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Wav {
-    if (bytes.len < 12) return error.Truncated;
-    if (!std.mem.eql(u8, bytes[0..4], "RIFF")) return error.NotRiff;
-    if (!std.mem.eql(u8, bytes[8..12], "WAVE")) return error.NotWave;
+    const header = try wav_header.parse(bytes);
 
-    var info: ?Fmt = null;
-    var data: ?[]const u8 = null;
-    var offset: usize = 12;
-
-    while (offset + 8 <= bytes.len) {
-        const id = bytes[offset..][0..4];
-        const size = readU32(bytes, offset + 4);
-        const start = offset + 8;
-        const end = std.math.add(usize, start, size) catch return error.Truncated;
-        if (end > bytes.len) return error.Truncated;
-
-        if (std.mem.eql(u8, id, "fmt ")) {
-            // 第一个 fmt 说了算；重复的 fmt 是坏文件，忽略后一个即可。
-            if (info == null) info = try parseFmt(bytes[start..end]);
-        } else if (std.mem.eql(u8, id, "data")) {
-            if (info == null) return error.DataBeforeFmt;
-            if (data == null) data = bytes[start..end];
-        }
-        // 未知块（LIST / fact / JUNK…）直接跳过：不关心内容，但必须按 RIFF 规则
-        // 跳过奇数长度后面的 padding 字节，否则下一个块 id 会从 padding 里读。
-        offset = end + (size & 1);
-    }
-
-    const fmt = info orelse return error.MissingFmt;
-    const payload = data orelse return error.MissingData;
-
-    const bytes_per_sample: usize = fmt.bits / 8;
-    const frame_bytes: usize = @as(usize, fmt.channels) * bytes_per_sample;
+    const frame_bytes: usize = header.frameBytes();
     if (frame_bytes == 0) return error.BadFmt;
+
+    // 解码拿得到整份字节，所以 data 的声明长度必须真的在文件里；
+    // 超出的半帧残片按整帧截掉（见文件头）。
+    const declared: usize = std.math.cast(usize, header.data_size) orelse return error.Truncated;
+    const end = std.math.add(usize, header.data_offset, declared) catch return error.Truncated;
+    if (end > bytes.len) return error.Truncated;
+
+    const payload = bytes[header.data_offset..end];
     const frames = payload.len / frame_bytes;
     if (frames == 0) return error.Empty;
     const used = frames * frame_bytes;
 
     // 单声道 / 立体声原样保留（不做无谓的 float 往返，声音逐位不变）；
     // 多于 2 声道才下混，且下混后统一成 2 声道。
+    const fmt: Fmt = .{
+        .channels = header.channels,
+        .bits = header.bits,
+        .format = header.format,
+    };
     const pcm = if (fmt.channels <= 2)
         try allocator.dupe(u8, payload[0..used])
     else
@@ -122,61 +95,23 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Wav {
 
     return .{
         .pcm = pcm,
-        .sample_rate = fmt.sample_rate,
+        .sample_rate = header.sample_rate,
         .channels = if (fmt.channels <= 2) fmt.channels else 2,
         .bits = fmt.bits,
         .format = fmt.format,
         .frames = frames,
         // 毫秒向下取整：1 帧 @ 44.1 kHz 是 0 ms，不冒充 1 ms。
-        .duration_ms = @as(u64, @intCast(frames)) * 1000 / fmt.sample_rate,
+        .duration_ms = @as(u64, @intCast(frames)) * 1000 / header.sample_rate,
     };
 }
 
-fn parseFmt(chunk: []const u8) Error!Fmt {
-    if (chunk.len < 16) return error.BadFmt;
+/// 下混只需要三个字段；采样率用不到。
+const Fmt = struct {
+    channels: u16,
+    bits: u16,
+    format: SampleFormat,
+};
 
-    const tag = readU16(chunk, 0);
-    const channels = readU16(chunk, 2);
-    const sample_rate = readU32(chunk, 4);
-    const bits = readU16(chunk, 14);
-    if (channels == 0 or sample_rate == 0) return error.BadFmt;
-
-    var format: SampleFormat = undefined;
-    if (tag == format_extensible) {
-        if (chunk.len < 40) return error.BadFmt;
-        const cb_size = readU16(chunk, 16);
-        if (cb_size < 22) return error.BadFmt;
-        const sub = chunk[24..40];
-        if (std.mem.eql(u8, sub, &guid_pcm)) {
-            format = .pcm;
-        } else if (std.mem.eql(u8, sub, &guid_float)) {
-            format = .float;
-        } else {
-            return error.UnsupportedFormat;
-        }
-    } else if (tag == format_pcm) {
-        format = .pcm;
-    } else if (tag == format_float) {
-        format = .float;
-    } else {
-        return error.UnsupportedFormat;
-    }
-
-    switch (format) {
-        .pcm => switch (bits) {
-            8, 16, 24, 32 => {},
-            else => return error.UnsupportedFormat,
-        },
-        .float => if (bits != 32) return error.UnsupportedFormat,
-    }
-
-    return .{
-        .channels = channels,
-        .sample_rate = sample_rate,
-        .bits = bits,
-        .format = format,
-    };
-}
 
 /// 多声道 → 立体声：偶数下标进左、奇数下标进右，各自平均。5.1 的 LFE 也参与
 /// 平均（M1 不装滤波器）；某些声道的缺失用 0 补齐，不做相位处理。

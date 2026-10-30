@@ -12,6 +12,8 @@
 //!   otto-lite --copy-now <file>      显式把 1 个文件写进剪贴板（CF_HDROP）
 //!   otto-lite --convert <in> <out>   旧 JSON → OTTOLIB v1（原子写，打印条数/字节数）
 //!   otto-lite --library-info <file>  按 magic 打印 format=json|otto 与条数/字节数
+//!   otto-lite --import <folder> [--library <file>] --save <out.otto>
+//!                                    扫描 + L1 头部解析 + 去重 + 合并 + 原子写
 //!
 //! 列表下方是一条固定高度的预览区（`preview_panel.zig`）：选中行变化时把样本交给
 //! 注册表，按 `Outcome` 的五个分支画图/文字/占位/原因；名称/大小/时长/路径是样本
@@ -467,7 +469,8 @@ pub fn main(init: std.process.Init) !void {
                 "      otto-lite --preview <file> | --play-test <file>\n" ++
                 "      otto-lite --copy-now <file>\n" ++
                 "      otto-lite --convert <in.json> <out.otto>\n" ++
-                "      otto-lite --library-info <file>\n",
+                "      otto-lite --library-info <file>\n" ++
+                "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n",
             .{},
         );
         return error.InvalidArguments;

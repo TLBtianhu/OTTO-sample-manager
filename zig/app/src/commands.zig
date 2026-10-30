@@ -15,6 +15,7 @@ const demo_preview = @import("demo_preview.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_watch = @import("demo_watch.zig");
+const import_cli = @import("import_cli.zig");
 const library_cli = @import("library_cli.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
@@ -67,6 +68,16 @@ pub fn run(
 
     // 按 magic 判断格式并打印条数 / 字节数。
     if (options.library_info) |path| return try library_cli.runInfo(init, allocator, path);
+
+    // 文件夹导入（M3 第二块）：扫描 → probe → 去重 → 合并 → 原子写。
+    // 不建窗口、不碰 nanoui；`--save` 的缺失由 import_cli 自己报。
+    if (options.import_dir) |folder| {
+        return try import_cli.run(init.io, allocator, .{
+            .folder = folder,
+            .library_path = options.import_library,
+            .save_path = options.save_path,
+        });
+    }
 
     return null;
 }

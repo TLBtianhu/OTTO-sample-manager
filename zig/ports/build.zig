@@ -83,7 +83,31 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(library_file_library);
 
-    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件口岸单元与集成测试（真 Win32 + 真 Shell）");
+    // L0 扫描口岸：递归遍历 + 文件身份（GetFileInformationByHandle）+ 排序去重。
+    // 只产出目录项事实，不打开内容；平台限定 Windows（见 src/scan.zig）。
+    _ = b.addModule("otto_scan", .{
+        .root_source_file = b.path("src/scan.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // L1 元数据口岸：只读前 64 KiB，WAV 头部解析与解码器共用 otto_wav_header。
+    // WAV 头部解析是独立模块（app 的解码器也 import 它），这里是唯一的实现：
+    // `probe` 通过模块名引用，而不是相对路径再编译一份（Zig 不允许一个文件属于
+    // 两个模块）。
+    const wav_header_module = b.addModule("otto_wav_header", .{
+        .root_source_file = b.path("src/wav_header.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const probe_module = b.addModule("otto_probe", .{
+        .root_source_file = b.path("src/probe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    probe_module.addImport("otto_wav_header", wav_header_module);
+
+    const test_step = b.step("test", "运行监听 / 缩略图 / 能力表 / 拖出 / 库文件 / 扫描 / 探测口岸的单元与集成测试（真 Win32 + 真 Shell）");
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/watch_test.zig"),
@@ -147,4 +171,38 @@ pub fn build(b: *std.Build) void {
     const run_library_file_tests = b.addRunArtifact(b.addTest(.{ .root_module = library_file_test_module }));
     run_library_file_tests.step.dependOn(&run_drag_tests.step);
     test_step.dependOn(&run_library_file_tests.step);
+
+    // 扫描口岸：只碰文件系统（建树 / 隐藏位 / 真句柄），同样串行。
+    const scan_test_module = b.createModule(.{
+        .root_source_file = b.path("src/scan_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_scan_tests = b.addRunArtifact(b.addTest(.{ .root_module = scan_test_module }));
+    run_scan_tests.step.dependOn(&run_library_file_tests.step);
+    test_step.dependOn(&run_scan_tests.step);
+
+    // 探测口岸：probe.zig 自己就是测试根（真临时文件 + 内存里造的 WAV）。
+    const probe_test_module = b.createModule(.{
+        .root_source_file = b.path("src/probe_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "otto_wav_header", .module = wav_header_module },
+        },
+    });
+    const run_probe_tests = b.addRunArtifact(b.addTest(.{ .root_module = probe_test_module }));
+    run_probe_tests.step.dependOn(&run_scan_tests.step);
+    test_step.dependOn(&run_probe_tests.step);
+
+    // WAV 头部解析：纯字节测试，单独一个编译图（不能和 otto_wav_header 模块
+    // 同图，否则同一个文件会属于两个模块）。
+    const wav_header_test_module = b.createModule(.{
+        .root_source_file = b.path("src/wav_header_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_wav_header_tests = b.addRunArtifact(b.addTest(.{ .root_module = wav_header_test_module }));
+    run_wav_header_tests.step.dependOn(&run_probe_tests.step);
+    test_step.dependOn(&run_wav_header_tests.step);
 }

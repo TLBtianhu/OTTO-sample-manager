@@ -36,6 +36,12 @@ pub const Options = struct {
     convert: ?Convert = null,
     /// `--library-info <file>`：按 magic 判断格式并打印条数 / 字节数。
     library_info: ?[]const u8 = null,
+    /// `--import <folder>`：无窗口的导入流水线（扫描 + probe + 合并 + 原子写）。
+    import_dir: ?[]const u8 = null,
+    /// `--import` 的底库：`.otto` 或旧 JSON，按 magic 判断。缺省 = 新建空库。
+    import_library: ?[]const u8 = null,
+    /// `--import` 的输出路径（OTTOLIB v1，原子写）。
+    save_path: ?[]const u8 = null,
 };
 
 pub fn parse(args: anytype) error{MissingValue}!Options {
@@ -107,6 +113,24 @@ pub fn parse(args: anytype) error{MissingValue}!Options {
             options.library_info = args[index];
         } else if (std.mem.startsWith(u8, arg, "--library-info=")) {
             options.library_info = arg["--library-info=".len..];
+        } else if (std.mem.eql(u8, arg, "--import")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.import_dir = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--import=")) {
+            options.import_dir = arg["--import=".len..];
+        } else if (std.mem.eql(u8, arg, "--library")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.import_library = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--library=")) {
+            options.import_library = arg["--library=".len..];
+        } else if (std.mem.eql(u8, arg, "--save")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.save_path = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--save=")) {
+            options.save_path = arg["--save=".len..];
         } else if (!std.mem.startsWith(u8, arg, "--")) {
             options.library_path = arg;
         }
@@ -226,4 +250,30 @@ test "--library-info 两种写法都收，不占位置参数" {
     try testing.expectEqualStrings("C:\\lib\\kit.otto", joined.library_info.?);
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--library-info" }));
+}
+
+test "--import / --library / --save：两种写法都收，不占位置参数" {
+    const spaced = try parse(&[_][]const u8{
+        "otto-lite", "--import", "C:\\packs", "--library", "old.json", "--save", "out.otto",
+    });
+    try testing.expectEqualStrings("C:\\packs", spaced.import_dir.?);
+    try testing.expectEqualStrings("old.json", spaced.import_library.?);
+    try testing.expectEqualStrings("out.otto", spaced.save_path.?);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{
+        "otto-lite", "--import=C:\\packs", "--library=old.otto", "--save=out.otto",
+    });
+    try testing.expectEqualStrings("C:\\packs", joined.import_dir.?);
+    try testing.expectEqualStrings("old.otto", joined.import_library.?);
+    try testing.expectEqualStrings("out.otto", joined.save_path.?);
+
+    // 只给 --import 时底库是 null（新建空库），不是错误。
+    const minimal = try parse(&[_][]const u8{ "otto-lite", "--import", "C:\\packs", "--save", "x.otto" });
+    try testing.expect(minimal.import_library == null);
+    try testing.expect(minimal.import_dir != null);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--import" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--library" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--save" }));
 }
