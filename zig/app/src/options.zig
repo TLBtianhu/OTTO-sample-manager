@@ -119,6 +119,32 @@ pub const Options = struct {
     /// `--update-url <url>`：表头「检查更新」用的 feed 地址。
     /// 默认 null = 没有更新源，点击只提示"未配置"，**不联网**。
     update_url: ?[]const u8 = null,
+
+    /// 这次调用会不会走 `commands.run` 的无窗口命令（而不是 GUI）。
+    ///
+    /// 给 `main` 的"CLI 才补控制台"判断用，判定必须与 `commands.run` 的分支一致：
+    /// 多算一条（例如把 `--update-url` 当命令）会让 GUI 路径也附着父控制台；
+    /// 少算一条会让 CLI 把输出写进一个不存在的控制台。新增无窗口命令时两边一起改。
+    pub fn isHeadlessCommand(self: Options) bool {
+        return self.version_requested or
+            self.update_download != null or
+            self.check_update != null or
+            self.demo_transport or
+            self.bench != null or
+            self.copy_now != null or
+            self.demo_thumbs_dir != null or
+            self.thumb_bench_dir != null or
+            self.demo_dir != null or
+            self.demo_rescan_dir != null or
+            self.preview_path != null or
+            self.play_test_path != null or
+            self.filter != null or
+            self.filter_ext != null or
+            self.convert != null or
+            self.library_info != null or
+            self.import_into != null or
+            self.import_dir != null;
+    }
 };
 
 /// `parse` 可能失败的三件事：标志缺值、值非法、`--set-opacity` 的百分数越界。

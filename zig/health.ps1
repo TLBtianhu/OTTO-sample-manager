@@ -229,18 +229,44 @@ function Invoke-Child {
 }
 
 # Runs a native exe (the app's demo switches), same capture rules as Invoke-Child.
+#
+# `& $exe @ChildArgs` is not used here: it lets the child inherit whatever console
+# the caller happens to have, and the caller is not always a console host. The
+# explicit ProcessStartInfo below starts the exe with CreateNoWindow, redirects
+# both streams (a child that fills the one we are not reading would block) and
+# echoes the command line *before* it runs — the echo is the only chance to see a
+# dropped argument before a window could appear (CONVENTIONS.md section 5).
+# `Write-Host`, not `Write-Output`: the latter would join this function's return
+# stream and turn `$r = Invoke-Exe ...` into "echo lines + result".
 function Invoke-Exe {
   param(
     [string]$ExePath,
     [string[]]$ChildArgs
   )
+  $arguments = ($ChildArgs -join ' ')
+  Write-Host ('  $ "{0}" {1}' -f $ExePath, $arguments)
+
   $watch = [System.Diagnostics.Stopwatch]::StartNew()
   $code = -1
+  $lines = @()
   try {
-    $lines = @(& $ExePath @ChildArgs 2>&1 | ForEach-Object {
-      if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
-    })
-    $code = $LASTEXITCODE
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ExePath
+    $psi.Arguments = $arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEndAsync()
+    $stderr = $proc.StandardError.ReadToEndAsync()
+    $proc.WaitForExit()
+    $text = [string]$stdout.Result + [string]$stderr.Result
+    $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+    $code = $proc.ExitCode
+    $proc.Dispose()
   } catch {
     $lines = @($_.Exception.Message)
     $code = -1

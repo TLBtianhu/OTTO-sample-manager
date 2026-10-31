@@ -29,6 +29,7 @@ const app_boot = @import("app_boot.zig");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
+const console_mod = @import("console.zig");
 const drop_ui = @import("drop_ui.zig");
 const duration_trust = @import("duration_trust.zig");
 const empty_state = @import("empty_state.zig");
@@ -55,7 +56,6 @@ const window_util = @import("window_util.zig");
 const ui = nanoui.ui;
 /// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中（监听线程自己阻塞在 ReadDirectoryChangesW 上）。
 const tick_ms: u64 = 150;
-
 pub const State = struct {
     /// 选择表与拖拽快照的分配器（`init.gpa`，长生命周期；不是帧 arena）。
     gpa: std.mem.Allocator,
@@ -377,6 +377,7 @@ pub fn main(init: std.process.Init) !void {
     const options = options_mod.parse(args) catch |err| return opacity_probe.parseError(err);
     // 所有不开窗的模式（--version / 自检 / 转换 / 查库）都在这里返回；
     // null 才继续走 UI。顺序与实现见 `commands.zig`。
+    if (options.isHeadlessCommand()) console_mod.attachParentConsole(); // 仅 CLI，见 console.zig
     if (try commands.run(init, allocator, options)) |code| {
         if (code != 0) std.process.exit(code);
         return;

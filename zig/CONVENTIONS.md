@@ -38,13 +38,25 @@ $p.WaitForExit()
 
 ## 3. 起别的程序：先看它是 GUI 还是控制台子系统
 
-GUI 子系统的程序本来就没有控制台，不用处理。控制台子系统的程序会继承当前控制台——
-一般没问题；但在**没有控制台的宿主**里起它，Windows 会给它新开一个控制台窗口，必须用
-第 2 条的 `ProcessStartInfo` + `CreateNoWindow = $true`。
+GUI 子系统（PE Subsystem = 2）的程序不分配控制台：双击、开始菜单、以及从没有控制台的
+宿主里启动，都不会有黑框。控制台子系统（= 3）的程序会继承当前控制台——一般没问题；但在
+**没有控制台的宿主**里起它，Windows 会给它新开一个控制台（Win11 上通常是一个 Windows
+Terminal 窗口），那就是用户看到的黑框。这种程序必须用第 2 条的 `ProcessStartInfo` +
+`CreateNoWindow = $true`。
 
-`otto-thumb-host.exe` 是控制台子系统，但**由应用自己用 `CREATE_NO_WINDOW` 拉起**，
-所以测试里也不会有窗口。`otto-lite.exe` 目前**也是控制台子系统**
-（`zig/app/build.zig` 没有设 `subsystem`），所以脚本直接启动它时按控制台程序对待；
+`otto-thumb-host.exe` 是控制台子系统，但**由应用自己用 `CREATE_NO_WINDOW` 拉起**、走管道
+通信，所以测试里也不会有窗口；不要跟着把它的子系统改掉（改成 windows 子系统反而可能影响
+它自己的 stdio）。
+
+`otto-lite.exe` **现在是 windows 子系统**（`zig/app/build.zig` 里 `exe.subsystem = .windows`）：
+从 Explorer / 开始菜单双击启动时不再先分配控制台，**从无控制台的宿主启动它反而更安全**，
+不会再有黑框。它不是控制台程序，但 stdio 不归子系统管：stdout/stderr 被 PowerShell / 第 2 条
+的 `ProcessStartInfo` 重定向成管道或文件后照常继承并写入，所以 `& otto-lite.exe --preview …`
+和 `RedirectStandardOutput` 都能拿到输出。直接连到 cmd 控制台的设备句柄本来对没附着控制台的
+GUI 子系统进程无效，所以 CLI 入口（`commands.run` 之前、只在无窗口命令时）会
+`AttachConsole(ATTACH_PARENT_PROCESS)` 并重开 `CONOUT$`——见 `app/src/console.zig`；
+**GUI 路径绝不 attach**（双击的 GUI 进程不该挂到任何控制台上）。脚本读输出仍然一律重定向，
+因为要的是捕获而不是显示；`CreateNoWindow` 只是让"控制台程序"和"GUI 程序"共用同一条启动路径。
 它自己的窗口只由无头参数关掉（见第 5 条）。
 
 ## 4. 应用自己：`--nanoui-snapshot` 与探针一律隐藏
@@ -88,9 +100,10 @@ $psi.Arguments = $arguments
 | 不建窗口的自检 | `--preview` / `--play-test` / `--demo-*` / `--bench-*` |
 
 脚本里每一处启动 `otto-lite.exe` 的地方都要能指着一个具体的无头参数。另外，
-`otto-lite.exe` 是**控制台子系统**，从没有控制台的宿主里起它时 Windows 会新开一个
-控制台窗口：用 `CreateNoWindow = $true`（`provider-matrix.ps1` 的
-`Invoke-HeadlessExe` 就是这么起的）。
+`otto-lite.exe` 是 **windows 子系统**：双击启动不会弹控制台（0.22.0 起的行为）。
+脚本读它的输出时仍然走第 2 条的 `ProcessStartInfo` + 重定向（`provider-matrix.ps1` 的
+`Invoke-HeadlessExe`、`health.ps1` 的 `Invoke-Exe` 都是这么写的）——**抓输出靠的是重定向，
+不是子系统**，别把 `CreateNoWindow` 当成"因为它还是控制台程序"才需要的。
 
 ## 6. 一条自查
 
