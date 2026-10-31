@@ -1,12 +1,14 @@
 //! 应用设置的持久化：一个小的 JSON 文件。
 //!
-//! ## 位置（只在这两个地方之一）
+//! ## 位置（三种形态都在各自的数据目录，`zig-out` 里不写）
 //!
-//!   * dev 形态：`<exe 目录>\.otto-settings.json`——**不写用户目录**。`zig build`
-//!     的产物在 `zig-out\bin`，所以开发时设置跟着构建目录走，删掉 `zig-out`
-//!     就回到默认值；不会在 `%APPDATA%` 里留一份和仓库不同步的副本。
-//!   * portable / installed：`<dataDir>\settings.json`（与库文件同一个数据目录；
-//!     dataDir 拿不到时退回内存态，绝不猜路径）。
+//!   * dev：`%LOCALAPPDATA%\OTTO\dev\settings.json`——开发者的本地目录，
+//!     删掉不影响源码；**编译产物本身不承载运行数据**。
+//!   * portable：`<exe 目录>\data\settings.json`。
+//!   * installed：`%APPDATA%\OTTO\settings.json`。
+//!
+//! 三种都写 `<dataDir>\settings.json`（与库文件同一个数据目录）；dataDir 拿不到
+//! 时退回内存态，绝不猜路径。
 //!
 //! ## 格式
 //!
@@ -65,8 +67,6 @@ pub fn percentFromAlpha(alpha: u8) f32 {
     return @as(f32, @floatFromInt(alpha)) * 100.0 / 255.0;
 }
 
-/// dev 形态的文件名（在 exe 旁边，不是 cwd）。
-pub const dev_file_name = ".otto-settings.json";
 /// 数据目录里的文件名。
 pub const file_name = "settings.json";
 
@@ -152,33 +152,25 @@ pub const Settings = struct {
 // 路径
 // ---------------------------------------------------------------------------
 
-/// 纯路径：dev → exe 旁边的 `.otto-settings.json`；其它形态 → 数据目录下的
-/// `settings.json`。dataDir 拿不到（installed 没有 %APPDATA%）返回 null。
+/// 纯路径：形态 → 数据目录下的 `settings.json`。
+/// dataDir 拿不到（installed 没有 %APPDATA%，dev 没有 LOCALAPPDATA/TEMP）返回 null。
 pub fn pathFor(
     allocator: std.mem.Allocator,
     mode: mode_mod.Mode,
     exe_path: []const u8,
-    appdata: ?[]const u8,
+    env: mode_mod.Env,
 ) !?[]u8 {
-    if (mode == .dev) return try devPathFor(allocator, exe_path);
-    const data_dir = (try mode_mod.dataDirFor(allocator, mode, exe_path, appdata)) orelse return null;
+    const data_dir = (try mode_mod.dataDirFor(allocator, mode, exe_path, env)) orelse return null;
     defer allocator.free(data_dir);
     return try std.fs.path.join(allocator, &.{ data_dir, file_name });
 }
 
-/// dev 形态的纯路径：exe 所在目录 + `.otto-settings.json`。
-pub fn devPathFor(allocator: std.mem.Allocator, exe_path: []const u8) ![]u8 {
-    const dir = std.fs.path.dirname(exe_path) orelse ".";
-    return std.fs.path.join(allocator, &.{ dir, dev_file_name });
-}
-
-/// 本进程的设置路径。判定与 `%APPDATA%` 都走 `mode.zig` 的同一条路径——
-/// 这里不重新发明"什么算 portable"。
+/// 本进程的设置路径。判定与 `%APPDATA%` / `%LOCALAPPDATA%` 都走 `mode.zig`
+/// 的同一条路径——这里不重新发明"什么算 portable"。
 pub fn resolvePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     const mode = try mode_mod.detect(allocator, io, exe_path);
-    if (mode == .dev) return try devPathFor(allocator, exe_path);
     const data_dir = (try mode_mod.dataDir(allocator, io, mode, exe_path)) orelse return null;
     defer allocator.free(data_dir);
     return try std.fs.path.join(allocator, &.{ data_dir, file_name });
@@ -408,23 +400,30 @@ test "读不到文件：默认值，不向上抛错" {
     try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
 }
 
-test "路径：dev 在 exe 旁边（不写用户目录），便携版在 data 目录" {
-    const dev = (try pathFor(testing.allocator, .dev, "C:\\build\\zig-out\\bin\\otto-lite.exe", "C:\\Users\\me\\AppData\\Roaming")).?;
+test "路径：dev 在 %LOCALAPPDATA%，便携版在 data 目录" {
+    const dev = (try pathFor(testing.allocator, .dev, "C:\\build\\zig-out\\bin\\otto-lite.exe", .{
+        .local_appdata = "C:\\Users\\me\\AppData\\Local",
+    })).?;
     defer testing.allocator.free(dev);
-    try testing.expectEqualStrings("C:\\build\\zig-out\\bin\\.otto-settings.json", dev);
+    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\OTTO\\dev\\settings.json", dev);
+    try testing.expect(std.mem.indexOf(u8, dev, "zig-out") == null);
 
-    const portable = (try pathFor(testing.allocator, .portable, "D:\\tools\\otto\\otto-lite.exe", null)).?;
+    const portable = (try pathFor(testing.allocator, .portable, "D:\\tools\\otto\\otto-lite.exe", .{})).?;
     defer testing.allocator.free(portable);
     try testing.expectEqualStrings("D:\\tools\\otto\\data\\settings.json", portable);
 
-    const installed = (try pathFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", "C:\\Users\\me\\AppData\\Roaming")).?;
+    const installed = (try pathFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", .{
+        .appdata = "C:\\Users\\me\\AppData\\Roaming",
+    })).?;
     defer testing.allocator.free(installed);
     try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\settings.json", installed);
 }
 
-test "dev 路径没有目录部分时落在当前目录，不崩" {
-    const path = try devPathFor(testing.allocator, "otto-lite.exe");
+test "dev 没有 LOCALAPPDATA 时设置退到 %TEMP%\\OTTO-dev，不写回 exe 目录" {
+    const path = (try pathFor(testing.allocator, .dev, "C:\\build\\zig-out\\bin\\otto-lite.exe", .{
+        .temp = "C:\\Temp",
+    })).?;
     defer testing.allocator.free(path);
-    try testing.expect(std.mem.endsWith(u8, path, dev_file_name));
-    try testing.expect(!std.fs.path.isAbsolute(path));
+    try testing.expectEqualStrings("C:\\Temp\\OTTO-dev\\settings.json", path);
+    try testing.expect(std.mem.indexOf(u8, path, "zig-out") == null);
 }

@@ -180,7 +180,7 @@ pub const Thumbs = struct {
         }
 
         // L3 磁盘缓存是**可选加速层**：目录建不出来、prune 失败都只打一行日志，
-        // 不让应用起不来。dev 形态由调用方传 null（不写工程目录）。
+        // 不让应用起不来；调用方传 null 时本次就不用 L3。
         if (options.disk_cache_dir) |dir| {
             self.disk = l3.L3.open(self.allocator, self.io, dir, options.disk_cache_budget) catch |err| blk: {
                 std.debug.print("otto-lite: L3 缓存不可用（{s}），本次只用内存缓存。\n", .{@errorName(err)});

@@ -37,7 +37,7 @@ pub const Options = struct {
     /// 行内小图是否也遵守 `--no-shell-preview`：`true` 时 `registryForIcon(true)`
     /// 里根本没有 Shell provider，PSD 之类只能显示占位，绝不偷偷问系统缩略图。
     no_shell_preview: bool = false,
-    /// L3 磁盘缓存根目录；`null` = 本次不用 L3（dev 形态 / 目录建不出来）。
+    /// L3 磁盘缓存根目录；`null` = 本次不用 L3（目录建不出来 / 调用方关闭）。
     disk_cache_dir: ?[]const u8 = null,
     /// L3 预算（字节）。默认 256 MiB，启动时裁剪到预算以内。
     disk_cache_budget: u64 = l3.default_budget_bytes,

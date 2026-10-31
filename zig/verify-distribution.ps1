@@ -10,10 +10,10 @@
 # What it proves, form by form:
 #
 #   dev        exe under zig-out\bin -> "--version" says (dev); no %APPDATA%\OTTO,
-#              no <exe>\data, settings in <exe>\.otto-settings.json (written through
-#              the real settings panel, then removed); second start reads that same
-#              file back; fixtures/library.json stays read-only; updates go to
-#              <exe>\updates.
+#              no <exe>\data; settings / cache / updates go to a throw-away
+#              %LOCALAPPDATA%\OTTO\dev (written through the real settings panel);
+#              second start reads that same file back; fixtures/library.json stays
+#              read-only; zig-out\bin stays pure (two exes + pdb only).
 #   portable   two exes + otto-portable.flag in a temp dir -> (portable); import
 #              writes <exe>\data\library.otto; settings at <exe>\data\settings.json;
 #              cache at <exe>\data\cache; updates at <exe>\data\updates; --preview
@@ -97,6 +97,10 @@ $script:fakeAppData = Join-Path $script:tempRoot 'appdata-installed'
 $script:feedDir = Join-Path $script:tempRoot 'feed'
 $script:shotsDir = Join-Path $script:tempRoot 'shots'
 $script:devStashDir = Join-Path $script:tempRoot 'dev-stash'
+# dev 的数据目录被指到临时树里，这样审计不会碰开发者真实的 %LOCALAPPDATA%。
+$script:devLocalAppData = Join-Path $script:tempRoot 'localappdata-dev'
+# zig-out\bin 的允许清单：构建产物，不是数据。多一个文件就说明有运行时写入。
+$script:zigOutAllowed = @('otto-lite.exe', 'otto-lite.pdb', 'otto-thumb-host.exe')
 
 $script:checks = New-Object System.Collections.ArrayList
 $script:rows = @{}
@@ -144,7 +148,6 @@ $script:realStashInitialized = $false
 #   slider track x=40..340, y=196   -> 60% is 218
 # Text clicks are used for open/close so only the slider position is geometric.
 $script:panelScript = 'click:设置;at:218,196;click:关闭'
-$script:devArtifactNames = @('.otto-settings.json', 'data', 'cache', 'updates')
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -538,20 +541,34 @@ function Restore-RealAppDataStash {
   }
 }
 
-# The dev exe dir is a build output, not a scratch pad: move anything that could
-# change the verdict aside (and put it back afterwards), so the run starts from
-# a known-clean dev state without destroying a developer's own files.
-function Initialize-DevStash {
-  New-Item -ItemType Directory -Force -Path $script:devStashDir | Out-Null
-  $script:devStashed = @{}
-  foreach ($name in $script:devArtifactNames) {
-    $source = Join-Path $script:devBin $name
-    $script:devStashed[$name] = $false
-    if (Test-Path -LiteralPath $source) {
-      Move-Item -LiteralPath $source -Destination (Join-Path $script:devStashDir $name) -Force
-      $script:devStashed[$name] = $true
-    }
+# zig-out\bin is a build output, not a scratch pad. Everything except the two
+# exes and the pdb is a FAIL with the file names printed: a stray settings /
+# cache / data file means a run wrote into the artifact tree.
+function Get-ZigOutPurity {
+  $extra = @()
+  if (Test-Path -LiteralPath $script:devBin) {
+    $extra = @(Get-ChildItem -LiteralPath $script:devBin -Force -ErrorAction SilentlyContinue |
+      Where-Object { $script:zigOutAllowed -notcontains $_.Name } |
+      Sort-Object Name |
+      ForEach-Object { $_.Name })
   }
+  return New-Object psobject -Property @{
+    Ok = ($extra.Count -eq 0)
+    Extra = [string[]]$extra
+    Path = $script:devBin
+  }
+}
+
+function Assert-ZigOutPure {
+  $purity = Get-ZigOutPurity
+  Add-Check 'script' ('zig-out\bin is pure (only {0})' -f ($script:zigOutAllowed -join ', ')) $purity.Ok (
+    'extra: {0}; path: {1}' -f (($purity.Extra -join ', ')), $purity.Path)
+}
+
+# fixtures/library.otto would win over library.json and change what the dev form
+# reads; stash it for the run and put it back afterwards.
+function Initialize-FixtureStash {
+  New-Item -ItemType Directory -Force -Path $script:devStashDir | Out-Null
   $script:fixtureOttoStashed = $false
   if (Test-Path -LiteralPath $script:fixtureOtto) {
     Move-Item -LiteralPath $script:fixtureOtto -Destination (Join-Path $script:devStashDir 'fixtures-library.otto') -Force
@@ -559,30 +576,15 @@ function Initialize-DevStash {
   }
 }
 
-function Restore-DevStash {
-  if ($null -eq $script:devStashed) { return }
-  foreach ($name in $script:devArtifactNames) {
-    $target = Join-Path $script:devBin $name
-    if (Test-Path -LiteralPath $target) {
-      Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if ($script:devStashed[$name]) {
-      $backup = Join-Path $script:devStashDir $name
-      if (Test-Path -LiteralPath $backup) {
-        Move-Item -LiteralPath $backup -Destination $target -Force
-      }
-    }
-  }
+function Restore-FixtureStash {
   if (Test-Path -LiteralPath $script:fixtureOtto) {
     Remove-Item -LiteralPath $script:fixtureOtto -Force -ErrorAction SilentlyContinue
   }
-  if ($script:fixtureOttoStashed) {
-    $backup = Join-Path $script:devStashDir 'fixtures-library.otto'
-    if (Test-Path -LiteralPath $backup) {
-      Move-Item -LiteralPath $backup -Destination $script:fixtureOtto -Force
-    }
+  $backup = Join-Path $script:devStashDir 'fixtures-library.otto'
+  if ($script:fixtureOttoStashed -and (Test-Path -LiteralPath $backup)) {
+    Move-Item -LiteralPath $backup -Destination $script:fixtureOtto -Force
   }
-  $script:devStashed = $null
+  $script:fixtureOttoStashed = $false
 }
 
 # ---------------------------------------------------------------------------
@@ -674,59 +676,89 @@ function Assert-Readback {
 # ---------------------------------------------------------------------------
 
 function Invoke-DevForm {
-  Write-Head '== dev: zig-out\bin (no user directory writes) =='
+  Write-Head '== dev: zig-out\bin (pure build output; data in %LOCALAPPDATA%) =='
   $bin = $script:devBin
   $exe = $script:devExe
-  $settings = Join-Path $bin '.otto-settings.json'
-  $data = Join-Path $bin 'data'
-  $cache = Join-Path $bin 'cache'
-  $updates = Join-Path $bin 'updates'
+  $localAppData = $script:devLocalAppData
+  $devData = Join-Path $localAppData 'OTTO\dev'
+  $settings = Join-Path $devData 'settings.json'
+  $cache = Join-Path $devData 'cache'
+  $updates = Join-Path $devData 'updates'
+  $exeData = Join-Path $bin 'data'
+  $exeCache = Join-Path $bin 'cache'
+  $exeSettings = Join-Path $bin '.otto-settings.json'
+  $exeUpdates = Join-Path $bin 'updates'
 
   $script:rows['dev'].Library = 'fixtures/library.json（只读）'
-  $script:rows['dev'].Settings = 'zig-out\bin\.otto-settings.json'
+  $script:rows['dev'].Settings = '%LOCALAPPDATA%\OTTO\dev\settings.json'
 
-  $expectedVersion = "otto-lite $($script:version) (dev)"
-  $r = Invoke-Otto -Exe $exe -Cwd $script:appDir -Argv @('--version')
-  $lines = @(Get-NonEmptyLines $r.Lines)
-  $line = if ($lines.Count -gt 0) { $lines[$lines.Count - 1].Trim() } else { '(no output)' }
-  $script:rows['dev'].VersionLine = $line
-  $versionOk = ($r.Code -eq 0) -and ($lines.Count -eq 1) -and ($line -eq $expectedVersion)
-  Add-Check 'dev' '--version says (dev)' $versionOk ('exit={0}; expected="{1}"; actual="{2}"' -f $r.Code, $expectedVersion, $line)
+  # The child inherits this override: the run must not touch the developer's real
+  # %LOCALAPPDATA%\OTTO\dev either. Restored in the finally, even on failure.
+  $previousLocalAppData = $env:LOCALAPPDATA
+  try {
+    $env:LOCALAPPDATA = $localAppData
 
-  $clean = (-not (Test-Path -LiteralPath $data)) -and (-not (Test-Path -LiteralPath $cache)) -and (-not (Test-Path -LiteralPath $settings))
-  Add-Check 'dev' '--version does not create data / cache / settings' $clean (
-    'data={0} cache={1} settings={2}' -f (YesNo (Test-Path -LiteralPath $data)), (YesNo (Test-Path -LiteralPath $cache)), (YesNo (Test-Path -LiteralPath $settings)))
+    $expectedVersion = "otto-lite $($script:version) (dev)"
+    $r = Invoke-Otto -Exe $exe -Cwd $script:appDir -Argv @('--version')
+    $lines = @(Get-NonEmptyLines $r.Lines)
+    $line = if ($lines.Count -gt 0) { $lines[$lines.Count - 1].Trim() } else { '(no output)' }
+    $script:rows['dev'].VersionLine = $line
+    $versionOk = ($r.Code -eq 0) -and ($lines.Count -eq 1) -and ($line -eq $expectedVersion)
+    Add-Check 'dev' '--version says (dev)' $versionOk ('exit={0}; expected="{1}"; actual="{2}"' -f $r.Code, $expectedVersion, $line)
 
-  # First start: open the real settings panel, drag opacity to 60%, close -> save.
-  $run1 = Invoke-Snapshot -Exe $exe -Cwd $script:appDir -Shot (Join-Path $script:shotsDir 'dev-write.png') -Script $script:panelScript
-  $savedLine = Get-LineMatching $run1.Lines ('^otto-lite: settings saved path=' + [regex]::Escape($settings) + ' ')
-  Add-Check 'dev' 'settings written through the panel to <exe>\.otto-settings.json' (($run1.Code -eq 0) -and $savedLine.Length -gt 0) (
-    'exit={0}; line={1}' -f $run1.Code, $savedLine)
-  $content = Test-SettingsFile $settings 153
-  Add-Check 'dev' 'dev settings file is valid JSON with opacity=153' $content.Ok $content.Detail
-  $noData = (-not (Test-Path -LiteralPath $data)) -and (-not (Test-Path -LiteralPath $cache)) -and (-not (Test-Path -LiteralPath (Join-Path $bin 'data\settings.json')))
-  Add-Check 'dev' 'dev wrote no <exe>\data and no <exe>\cache' $noData (
-    'data={0} cache={1}' -f (YesNo (Test-Path -LiteralPath $data)), (YesNo (Test-Path -LiteralPath $cache)))
+    $clean = (-not (Test-Path -LiteralPath $devData)) -and (-not (Test-Path -LiteralPath $exeData)) -and
+      (-not (Test-Path -LiteralPath $exeCache)) -and (-not (Test-Path -LiteralPath $exeSettings))
+    Add-Check 'dev' '--version does not create data / cache / settings' $clean (
+      'devData={0} <exe>\data={1} <exe>\cache={2} <exe>\.otto-settings.json={3}' -f
+      (YesNo (Test-Path -LiteralPath $devData)), (YesNo (Test-Path -LiteralPath $exeData)),
+      (YesNo (Test-Path -LiteralPath $exeCache)), (YesNo (Test-Path -LiteralPath $exeSettings)))
 
-  # Second start: read the settings back from the same file.
-  $script:currentExe = $exe
-  $script:currentCwd = $script:appDir
-  Assert-Readback -Form 'dev' -ExpectedLibrary 'fixtures/library.json' -ExpectedSettings $settings
+    Add-Check 'dev' 'dev data dir is not inside zig-out' (-not $devData.StartsWith($bin, [StringComparison]::OrdinalIgnoreCase)) (
+      'data={0}; bin={1}' -f $devData, $bin)
 
-  # Library read-only: the fixture hash must be identical, no .otto created.
-  $fixturesNow = Get-FileHash -LiteralPath $script:fixtureLibrary -Algorithm SHA256
-  Add-Check 'dev' 'fixtures/library.json is read-only (SHA-256 unchanged)' ($fixturesNow.Hash -eq $script:fixtureHash) (
-    'before={0} after={1}' -f $script:fixtureHash, $fixturesNow.Hash)
-  Add-Check 'dev' 'dev did not convert fixtures/library.json into fixtures/library.otto' (-not (Test-Path -LiteralPath $script:fixtureOtto)) (
-    'fixtures/library.otto exists={0}' -f (YesNo (Test-Path -LiteralPath $script:fixtureOtto)))
+    # First start: open the real settings panel, drag opacity to 60%, close -> save.
+    $run1 = Invoke-Snapshot -Exe $exe -Cwd $script:appDir -Shot (Join-Path $script:shotsDir 'dev-write.png') -Script $script:panelScript
+    $savedLine = Get-LineMatching $run1.Lines ('^otto-lite: settings saved path=' + [regex]::Escape($settings) + ' ')
+    Add-Check 'dev' 'settings written through the panel to <LOCALAPPDATA>\OTTO\dev\settings.json' (($run1.Code -eq 0) -and $savedLine.Length -gt 0) (
+      'exit={0}; line={1}' -f $run1.Code, $savedLine)
+    $content = Test-SettingsFile $settings 153
+    Add-Check 'dev' 'dev settings file is valid JSON with opacity=153' $content.Ok $content.Detail
 
-  # Updates: dev puts the download beside the exe (mode.updatesDirFor .dev).
-  $updateResult = Invoke-UpdateProbe -Exe $exe -Cwd $script:appDir
-  Assert-UpdateDir -Form 'dev' -UpdatesDir $updates -ForbiddenDir $data -ForbiddenLabel '<exe>\data' -Result $updateResult
+    # The build output must stay a build output: no data / cache / settings / updates.
+    $noExeWrites = (-not (Test-Path -LiteralPath $exeData)) -and (-not (Test-Path -LiteralPath $exeCache)) -and
+      (-not (Test-Path -LiteralPath $exeSettings)) -and (-not (Test-Path -LiteralPath $exeUpdates))
+    Add-Check 'dev' 'dev wrote nothing next to the exe (data / cache / settings / updates)' $noExeWrites (
+      'data={0} cache={1} settings={2} updates={3}' -f
+      (YesNo (Test-Path -LiteralPath $exeData)), (YesNo (Test-Path -LiteralPath $exeCache)),
+      (YesNo (Test-Path -LiteralPath $exeSettings)), (YesNo (Test-Path -LiteralPath $exeUpdates)))
 
-  # Cache is the negative assertion for dev: it must not exist anywhere near the exe.
-  Add-Check 'dev' 'dev cache is not on disk (<exe>\cache absent)' (-not (Test-Path -LiteralPath $cache)) (
-    'path: {0}' -f $cache)
+    # Second start: read the settings back from the same file.
+    $script:currentExe = $exe
+    $script:currentCwd = $script:appDir
+    Assert-Readback -Form 'dev' -ExpectedLibrary 'fixtures/library.json' -ExpectedSettings $settings
+
+    # Library read-only: the fixture hash must be identical, no .otto created.
+    $fixturesNow = Get-FileHash -LiteralPath $script:fixtureLibrary -Algorithm SHA256
+    Add-Check 'dev' 'fixtures/library.json is read-only (SHA-256 unchanged)' ($fixturesNow.Hash -eq $script:fixtureHash) (
+      'before={0} after={1}' -f $script:fixtureHash, $fixturesNow.Hash)
+    Add-Check 'dev' 'dev did not convert fixtures/library.json into fixtures/library.otto' (-not (Test-Path -LiteralPath $script:fixtureOtto)) (
+      'fixtures/library.otto exists={0}' -f (YesNo (Test-Path -LiteralPath $script:fixtureOtto)))
+
+    # Updates: dev puts the download in <LOCALAPPDATA>\OTTO\dev\updates, never
+    # beside the exe.
+    $updateResult = Invoke-UpdateProbe -Exe $exe -Cwd $script:appDir
+    Assert-UpdateDir -Form 'dev' -UpdatesDir $updates -ForbiddenDir $exeUpdates -ForbiddenLabel '<exe>\updates' -Result $updateResult
+
+    # L3 cache now belongs to dev too, but under the dev data dir.
+    Add-Check 'dev' 'dev cache lives under <LOCALAPPDATA>\OTTO\dev\cache' (Test-Dir (Join-Path $cache 'thumbs')) (
+      'path: {0}' -f (Join-Path $cache 'thumbs'))
+  } finally {
+    if ([string]::IsNullOrEmpty($previousLocalAppData)) {
+      Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+    } else {
+      $env:LOCALAPPDATA = $previousLocalAppData
+    }
+  }
 
   Assert-RealAppDataUntouched 'dev'
 }
@@ -1074,7 +1106,6 @@ function Print-Table {
 # ---------------------------------------------------------------------------
 
 $script:devExe = $script:exe
-$script:devStashed = $null
 $script:fixtureOttoStashed = $false
 $script:version = ''
 $script:feedPath = ''
@@ -1090,11 +1121,15 @@ try {
   if (-not (Test-Path -LiteralPath $script:exe)) { throw "missing exe after build: $($script:exe)" }
   if (-not (Test-Path -LiteralPath $script:helper)) { throw "missing helper after build: $($script:helper)" }
 
+  # The artifact tree must be pure before any form runs: settings / cache / data
+  # under zig-out\bin means a run wrote into the build output.
+  Assert-ZigOutPure
+
   # Fresh scratch space on every run: the script must be repeatable.
   if (Test-Path -LiteralPath $script:tempRoot) {
     Remove-Item -LiteralPath $script:tempRoot -Recurse -Force
   }
-  foreach ($dir in @($script:tempRoot, $script:portableDir, $script:installedDir, $script:fakeAppData, $script:feedDir, $script:shotsDir)) {
+  foreach ($dir in @($script:tempRoot, $script:portableDir, $script:installedDir, $script:fakeAppData, $script:feedDir, $script:shotsDir, $script:devLocalAppData)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
   }
 
@@ -1104,7 +1139,7 @@ try {
   $script:realOttoBefore = Get-PathSnapshot $script:realOtto
   Write-Output ('== real %APPDATA%\OTTO snapshot: {0} ==' -f (Format-Snapshot $script:realOttoBefore))
 
-  Initialize-DevStash
+  Initialize-FixtureStash
 
   # The installed form has to write the machine's real %APPDATA%\OTTO, so the
   # user's own directory is moved aside for the whole run (dev and portable must
@@ -1148,11 +1183,14 @@ try {
     Write-Output ('!! real user data is still in the stash: {0}' -f $script:stashOtto)
   }
   try {
-    Restore-DevStash
+    Restore-FixtureStash
   } catch {
     $restoreOk = $false
-    Add-Check 'script' 'failed to restore dev artifacts' $false (($_.Exception.Message) + '; temporary tree kept at ' + $script:tempRoot)
+    Add-Check 'script' 'failed to restore the dev fixture' $false (($_.Exception.Message) + '; temporary tree kept at ' + $script:tempRoot)
   }
+  # Second purity check after the forms: if a dev run wrote anything back into
+  # zig-out\bin, this is where it shows up.
+  Assert-ZigOutPure
   $env:APPDATA = $script:realAppData
   if (-not $restoreOk) {
     Write-Output ('kept temporary tree because a restore step failed: {0}' -f $script:tempRoot)
