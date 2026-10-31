@@ -7,6 +7,8 @@ pub const HWND = *opaque {};
 pub const HINSTANCE = *opaque {};
 pub const HDC = *opaque {};
 pub const HCURSOR = *opaque {};
+/// A dropped-files list (`WM_DROPFILES.wParam`), freed with `DragFinish`.
+pub const HDROP = *opaque {};
 pub const BOOL = i32;
 pub const WPARAM = usize;
 pub const LPARAM = isize;
@@ -123,6 +125,9 @@ pub extern "kernel32" fn GlobalLock(mem: *anyopaque) callconv(.winapi) ?*anyopaq
 pub extern "kernel32" fn GlobalUnlock(mem: *anyopaque) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buf: ?[*]u16, size: u32) callconv(.winapi) u32;
 pub extern "shell32" fn ShellExecuteW(hwnd: ?HWND, op: ?[*:0]const u16, file: [*:0]const u16, params: ?[*:0]const u16, dir: ?[*:0]const u16, show: i32) callconv(.winapi) ?*anyopaque;
+pub extern "shell32" fn DragAcceptFiles(hwnd: HWND, accept: BOOL) callconv(.winapi) void;
+pub extern "shell32" fn DragQueryFileW(hdrop: HDROP, index: u32, file: ?[*]u16, chars: u32) callconv(.winapi) u32;
+pub extern "shell32" fn DragFinish(hdrop: HDROP) callconv(.winapi) void;
 pub extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
 pub extern "comdlg32" fn GetSaveFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
 
@@ -147,6 +152,7 @@ pub const WM_LBUTTONDOWN = 0x0201;
 pub const WM_LBUTTONUP = 0x0202;
 pub const WM_LBUTTONDBLCLK = 0x0203;
 pub const WM_MOUSEWHEEL = 0x020A;
+pub const WM_DROPFILES = 0x0233;
 pub const WM_IME_SETCONTEXT = 0x0281;
 pub const WM_IME_CHAR = 0x0286;
 pub const WM_MOUSELEAVE = 0x02A3;

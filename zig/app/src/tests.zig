@@ -40,6 +40,9 @@ test {
     // 导入的保存目标策略（纯字符串）与 UI 状态机文案（线程/对话框走人工验收）。
     _ = @import("import_target.zig");
     _ = @import("import_ui.zig");
+    // 拖入：合成 DROPFILES 的 HGLOBAL 读写，以及目录/文件/缺失路径的分类。
+    _ = @import("drop_files.zig");
+    _ = @import("drop_ui.zig");
     _ = @import("mode.zig");
     // 设置文件的 JSON 编解码 / 原子写 / 路径（真临时目录；坏文件必须回默认值）。
     _ = @import("settings_store.zig");

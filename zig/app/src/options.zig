@@ -58,6 +58,9 @@ pub const Options = struct {
     /// `--settings-probe`：`--nanoui-snapshot` 时也建真实 HWND（仍然隐藏、不激活），
     /// 让无头脚本能断言 `WS_EX_TOPMOST` 与不透明度。普通用户不需要。
     settings_probe: bool = false,
+    /// `--drop-probe=<path>`：隐藏窗口里合成一次文件/文件夹拖入，等导入结束后
+    /// 打印 `drop-probe: done …` 并退出。文件路径用来验收「只接受文件夹」。
+    drop_probe: ?[]const u8 = null,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,
     /// `--bench <library>`：宪章六项性能基准，打印一张表后退出（不开窗）。
@@ -209,6 +212,8 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.cache_budget_set = true;
         } else if (std.mem.eql(u8, arg, "--settings-probe")) {
             options.settings_probe = true;
+        } else if (std.mem.startsWith(u8, arg, "--drop-probe=")) {
+            options.drop_probe = arg["--drop-probe=".len..];
         } else if (std.mem.eql(u8, arg, "--thumb-bench")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -319,6 +324,7 @@ pub fn printUsage() void {
             "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
             "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge]\n" ++
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
+            "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
             "      otto-lite --preview <file> | --play-test <file>\n" ++
             "      otto-lite --copy-now <file>\n" ++
             "      otto-lite --convert <in.json> <out.otto>\n" ++

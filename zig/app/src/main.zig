@@ -25,6 +25,7 @@ const core = @import("otto_core");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
+const drop_ui = @import("drop_ui.zig");
 const empty_state = @import("empty_state.zig");
 const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
@@ -48,11 +49,8 @@ const update_ui = @import("update_ui.zig");
 const version_mod = @import("version.zig");
 const window_util = @import("window_util.zig");
 const ui = nanoui.ui;
-
 /// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中（监听线程自己阻塞在 ReadDirectoryChangesW 上）。
 const tick_ms: u64 = 150;
-
-// 每一行左侧缩略图的边长在 `row_thumb.zig`（32 点）；向系统请求 64px（2x 屏 1:1）。
 
 /// 按住行后移动多少点算拖拽。和资源管理器一样，小于阈值的手抖仍按点击处理。
 const drag_threshold: f32 = 6;
@@ -93,13 +91,11 @@ const State = struct {
     press_origin: ui.Point = .{},
     /// 已经越过阈值、定时器已挂上：同一次按压里不许再排第二次。
     drag_armed: bool = false,
-    /// 一次 OLE 拖拽刚结束：nanoui 的鼠标 down/active 可能还停在按下状态
-    /// （详见 `resyncInput`），下一帧不是新按下时清掉。
+    /// 一次 OLE 拖拽刚结束：nanoui 的鼠标可能还停在按下状态（见 `resyncInput`）。
     drag_ended: bool = false,
     /// 表头提示还剩几拍（>0 = 正在闪），以及刚复制了几个。
     flash_left: u32 = 0,
     flash_count: usize = 0,
-
     fn view(s: *State, c: *ui.Context) void {
         // 上一帧 pin 住的条目到这里才放掉：view 之后还有 paint，paint 期间像素要有效。
         s.thumbs.beginFrame();
@@ -539,7 +535,7 @@ pub fn main(init: std.process.Init) !void {
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });
     trace.mark("setup.app");
     // 验收探针：快照默认不开真实窗口，但置顶断言需要真 HWND；仍然 hidden。
-    if (options.settings_probe) {
+    if (options.settings_probe or options.drop_probe != null) {
         app.gui = true;
         app.flags.hidden = true;
     }
@@ -579,9 +575,13 @@ pub fn main(init: std.process.Init) !void {
         .width = 380,
         .height = 700,
         // 设置验收的脚本要真 HWND，但仍然绝不激活。
-        .no_activate = options.settings_probe,
+        .no_activate = options.settings_probe or options.drop_probe != null,
         .content = .{ .view = .init(&state, State.view) },
     });
+    // 文件拖入：目录走「导入文件夹」同一条 `Import.start`；`--drop-probe` 时
+    // 还会合成一次 WM_DROPFILES（窗口隐藏，见 `drop_ui.zig`）。
+    var drop: drop_ui.Drop = .{};
+    drop.install(init.io, &state.import, options.drop_probe, state.window.?, nanoui.App.after);
     trace.mark("setup.window");
     probe.mark("window", .{ .window = state.window, .thumbs = thumbs });
     // 窗口状态启动时应用一次：置顶（true 才碰 Win32）+ 不透明度（重启后恢复）。

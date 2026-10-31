@@ -46,6 +46,10 @@ pub fn build(b: *std.Build) void {
         }
         for (ios_frameworks) |f| nanoui.linkFramework(f, .{});
         nanoui.linkSystemLibrary("objc", .{});
+    } else if (os == .windows) {
+        // DragQueryFileW / DragAcceptFiles (window.zig) and ShellExecuteW
+        // (desktop.zig). Linked with the module, so every app gets it.
+        nanoui.linkSystemLibrary("shell32", .{});
     }
     if (target.result.abi.isAndroid()) {
         // The NDK's libraries; OpenGL ES is loaded with dlopen.
