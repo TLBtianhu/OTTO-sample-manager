@@ -148,6 +148,16 @@ extern "user32" fn DestroyWindow(hwnd: HWND) callconv(.winapi) BOOL;
 
 extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 
+/// 测试进程是后台进程。Windows 只在调用线程与前台线程共享输入队列时才接受
+/// 后台进程对 z-order 的修改；否则 `SetWindowPos` 返回成功但 `WS_EX_TOPMOST`
+/// 位不变（前台锁 / 输入队列规则）。测试只把这一对调用接到前台线程上，
+/// 不激活、不改变前台窗口；断言仍然是 Windows 自己维护的置顶位。
+extern "user32" fn AttachThreadInput(id_attach: DWORD, id_attach_to: DWORD, attach: BOOL) callconv(.winapi) BOOL;
+
+extern "user32" fn GetWindowThreadProcessId(hwnd: HWND, process_id: ?*DWORD) callconv(.winapi) DWORD;
+
+extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
+
 /// 当前线程最近一次 Win32 失败的码（0 = 没有失败）。只用于日志/排障。
 threadlocal var last_win32_error: DWORD = 0;
 
@@ -281,6 +291,59 @@ fn writeExStyle(handle: HWND, style: usize) Error!void {
 
 const testing = std.testing;
 
+/// "没有抢焦点"的唯一正确断言：**我们的 hwnd 不是前台窗口**。
+///
+/// 不能断言"操作前后 `GetForegroundWindow()` 完全相等"：通知弹窗、后台更新、
+/// 用户切窗口都会合法地改变前台，那条断言测的是"这台机器没人动前台"，会把
+/// 无关的环境变化记成我们的失败。前台为 null（锁屏/切桌面）同样说明不是我们。
+fn expectNotForeground(hwnd: HWND) !void {
+    if (GetForegroundWindow()) |foreground| {
+        try testing.expect(foreground != hwnd);
+    }
+}
+
+fn hwndValue(handle: ?HWND) usize {
+    return if (handle) |value| @intFromPtr(value) else 0;
+}
+
+fn isOurs(handle: ?HWND, hwnd: HWND) bool {
+    return if (handle) |value| value == hwnd else false;
+}
+
+/// 与前台线程共享输入队列的临时连接（只覆盖测试里的 `setTopmost` 调用）。
+const ForegroundInput = struct {
+    me: DWORD,
+    foreground_thread: DWORD,
+    attached: bool,
+
+    fn join() ForegroundInput {
+        const me = GetCurrentThreadId();
+        var foreground_thread: DWORD = 0;
+        if (GetForegroundWindow()) |foreground| {
+            foreground_thread = GetWindowThreadProcessId(foreground, null);
+        }
+        var attached = false;
+        if (foreground_thread != 0 and foreground_thread != me) {
+            attached = AttachThreadInput(me, foreground_thread, 1) != 0;
+        }
+        return .{ .me = me, .foreground_thread = foreground_thread, .attached = attached };
+    }
+
+    fn leave(self: ForegroundInput) void {
+        if (self.attached) _ = AttachThreadInput(self.me, self.foreground_thread, 0);
+    }
+};
+
+/// 测试进程在后台时，Windows 会忽略**没有**接上前台输入队列的 z-order 修改
+/// （`SetWindowPos` 返回 TRUE 但 `WS_EX_TOPMOST` 不置位）。短暂接上输入队列，
+/// 让 `setTopmost` 在测试里得到和"用户在前台点开关"时一样的执行条件；
+/// 不激活任何窗口，前台窗口也不变。
+fn setTopmostWithForegroundInput(hwnd: HWND, on: bool) !void {
+    const foreground_input = ForegroundInput.join();
+    defer foreground_input.leave();
+    try setTopmost(hwnd, on);
+}
+
 /// 建一个从未 `ShowWindow` 过的系统 `STATIC` 窗口：没有消息循环也能被
 /// `SetWindowPos` 改扩展样式。`WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` 保证它
 /// 即使被误显示也不会抢焦点、不进任务栏。
@@ -310,17 +373,31 @@ test "真实隐藏窗口：设置/取消 WS_EX_TOPMOST，且不抢前台" {
 
     // 新建的窗口不在置顶层。
     try testing.expect(!isTopmost(hwnd));
+    // 前后两个前台值只作诊断打印用；断言只看"前台是不是我们"。
     const foreground_before = GetForegroundWindow();
+    try expectNotForeground(hwnd);
 
-    try setTopmost(hwnd, true);
+    try setTopmostWithForegroundInput(hwnd, true);
     try testing.expect(isTopmost(hwnd));
+    try expectNotForeground(hwnd);
 
-    try setTopmost(hwnd, false);
+    try setTopmostWithForegroundInput(hwnd, false);
     try testing.expect(!isTopmost(hwnd));
+    try expectNotForeground(hwnd);
 
-    // 全程没有激活：前台窗口不变（隐藏窗口本来也不会被点到，这里钉住
-    // SWP_NOACTIVATE 的语义）。
-    try testing.expectEqual(foreground_before, GetForegroundWindow());
+    // 全程没有激活：我们的窗口任何时候都不是前台（隐藏窗口本来也不会被点到，
+    // 这里钉住 SWP_NOACTIVATE 的语义）。无关程序抢前台不影响这个断言。
+    const foreground_after = GetForegroundWindow();
+    std.debug.print(
+        "win_window topmost: foreground_before=0x{x} foreground_after=0x{x} our_hwnd=0x{x} our_window_was_foreground={}\n",
+        .{
+            hwndValue(foreground_before),
+            hwndValue(foreground_after),
+            @intFromPtr(hwnd),
+            isOurs(foreground_before, hwnd) or isOurs(foreground_after, hwnd),
+        },
+    );
+    try expectNotForeground(hwnd);
 }
 
 test "空句柄是具名错误；重复设置是幂等的" {
@@ -332,21 +409,23 @@ test "空句柄是具名错误；重复设置是幂等的" {
     const hwnd = try createHiddenWindow();
     defer _ = DestroyWindow(hwnd);
 
-    try setTopmost(hwnd, true);
-    try setTopmost(hwnd, true);
+    try setTopmostWithForegroundInput(hwnd, true);
+    try setTopmostWithForegroundInput(hwnd, true);
     try testing.expect(isTopmost(hwnd));
-    try setTopmost(hwnd, false);
-    try setTopmost(hwnd, false);
+    try setTopmostWithForegroundInput(hwnd, false);
+    try setTopmostWithForegroundInput(hwnd, false);
     try testing.expect(!isTopmost(hwnd));
 }
 
-test "真实隐藏窗口：0 / 128 / 255 的读回、WS_EX_LAYERED 位与前台不变" {
+test "真实隐藏窗口：0 / 128 / 255 的读回、WS_EX_LAYERED 位与前台不归我们" {
     if (!supported) return error.SkipZigTest;
 
     const hwnd = try createHiddenWindow();
     defer _ = DestroyWindow(hwnd);
 
+    // 前后两个前台值只作诊断打印用；断言只看"前台是不是我们"。
     const foreground_before = GetForegroundWindow();
+    try expectNotForeground(hwnd);
     try testing.expect(!isLayered(hwnd));
     try testing.expect(!isVisible(hwnd));
     // 没有分层窗口 = 没有 alpha 可读；调用方按"255 完全不透明"理解。
@@ -355,6 +434,7 @@ test "真实隐藏窗口：0 / 128 / 255 的读回、WS_EX_LAYERED 位与前台�
     try setOpacity(hwnd, 128);
     try testing.expect(isLayered(hwnd));
     try testing.expectEqual(@as(?u8, 128), try getOpacity(hwnd));
+    try expectNotForeground(hwnd);
     // 改样式不该让窗口变得可见：探针/正常启动都必须保持 hidden。
     try testing.expect(!isVisible(hwnd));
 
@@ -362,10 +442,12 @@ test "真实隐藏窗口：0 / 128 / 255 的读回、WS_EX_LAYERED 位与前台�
     try setOpacity(hwnd, 255);
     try testing.expect(!isLayered(hwnd));
     try testing.expectEqual(@as(?u8, null), try getOpacity(hwnd));
+    try expectNotForeground(hwnd);
 
     try setOpacity(hwnd, 0);
     try testing.expect(isLayered(hwnd));
     try testing.expectEqual(@as(?u8, 0), try getOpacity(hwnd));
+    try expectNotForeground(hwnd);
 
     // 重复设置同一值是幂等的（不会把分层位移掉或在两条路径之间来回切）。
     try setOpacity(hwnd, 0);
@@ -373,8 +455,19 @@ test "真实隐藏窗口：0 / 128 / 255 的读回、WS_EX_LAYERED 位与前台�
     try testing.expectEqual(@as(?u8, 0), try getOpacity(hwnd));
 
     // 只改了扩展样式与 alpha，没有 SetWindowPos / SetForegroundWindow：
-    // 前台窗口全程不变（和置顶那条测试同一个断言）。
-    try testing.expectEqual(foreground_before, GetForegroundWindow());
+    // 我们的窗口全程都不是前台（和置顶那条测试同一个断言）。期间别人抢前台
+    // 不算失败——那正是原来 before/after 相等断言产生假失败的原因。
+    const foreground_after = GetForegroundWindow();
+    std.debug.print(
+        "win_window opacity: foreground_before=0x{x} foreground_after=0x{x} our_hwnd=0x{x} our_window_was_foreground={}\n",
+        .{
+            hwndValue(foreground_before),
+            hwndValue(foreground_after),
+            @intFromPtr(hwnd),
+            isOurs(foreground_before, hwnd) or isOurs(foreground_after, hwnd),
+        },
+    );
+    try expectNotForeground(hwnd);
 }
 
 test "不透明度：空句柄是具名错误；isLayered / isVisible 对空句柄是 false" {

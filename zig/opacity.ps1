@@ -19,7 +19,9 @@
 #   5. closing the panel persists ("opacity":153); the next start reads it back
 #   6. --d3d prints exactly one opacity-d3d-warning line (flip model ignores
 #      SetLayeredWindowAttributes)
-#   7. the foreground window never changes (hidden + WS_EX_NOACTIVATE)
+#   7. our window is never the foreground window (sampled while the probe runs:
+#      GetForegroundWindow() != our hwnd at every sample). Unrelated programs
+#      taking the foreground do not fail this check.
 #
 # The panel is driven by coordinates (the panel is fixed at 380 points, so its
 # geometry is stable; a 2x screenshot of the same layout shows the slider at
@@ -81,9 +83,61 @@ New-Item -ItemType Directory -Path $shotDir -Force | Out-Null
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 public class OpacityFocus {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+
+  private static readonly object gate = new object();
+  private static readonly List<IntPtr> seen = new List<IntPtr>();
+  private static volatile bool running;
+  private static volatile int sampleCount;
+  private static Thread worker;
+
+  public static int SampleCount { get { return sampleCount; } }
+
+  public static int DistinctCount {
+    get { lock (gate) { return seen.Count; } }
+  }
+
+  public static void StartSampling() {
+    lock (gate) { seen.Clear(); }
+    sampleCount = 0;
+    running = true;
+    worker = new Thread(new ThreadStart(delegate {
+      while (running) {
+        IntPtr fg = GetForegroundWindow();
+        sampleCount = sampleCount + 1;
+        lock (gate) { if (!seen.Contains(fg)) { seen.Add(fg); } }
+        Thread.Sleep(1);
+      }
+    }));
+    worker.IsBackground = true;
+    worker.Start();
+    // Take at least one sample before the probe starts, so "0 samples" can
+    // never be mistaken for a passing check.
+    for (int i = 0; i < 100 && sampleCount == 0; i++) { Thread.Sleep(1); }
+  }
+
+  public static void StopSampling() {
+    running = false;
+    if (worker != null) { worker.Join(2000); worker = null; }
+  }
+
+  public static bool SawForeground(long hwnd) {
+    lock (gate) { return seen.Contains(new IntPtr(hwnd)); }
+  }
+
+  public static string SeenText() {
+    lock (gate) {
+      string[] parts = new string[seen.Count];
+      for (int i = 0; i < seen.Count; i++) {
+        parts[i] = "0x" + seen[i].ToInt64().ToString("x");
+      }
+      return string.Join(",", parts);
+    }
+  }
 }
 '@
 
@@ -115,14 +169,42 @@ function Get-WarningLines($lines) {
   return @($lines | Where-Object { $_ -match '^otto-lite: opacity-d3d-warning ' })
 }
 
-# Runs one case and checks the exit code plus "the foreground window did not
-# change" (nothing here is allowed to pop up or take focus).
+# The probe prints the HWND it created on every opacity line; the sampler has
+# already recorded every foreground HWND it saw. Returns the last one, or null
+# when the probe never printed one (which is itself a failed check).
+function Get-OurHwnd($lines) {
+  $value = $null
+  foreach ($line in $lines) {
+    $m = [regex]::Match($line, 'hwnd=0x([0-9a-fA-F]+)')
+    if ($m.Success) { $value = [Convert]::ToInt64($m.Groups[1].Value, 16) }
+  }
+  return $value
+}
+
+# Runs one case. The assertion is "our HWND is never GetForegroundWindow()":
+# the sampler thread records the foreground throughout the probe. before/after
+# are printed as diagnostics only - an unrelated window taking the foreground
+# is legal and must not fail this check.
 function Run-Case([string]$name, [string[]]$Argv) {
   $fgBefore = [OpacityFocus]::GetForegroundWindow()
-  $r = Invoke-Probe $Argv
+  [OpacityFocus]::StartSampling()
+  try {
+    $r = Invoke-Probe $Argv
+  } finally {
+    [OpacityFocus]::StopSampling()
+  }
   $fgAfter = [OpacityFocus]::GetForegroundWindow()
+  $samples = [OpacityFocus]::SampleCount
+  $distinct = [OpacityFocus]::DistinctCount
+  $seenText = [OpacityFocus]::SeenText()
+  $ourHwnd = Get-OurHwnd $r.Lines
+  $neverOurs = (($null -ne $ourHwnd) -and ($samples -gt 0) -and
+    (-not [OpacityFocus]::SawForeground([long]$ourHwnd)))
+  $ourText = if ($null -eq $ourHwnd) { 'unknown' } else { '0x{0:x}' -f $ourHwnd }
   Check ("{0} exit" -f $name) ($r.Code -eq 0) ("exit={0}" -f $r.Code)
-  Check ("{0} foreground" -f $name) ($fgBefore -eq $fgAfter) ("before=0x{0:x} after=0x{1:x} changed={2}" -f $fgBefore.ToInt64(), $fgAfter.ToInt64(), ($fgBefore -ne $fgAfter))
+  Check ("{0} foreground" -f $name) $neverOurs (
+    'samples={0} distinct={1} seen=[{2}] our_hwnd={3} never_foreground={4}; diag before=0x{5:x} after=0x{6:x}' -f
+      $samples, $distinct, $seenText, $ourText, $neverOurs, $fgBefore.ToInt64(), $fgAfter.ToInt64())
   return $r
 }
 
@@ -211,6 +293,11 @@ Write-Output '== summary: window opacity (real hidden HWND, GDI present) =='
 $results | ForEach-Object {
   $tag = if ($_.Ok) { 'PASS' } else { 'FAIL' }
   Write-Output ('  [{0}] {1}' -f $tag, $_.Name)
+}
+Write-Output ''
+Write-Output '== foreground diagnostics (sampled; before/after are not assertions) =='
+$results | Where-Object { $_.Name -like '* foreground' } | ForEach-Object {
+  Write-Output ('  {0}: {1}' -f $_.Name, $_.Detail)
 }
 Write-Output ('  {0} checks, {1} passed, {2} failed' -f $results.Count, ($results.Count - $failed.Count), $failed.Count)
 Write-Output ('  panel snapshot: {0}' -f $panelShot)
