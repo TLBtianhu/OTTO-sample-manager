@@ -10,8 +10,8 @@
 //!     文件尾时由 `mp4_info.seek` 按 box 偏移跳过去，只读那一段，不读 `mdat`；
 //!   * MKV / WebM：`mkv_info` 读 EBML 的 `Info`（TimecodeScale/Duration）与
 //!     `Tracks`（TrackType/PixelWidth/PixelHeight/CodecID）；
-//!   * Ogg：`ogg_info` 认首包的 `\x01vorbis`（`OpusHead` → null），时长取
-//!     **最后一页的 granule**——头里没有帧数，所以这一种要读文件尾（见下）。
+//!   * Ogg：`ogg_info` 认首包的 `\x01vorbis` 与 `OpusHead`，时长取**最后一页的
+//!     granule**——头里没有帧数，所以这一种要读文件尾（见下）。
 //!
 //! **视频只读容器、不解码任何一帧**：解码仍归 Media Foundation（`mf-video`）。
 //! 非上述格式、坏头、截断一律返回 `null`——**不猜**，把 `pending_metadata`
@@ -29,12 +29,14 @@
 //! Ogg 是唯一要读**文件尾**的音频容器：Vorbis 的总帧数就是最后一页的 granule，
 //! 头里没有。`ogg_info.read` 用同一个 64 KiB 上限读最后一段（一页最大 65307
 //! 字节，窗口一定含最后一页的页头），从后往前找"页末 == 文件末"的那一页；
-//! 头尾之外一个字节都不读，Opus 与其他 codec 返回 null。
+//! 头尾之外一个字节都不读，别的 codec 返回 null。Opus 走同一条尾页路径，但它的
+//! granule 含编码器的 pre_skip（2.000 s 的素材是 96312 而不是 96000），减去之后
+//! 才是要播的帧数——所以这里给出 2000 ms，不是 2006 ms（见 `ogg_info.zig`）。
 //!
 //! `Metadata.estimated` 是"这个时长是不是推算的"：WAV（含 ADPCM / G.711）/
-//! FLAC / AIFF / 带 Xing 的 MP3 / Ogg Vorbis 都来自容器声明（false），无 Xing
-//! 的 MP3 由文件大小 / 比特率算出（true）。界面必须把 true 显示成 `≈`，不能
-//! 冒充精确值。ADPCM 的帧数由块头 + `block_align` 算出，仍是容器精确值，不是
+//! FLAC / AIFF / 带 Xing 的 MP3 / Ogg Vorbis / Ogg Opus 都来自容器声明（false），
+//! 无 Xing 的 MP3 由文件大小 / 比特率算出（true）。界面必须把 true 显示成 `≈`，
+//! 不能冒充精确值。ADPCM 的帧数由块头 + `block_align` 算出，仍是容器精确值，不是
 //! 估算。MP4 / MKV / Ogg 的时长是容器声明的，也是 false。
 //!
 //! 本文件只碰标准库的文件 API；不 import core。
@@ -169,8 +171,12 @@ fn probeMkv(bytes: []const u8) ?Metadata {
     };
 }
 
-/// Ogg：首包认 Vorbis（`OpusHead` / 别的 codec → null），时长取最后一页的
-/// granule（容器精确值）。头 + 尾各读一次，中间不读（见 `ogg_info.zig`）。
+/// Ogg：首包认 Vorbis 与 Opus（Opus 的尾页 granule 会先减掉 pre_skip），别的
+/// codec → null；时长取最后一页的 granule（容器精确值）。头 + 尾各读一次，中间
+/// 不读（见 `ogg_info.zig`）。
+/// **只有元数据**：Opus 能算时长不等于能播——解码仍然归 `native-audio`，而它不
+/// 声明 `.opus`（见 `providers/native_audio.zig`），所以预览照旧谢绝。
+/// `Kind` 只有 `.ogg`：它是容器名，Vorbis / Opus 都是 Ogg，编码不进 `Metadata`。
 fn probeOgg(
     allocator: std.mem.Allocator,
     io: std.Io,

@@ -324,6 +324,17 @@ pub fn build(b: *std.Build) void {
     run_mkv_info_tests.step.dependOn(&run_mp4_info_tests.step);
     test_step.dependOn(&run_mkv_info_tests.step);
 
+    // Ogg 容器解析（Vorbis / Opus）：纯字节造页 + 真素材，单独一个测试根。
+    // 和 mp4_info / mkv_info 同样的理由：`ogg_info.zig` 的正文要留行数给注释。
+    const ogg_info_test_module = b.createModule(.{
+        .root_source_file = b.path("src/ogg_info_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_ogg_info_tests = b.addRunArtifact(b.addTest(.{ .root_module = ogg_info_test_module }));
+    run_ogg_info_tests.step.dependOn(&run_mkv_info_tests.step);
+    test_step.dependOn(&run_ogg_info_tests.step);
+
     // WAV 头部解析：纯字节测试，单独一个编译图（不能和 otto_wav_header 模块
     // 同图，否则同一个文件会属于两个模块）。
     const wav_header_test_module = b.createModule(.{
@@ -332,7 +343,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const run_wav_header_tests = b.addRunArtifact(b.addTest(.{ .root_module = wav_header_test_module }));
-    run_wav_header_tests.step.dependOn(&run_mkv_info_tests.step);
+    run_wav_header_tests.step.dependOn(&run_ogg_info_tests.step);
     test_step.dependOn(&run_wav_header_tests.step);
 
     // 文件夹选择：只跑纯逻辑（选项位 / 取消码 / 宽字符路径 / 环境变量开关）；

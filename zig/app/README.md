@@ -206,6 +206,14 @@ decides. Ogg Vorbis decodes (zig-audio v0.10); Ogg carrying Opus is
 `failed` (the file is intact, it just is not an encoding we own). `.opus` is
 not claimed at all for the same reason.
 
+`.opus` still gets a **duration** in the list, though: metadata and decoding are
+two separate paths on purpose. `ports/probe.zig` recognises `OpusHead`, subtracts
+`pre_skip` from the last page's granule and divides by 48 kHz (Opus output is
+always 48 kHz, whatever `input_sample_rate` says), so a 2.000 s file reads `2.0s`
+in the row — while `--preview` keeps answering `none` because no provider claims
+the extension. `duration_trust.parsable` lists `.opus` so old libraries
+(`duration = 0`) get the same number without touching the library file.
+
 ### Multichannel downmix: one matrix for every container
 
 Anything with more than 2 channels is mixed down to stereo by

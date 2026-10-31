@@ -6,7 +6,10 @@
 //!
 //!   * 视频容器的端到端测试（造 mp4 的辅助函数）；
 //!   * MP3 官方向量的时长对照（七条数据驱动用例）；
-//!   * Ogg 的端到端：真 Vorbis 素材的精确时长，以及 `.ogg` 里装 Opus 时的 null。
+//!   * Ogg 的端到端：真 Vorbis / 真 Opus 的精确时长，以及"Opus 头 + 空尾页"的 null。
+//!
+//! Ogg 的**字节级**解析测试在 `ogg_info_test.zig`（单独一个测试根）：这里只证明
+//! `probe` 把 `ogg_info` 的答案正确搬进了 `Metadata`。
 //!
 //! `wav_header.zig` 的测试单独一个根（`wav_header_test.zig`）：probe 通过模块
 //! `otto_wav_header` 引它，同一个编译图里不能再按相对路径把同一个文件拉进来。
@@ -191,8 +194,25 @@ test "真 testkit ogg（存在才跑）：vorbis-44k.ogg = 3000 ms / 44100 / 2 �
     try testing.expect(!metadata.estimated);
 }
 
-test ".ogg 里装 Opus：probe 返回 null（谢绝，不冒充 Vorbis）" {
-    // 一张 BOS 页 + 19 字节的 OpusHead 识别包，一共 47 字节。
+test "真 testkit opus（存在才跑）：opus-128k.opus = 2000 ms / 48000 / 2 声道 / 精确" {
+    const path = "C:\\src\\otto-testkit\\samples\\opus-128k.opus";
+    std.Io.Dir.cwd().access(test_io, path, .{}) catch return error.SkipZigTest;
+
+    const metadata = (try probe.probe(test_allocator, test_io, path)).?;
+    // 尾页 granule 96312 − pre_skip 312 = 96000 帧 @ 48 kHz = 正好 2.000 s。
+    // 减 pre_skip 是 `ogg_info` 的事，这里只核对搬过来的四个字段。
+    try testing.expectEqual(@as(u64, 2000), metadata.duration_ms);
+    try testing.expectEqual(@as(u32, 48_000), metadata.sample_rate);
+    try testing.expectEqual(@as(u32, 2), metadata.channels);
+    try testing.expectEqual(probe.Kind.ogg, metadata.kind);
+    try testing.expect(!metadata.estimated);
+    // 只有元数据：能算时长不等于能解码（`native-audio` 仍不声明 `.opus`）。
+    try testing.expect(metadata.codec == null);
+}
+
+test "Opus 头 + 空尾页（granule 0 < pre_skip 312）：probe 返回 null，不是 0 秒" {
+    // 一张 BOS 页 + 19 字节的 OpusHead 识别包，一共 47 字节。它同时是尾页，
+    // granule 是 0：0 − 312 是坏文件，既不能当 0 秒也不能回绕。
     var page: [47]u8 = @splat(0);
     @memcpy(page[0..4], "OggS");
     page[5] = 0x02; // BOS
