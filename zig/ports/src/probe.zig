@@ -1,12 +1,15 @@
 //! L1 元数据口岸：只读文件头，产出时长 / 采样率 / 声道 / 位深。
 //!
-//! 支持三种容器，各自的头部解析在独立文件里（纯字节、可单测）：
-//!   * WAV：`otto_wav_header.parse` 是解码器与 probe 共用的**唯一**一份块扫描；
+//! 支持四种容器，各自的头部解析在独立文件里（纯字节、可单测）：
+//!   * WAV：`otto_wav_header.parse` 是解码器与 probe 共用的**唯一**一份块扫描，
+//!     时长由 `wav_info` 按 codec 算（PCM/float、A-law、µ-law、IMA/MS ADPCM）；
 //!   * FLAC：`flac_info.parse` 只读 STREAMINFO；
-//!   * MP3：`mp3_info.parse` 跳 ID3、读第一帧、优先 Xing/Info 帧数。
+//!   * MP3：`mp3_info.parse` 跳 ID3、读第一帧、优先 Xing/Info 帧数；
+//!   * AIFF：`aiff_info.parse` 只读 `COMM`（精确帧数 + 80 位扩展采样率）。
 //!
 //! 非上述格式、坏头、截断一律返回 `null`——**不猜**，把 `pending_metadata`
-//! 留给以后的 L1 实现，而不是凭空写 0 当作"已知是 0 秒"。
+//! 留给以后的 L1 实现，而不是凭空写 0 当作"已知是 0 秒"。`AIFC` 本轮不做，
+//! 同样返回 null。
 //!
 //! 读的字节有硬上限：`max_header_bytes`（64 KiB）。WAV 的 `fmt ` 与 `data`
 //! 块头都在文件最前面，64 KiB 足够；但 `data` 的负载通常远大于窗口，所以
@@ -16,22 +19,25 @@
 //! MP3 的 Xing/Info 在**第一帧**里，64 KiB 同样足够；CBR 估算用 `stat` 的
 //! 文件大小，不会把音频负载读进来。FLAC 只需要 42 字节。
 //!
-//! `Metadata.estimated` 是"这个时长是不是推算的"：WAV / FLAC / 带 Xing 的 MP3
-//! 来自容器声明（false），无 Xing 的 MP3 由文件大小 / 比特率算出（true）。界面
-//! 必须把 true 显示成 `≈`，不能冒充精确值。
+//! `Metadata.estimated` 是"这个时长是不是推算的"：WAV（含 ADPCM / G.711）/
+//! FLAC / AIFF / 带 Xing 的 MP3 都来自容器声明（false），无 Xing 的 MP3 由文件
+//! 大小 / 比特率算出（true）。界面必须把 true 显示成 `≈`，不能冒充精确值。
+//! ADPCM 的帧数由块头 + `block_align` 算出，仍是容器精确值，不是估算。
 //!
 //! 本文件只碰标准库的文件 API；不 import core。
 
 const std = @import("std");
 const wav_header = @import("otto_wav_header");
+const wav_info = @import("wav_info.zig");
 const flac_info = @import("flac_info.zig");
 const mp3_info = @import("mp3_info.zig");
+const aiff_info = @import("aiff_info.zig");
 
-/// 头部读取上限。三种容器的头部（含 MP3 第一帧的 Xing）都远小于 64 KiB。
+/// 头部读取上限。四种容器的头部（含 MP3 第一帧的 Xing）都远小于 64 KiB。
 pub const max_header_bytes: usize = 64 * 1024;
 
 /// 支持的类型面。不在这个列表里的扩展名一律返回 null。
-pub const Kind = enum { wav, flac, mp3 };
+pub const Kind = enum { wav, flac, mp3, aiff };
 
 pub const Metadata = struct {
     /// 声明或推算的时长（毫秒，向下取整）。
@@ -68,6 +74,7 @@ pub fn probe(
 
     if (isWav(bytes)) return probeWav(io, file, bytes);
     if (std.mem.eql(u8, bytes[0..4], "fLaC")) return probeFlac(bytes);
+    if (isAiff(bytes)) return probeAiff(bytes);
     if (looksLikeMp3(bytes)) return probeMp3(io, file, bytes);
     return null;
 }
@@ -78,15 +85,20 @@ fn isWav(bytes: []const u8) bool {
         std.mem.eql(u8, bytes[8..12], "WAVE");
 }
 
-/// WAV 的既有路径：块扫描 + 用文件大小核对 `data` 的声明长度。
+/// 只认 `FORM....AIFF`；`AIFC` 本轮不做，落到下面的 `return null`。
+fn isAiff(bytes: []const u8) bool {
+    return bytes.len >= 12 and
+        std.mem.eql(u8, bytes[0..4], "FORM") and
+        std.mem.eql(u8, bytes[8..12], "AIFF");
+}
+
+/// WAV：块扫描 + 按 codec 算帧数 + 用文件大小核对 `data` 的声明长度。
 fn probeWav(
     io: std.Io,
     file: std.Io.File,
     bytes: []const u8,
 ) Error!?Metadata {
     const header = wav_header.parse(bytes) catch return null;
-    const frame_bytes = header.frameBytes();
-    if (frame_bytes == 0) return null;
 
     // 与真实文件大小核对：声明比实有大 → 截断，不按声明冒充完整时长。
     const data_offset: u64 = @intCast(header.data_offset);
@@ -94,15 +106,27 @@ fn probeWav(
     const stat = try file.stat(io);
     if (data_end > stat.size) return null;
 
-    const frames = header.data_size / frame_bytes;
-    const duration_ms = std.math.mul(u64, frames, 1000) catch return null;
+    const duration_ms = wav_info.durationMs(header) catch return null;
 
     return .{
-        .duration_ms = duration_ms / header.sample_rate,
+        .duration_ms = duration_ms,
         .sample_rate = header.sample_rate,
         .channels = header.channels,
         .bits = header.bits,
         .kind = .wav,
+        .estimated = false,
+    };
+}
+
+/// AIFF：`COMM` 的 numSampleFrames 就是精确帧数，不需要读 `SSND`。
+fn probeAiff(bytes: []const u8) ?Metadata {
+    const info = aiff_info.parse(bytes) catch return null;
+    return .{
+        .duration_ms = aiff_info.durationMs(info),
+        .sample_rate = info.sample_rate,
+        .channels = info.channels,
+        .bits = info.bits,
+        .kind = .aiff,
         .estimated = false,
     };
 }
@@ -216,6 +240,8 @@ test "空文件 / PNG / 截断的 WAV：null，不猜" {
 
     try tmp.dir.writeFile(test_io, .{ .sub_path = "empty.wav", .data = "" });
     try tmp.dir.writeFile(test_io, .{ .sub_path = "image.png", .data = "\x89PNG\r\n\x1a\n" ++ "rest-of-png" });
+    // AIFC 是另一种容器：本轮不做，probe 必须返回 null 而不是猜。
+    try tmp.dir.writeFile(test_io, .{ .sub_path = "compressed.aiff", .data = "FORM" ++ [_]u8{ 0, 0, 0, 4 } ++ "AIFC" });
 
     const wav = try buildWav(test_allocator, 22_050, 1, 17_640);
     defer test_allocator.free(wav);
@@ -226,7 +252,7 @@ test "空文件 / PNG / 截断的 WAV：null，不猜" {
     const root_len = try tmp.dir.realPath(test_io, &buffer);
     var full: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
-    inline for ([_][]const u8{ "empty.wav", "image.png", "cut.wav" }) |name| {
+    inline for ([_][]const u8{ "empty.wav", "image.png", "compressed.aiff", "cut.wav" }) |name| {
         const absolute = try std.fmt.bufPrint(&full, "{s}\\{s}", .{ buffer[0..root_len], name });
         try testing.expect((try probe(test_allocator, test_io, absolute)) == null);
     }
@@ -240,6 +266,45 @@ test "真 testkit wav（存在才跑）：tone_440.wav 是 800 ms" {
     try testing.expectEqual(@as(u64, 800), metadata.duration_ms);
     try testing.expectEqual(@as(u32, 22_050), metadata.sample_rate);
     try testing.expectEqual(@as(u32, 1), metadata.channels);
+}
+
+test "真 legacy 素材（存在才跑）：四个 WAV tag + AIFF 全是容器精确值" {
+    const Case = struct {
+        name: []const u8,
+        duration_ms: u64,
+        sample_rate: u32,
+        channels: u32,
+        bits: u16,
+        kind: Kind,
+    };
+    // ADPCM 的 2036 / 2031 是"完整块 × 每块样本数"的结果；和 ffprobe 的 2.000 s
+    // 差 36 / 31 ms（ffprobe 读 fact / 平均码率），仍在 50 ms 容差内。
+    const cases = [_]Case{
+        .{ .name = "alaw-8k.wav", .duration_ms = 2000, .sample_rate = 8_000, .channels = 1, .bits = 8, .kind = .wav },
+        .{ .name = "mulaw-8k.wav", .duration_ms = 2000, .sample_rate = 8_000, .channels = 1, .bits = 8, .kind = .wav },
+        .{ .name = "ima-wav-44k.wav", .duration_ms = 2036, .sample_rate = 44_100, .channels = 1, .bits = 4, .kind = .wav },
+        .{ .name = "ms-adpcm-44k.wav", .duration_ms = 2031, .sample_rate = 44_100, .channels = 1, .bits = 4, .kind = .wav },
+        .{ .name = "aiff-s16.aiff", .duration_ms = 2000, .sample_rate = 44_100, .channels = 1, .bits = 16, .kind = .aiff },
+        .{ .name = "aiff-s24.aiff", .duration_ms = 2000, .sample_rate = 44_100, .channels = 1, .bits = 24, .kind = .aiff },
+    };
+
+    for (cases) |case| {
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(
+            &path_buffer,
+            "C:\\src\\zig-audio-vectors\\legacy\\{s}",
+            .{case.name},
+        ) catch return error.SkipZigTest;
+        std.Io.Dir.cwd().access(test_io, path, .{}) catch return error.SkipZigTest;
+
+        const metadata = (try probe(test_allocator, test_io, path)).?;
+        try testing.expectEqual(case.duration_ms, metadata.duration_ms);
+        try testing.expectEqual(case.sample_rate, metadata.sample_rate);
+        try testing.expectEqual(case.channels, metadata.channels);
+        try testing.expectEqual(case.bits, metadata.bits);
+        try testing.expectEqual(case.kind, metadata.kind);
+        try testing.expect(!metadata.estimated);
+    }
 }
 
 test "缺失文件：具名错误，不是 null" {
