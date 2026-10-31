@@ -64,18 +64,26 @@ UI 不认识"音频"或"视频"，只认识这五个分支。新增一种媒体 
 **推论**：将来若我们自己写 handler，它也只能住在边缘（独立 COM 组件），不能进 app——
 否则我们就从"聚合机"变成了"会翻译的聚合机"，被格式数量绑死。
 
-**关键决定：通用预览走 Windows Shell 的缩略图 API（`IShellItemImageFactory`），
-不走 FFmpeg。**
+**关键决定（已修订）：常用格式自己解，Shell 只做专业格式的兜底。**
 
-理由有三条，每条都指向宪章本身：
+最初写的是"通用预览走 Shell 的 `IShellItemImageFactory`"，理由是零转义、覆盖面和体积。
+那三条仍然成立，但它把**所有**格式的预览权交给了一个我们既不写也审不了的第三方 handler：
+handler 没装就没有预览，装坏了就是我们的进程崩。
 
-1. **零转义**：那是 Explorer 自己用的同一个接口，一次调用直达系统；
-2. **覆盖面**：装了 PS/AI/Blender/剪映，系统里就有对应 handler，我们不用为每种
-   格式写一遍；
-3. **体积**：FFmpeg 链接进来就是二三十 MiB，直接撞碎 5 MiB 的安装包目标。
+现在每个 provider 自给自足、地位平等：
 
-视频的"拖动预览/逐帧"是另一件事，留到第二阶段，用 Media Foundation 的
-`IMFSourceReader` 抽帧——同样是系统 API，同样不引入第三方运行时。
+| 格式 | provider | 依赖 |
+| --- | --- | --- |
+| wav | `wasapi-pcm`（自己解码 + WASAPI） | 无 |
+| mp3/aac/m4a/wma | `mf-audio`（Media Foundation 解码） | 系统 codec |
+| png/jpg/bmp/gif/tif | `image-wic`（WIC 解码） | 系统 codec |
+| mp4/mov/wmv | `mf-video`（MF 抽首帧） | 系统 codec |
+| psd/ai/blend 等 | `shell-thumbnail`（`IShellItemImageFactory`） | **第三方 handler** |
+
+前四种是"我们自己能回答的"，不需要能力表、不看注册表；最后一种才是"问系统"。
+**没有系统级快速通道**：Shell 只是表里的一项，排在后面，因为它是唯一需要别人装东西的。
+
+体积目标没变（这些全是系统 API，没有一个第三方运行时）；零转义也没变（我们直呼 DLL）。
 
 ---
 
