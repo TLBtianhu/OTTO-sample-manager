@@ -4,31 +4,39 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\opacity.ps1 -Release
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\opacity.ps1 -NoBuild
 #
-# Every run builds a REAL HWND with --settings-probe: 380x700, hidden, never
-# activated, no taskbar entry, and --nanoui-snapshot makes it exit. The numbers
-# come from the flags Windows itself keeps (WS_EX_LAYERED +
-# GetLayeredWindowAttributes), not from anything the app remembered.
+# Every run creates a REAL HWND with --settings-probe: hidden, never activated,
+# no taskbar entry. Opacity is driven through the product's programmable entry
+# instead of mouse coordinates:
+#
+#   otto-lite <library> --settings-probe --no-isolation --set-opacity=<0..100>
+#
+# That entry (zig\app\src\opacity_probe.zig) writes the same Settings field the
+# panel slider writes, calls the same Panel.applyOpacity, and persists through
+# the same atomic write as closing the panel. The assertions read the numbers
+# Windows itself keeps (WS_EX_LAYERED + GetLayeredWindowAttributes), not
+# anything the app remembered.
+#
+# --no-isolation is used only to keep the run single-process: this probe is
+# about the window, not the thumbnail helper, and the helper's stderr could be
+# interleaved into a machine-readable line on a shared console.
 #
 # What this proves:
-#   1. no settings file: opacity=255, NOT layered, getOpacity=null
-#      (255 removes WS_EX_LAYERED; see zig/ports/src/win_window.zig)
-#   2. settings {"opacity":153}: startup opacity=153, layered, getOpacity=153
-#   3. settings {"opacity":255}: startup opacity=255, not layered
-#   4. dragging the panel slider is hot: the real window is 60% on that frame,
-#      before the panel closes (getOpacity=153)
-#   5. closing the panel persists ("opacity":153); the next start reads it back
-#   6. --d3d prints exactly one opacity-d3d-warning line (flip model ignores
-#      SetLayeredWindowAttributes)
-#   7. our window is never the foreground window (sampled while the probe runs:
-#      GetForegroundWindow() != our hwnd at every sample). Unrelated programs
-#      taking the foreground do not fail this check.
+#   1. --set-opacity=60: alpha=153, layered, getOpacity=153, hidden
+#   2. the settings file has "opacity":153 (same atomic write as the panel)
+#   3. a later start with no --set-opacity reads 153 back and applies it
+#   4. --set-opacity=100: alpha=255, layered=false, getOpacity=null
+#   5. --set-opacity=0: getOpacity=0 (0 is a legal value)
+#   6. --d3d --set-opacity=60 still prints exactly one opacity-d3d-warning
+#   7. --set-opacity=150 / abc: named error, exit 1, no window
+#   8. every run stays hidden and our HWND is never the foreground window
+#      (sampled: GetForegroundWindow() != our hwnd at every sample)
+#   9. the settings panel snapshot proves the slider UI is still there. It is
+#      opened by clicking the "settings" label (`click:TEXT` in nanoui's
+#      script DSL), never by pixel coordinates; the image is looked at by eye
+#      and the script makes no coordinate assertions about it.
 #
-# The panel is driven by coordinates (the panel is fixed at 380 points, so its
-# geometry is stable; a 2x screenshot of the same layout shows the slider at
-# y=196 points). If the panel layout changes, update these four numbers:
-#   card x=24..356, padding 16 -> slider track x=40..340, y=196
-#   ui.slider: t=(x-40-9)/(300-18); 60% -> 218, 100% -> 336
-#   header settings button (top right) -> 352,57; panel close button -> 316,95
+# There are no pixel coordinates in this file. Re-layout the panel (different
+# label lengths, moved rows, a resized card) and this script keeps passing.
 #
 # ASCII only: Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI.
 
@@ -46,15 +54,14 @@ $exe = Join-Path $appDir 'zig-out\bin\otto-lite.exe'
 $settings = Join-Path $appDir 'zig-out\bin\.otto-settings.json'
 $library = Join-Path $appDir 'fixtures\library.json'
 $shotDir = Join-Path $env:TEMP 'otto-opacity-probe'
+$startupShot = Join-Path $shotDir 'startup.png'
 $panelShot = Join-Path $root 'snapshot-opacity.png'
 
-$sliderY = 196
-$x60 = 218
-$x100 = 336
-$xSettings = 352
-$ySettings = 57
-$xClose = 316
-$yClose = 95
+# The settings button is found by its label through nanoui's `click:TEXT`
+# script step, not by coordinates. The label is two CJK code points; building
+# it from [char] keeps this file ASCII-only (PowerShell 5.1 would misread a
+# literal in a BOM-less script).
+$settingsLabel = -join ([char[]](0x8BBE, 0x7F6E))
 
 if (-not (Test-Path $Zig)) { throw "zig not found: $Zig" }
 
@@ -142,15 +149,14 @@ public class OpacityFocus {
 '@
 
 $results = @()
+# Every stdout/stderr line from every probe run, for the final "stays hidden"
+# assertion. Only the lines that carry a `visible=` field are checked.
+$script:allProbeLines = New-Object System.Collections.ArrayList
+
 function Check([string]$name, [bool]$ok, [string]$detail) {
   $script:results += [pscustomobject]@{ Name = $name; Ok = $ok; Detail = $detail }
   $tag = if ($ok) { 'PASS' } else { 'FAIL' }
   Write-Output ('  [{0}] {1}: {2}' -f $tag, $name, $detail)
-}
-
-# Writes the dev settings file the app reads (exe-adjacent, see settings_store).
-function Write-Settings([string]$json) {
-  [System.IO.File]::WriteAllText($settings, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # Runs the probe; stdout and stderr are merged into one line list.
@@ -165,8 +171,21 @@ function Get-OpacityLines($lines) {
   return @($lines | Where-Object { $_ -match '^otto-lite: opacity=' })
 }
 
+function Get-SetLines($lines) {
+  return @($lines | Where-Object { $_ -match '^otto-lite: opacity-set ' })
+}
+
 function Get-WarningLines($lines) {
   return @($lines | Where-Object { $_ -match '^otto-lite: opacity-d3d-warning ' })
+}
+
+function Get-SettingsLines($lines) {
+  return @($lines | Where-Object { $_ -match '^otto-lite: settings path=' })
+}
+
+function Last-Line($lines, [string]$fallback) {
+  if ($lines.Count -gt 0) { return $lines[-1] }
+  return $fallback
 }
 
 # The probe prints the HWND it created on every opacity line; the sampler has
@@ -179,6 +198,11 @@ function Get-OurHwnd($lines) {
     if ($m.Success) { $value = [Convert]::ToInt64($m.Groups[1].Value, 16) }
   }
   return $value
+}
+
+function Read-SettingsFile() {
+  if (Test-Path $settings) { return [System.IO.File]::ReadAllText($settings) }
+  return ''
 }
 
 # Runs one case. The assertion is "our HWND is never GetForegroundWindow()":
@@ -205,91 +229,120 @@ function Run-Case([string]$name, [string[]]$Argv) {
   Check ("{0} foreground" -f $name) $neverOurs (
     'samples={0} distinct={1} seen=[{2}] our_hwnd={3} never_foreground={4}; diag before=0x{5:x} after=0x{6:x}' -f
       $samples, $distinct, $seenText, $ourText, $neverOurs, $fgBefore.ToInt64(), $fgAfter.ToInt64())
+  foreach ($line in $r.Lines) { $null = $script:allProbeLines.Add($line) }
   return $r
 }
 
-$shots = Join-Path $shotDir 'shot.png'
-$baseArgs = @($library, '--settings-probe')
+$baseArgs = @($library, '--settings-probe', '--no-isolation')
 
-# --- 1. default: no settings file -> 255, not layered -------------------------
+# --- 1. --set-opacity=60: the product entry applies 60% ----------------------
 Write-Output ''
-Write-Output '== 1. default (no settings file): 255 = not layered =='
+Write-Output '== 1. --set-opacity=60: alpha 153, layered, hidden =='
 Remove-Item $settings -ErrorAction SilentlyContinue
-$r = Run-Case 'default' ($baseArgs + @("--nanoui-snapshot=$shots"))
-$lines = @(Get-OpacityLines $r.Lines)
-$line = if ($lines.Count -gt 0) { $lines[-1] } else { '(no opacity line)' }
-Check 'default startup' ($line -match 'opacity=255 layered=false getOpacity=null visible=false') $line
+$r = Run-Case 'set-60' ($baseArgs + @('--set-opacity=60'))
+$sets = @(Get-SetLines $r.Lines)
+$line = Last-Line $sets '(no opacity-set line)'
+Check 'set 60 applied' ($line -match 'percent=60 alpha=153 layered=true getOpacity=153 visible=false') $line
+Check 'set 60 printed once' ($sets.Count -eq 1) ("opacity-set lines={0}" -f $sets.Count)
 
-# --- 2. a saved 60% applies on startup --------------------------------------
+# --- 2. the same atomic write as closing the panel ---------------------------
+$saved = Read-SettingsFile
+Check 'settings file has opacity 153' ($saved -match '"opacity":153') $saved
+
+# --- 3. restart with no --set-opacity: the saved value is read and applied ---
 Write-Output ''
-Write-Output '== 2. settings opacity=153 (60%): applied on startup =='
-Write-Settings '{"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":153}'
-$r = Run-Case 'saved-60' ($baseArgs + @("--nanoui-snapshot=$shots"))
-$lines = @(Get-OpacityLines $r.Lines)
-$line = if ($lines.Count -gt 0) { $lines[-1] } else { '(no opacity line)' }
-Check '60% startup' ($line -match 'opacity=153 layered=true getOpacity=153 visible=false') $line
+Write-Output '== 2. restart: 153 is read from disk and applied =='
+$r = Run-Case 'restart' ($baseArgs + @("--nanoui-snapshot=$startupShot"))
+$settingsLines = @(Get-SettingsLines $r.Lines)
+$settingsLine = Last-Line $settingsLines '(no settings line)'
+Check 'restart read 153 from disk' ($settingsLine -match 'opacity=153') $settingsLine
+$opacityLines = @(Get-OpacityLines $r.Lines)
+$line = Last-Line $opacityLines '(no opacity line)'
+Check 'restart applied 153 on startup' ($line -match 'opacity=153 layered=true getOpacity=153 visible=false') $line
+Check 'restart is read-only' (@(Get-SetLines $r.Lines).Count -eq 0) (
+  'opacity-set lines={0}' -f @(Get-SetLines $r.Lines).Count)
 
-# --- 3. 255 removes WS_EX_LAYERED again -------------------------------------
+# --- 4. --set-opacity=100: 255 removes WS_EX_LAYERED -------------------------
 Write-Output ''
-Write-Output '== 3. settings opacity=255 (100%): layered bit removed =='
-Write-Settings '{"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255}'
-$r = Run-Case 'saved-100' ($baseArgs + @("--nanoui-snapshot=$shots"))
-$lines = @(Get-OpacityLines $r.Lines)
-$line = if ($lines.Count -gt 0) { $lines[-1] } else { '(no opacity line)' }
-Check '100% startup' ($line -match 'opacity=255 layered=false getOpacity=null visible=false') $line
+Write-Output '== 3. --set-opacity=100: layered bit removed =='
+$r = Run-Case 'set-100' ($baseArgs + @('--set-opacity=100'))
+$sets = @(Get-SetLines $r.Lines)
+$line = Last-Line $sets '(no opacity-set line)'
+Check 'set 100 cleared the layered bit' ($line -match 'percent=100 alpha=255 layered=false getOpacity=null visible=false') $line
+$saved = Read-SettingsFile
+Check 'settings file has opacity 255' ($saved -match '"opacity":255') $saved
 
-# --- 4+5. panel slider is hot, closing persists ------------------------------
+# --- 5. --set-opacity=0: zero is a legal value, not "unset" ------------------
 Write-Output ''
-Write-Output '== 4. panel: drag the slider to 60%, then close (persist) =='
-$script60 = "at:$xSettings,$ySettings;at:$x60,$sliderY;at:$xClose,$yClose"
-$r = Run-Case 'panel-60' ($baseArgs + @("--nanoui-snapshot=$shots", "--nanoui-script=$script60"))
-$lines = @(Get-OpacityLines $r.Lines)
-# Two lines: startup 255, then the slider frame 153 (before the panel closed).
-$hot = if ($lines.Count -gt 0) { $lines[-1] } else { '(no opacity line)' }
-Check 'slider is hot' ($hot -match 'opacity=153 layered=true getOpacity=153 visible=false') $hot
-Check 'hot apply before close' ($lines.Count -eq 2) ("opacity lines={0} (want 2: startup + slider)" -f $lines.Count)
-$allHidden = ($lines.Count -gt 0) -and (@($lines | Where-Object { $_ -notmatch 'visible=false' }).Count -eq 0)
-Check 'window stays hidden' $allHidden ("every opacity line has visible=false ({0} lines)" -f $lines.Count)
+Write-Output '== 4. --set-opacity=0: getOpacity=0, not null =='
+$r = Run-Case 'set-0' ($baseArgs + @('--set-opacity=0'))
+$sets = @(Get-SetLines $r.Lines)
+$line = Last-Line $sets '(no opacity-set line)'
+Check 'set 0 is legal' ($line -match 'percent=0 alpha=0 layered=true getOpacity=0 visible=false') $line
+$saved = Read-SettingsFile
+Check 'settings file has opacity 0' ($saved -match '"opacity":0') $saved
 
-$saved = if (Test-Path $settings) { [System.IO.File]::ReadAllText($settings) } else { '' }
-Check 'close persists 153' ($saved -match '"opacity":153') $saved
-
-# --- 5. restart restores, and the panel snapshot shows the 60% slider --------
+# --- 6. --d3d: the limitation is still announced, once ----------------------
 Write-Output ''
-Write-Output '== 5. restart: 153 restored + panel snapshot at 60% =='
-$r = Run-Case 'restart-60' ($baseArgs + @("--nanoui-snapshot=$panelShot", "--nanoui-script=at:$xSettings,$ySettings"))
-$lines = @(Get-OpacityLines $r.Lines)
-$line = if ($lines.Count -gt 0) { $lines[-1] } else { '(no opacity line)' }
-Check 'restart restores 153' ($line -match 'opacity=153 layered=true getOpacity=153 visible=false') $line
-Check 'panel snapshot written' (Test-Path $panelShot) $panelShot
-
-# --- 6. --d3d says it may not work (one line, not silent) --------------------
-Write-Output ''
-Write-Output '== 6. --d3d: one opacity-d3d-warning line =='
-$r = Run-Case 'd3d' ($baseArgs + @('--d3d', "--nanoui-snapshot=$shots"))
+Write-Output '== 5. --d3d --set-opacity=60: one opacity-d3d-warning =='
+# Start from no settings file (startup alpha 255), so the warning belongs to
+# the probe's 60% apply instead of a stale saved value.
+Remove-Item $settings -ErrorAction SilentlyContinue
+$r = Run-Case 'd3d' ($baseArgs + @('--d3d', '--set-opacity=60'))
 $warnings = @(Get-WarningLines $r.Lines)
-$warn = if ($warnings.Count -gt 0) { $warnings[-1] } else { '(no warning line)' }
-Check 'd3d warning printed' ($warnings.Count -eq 1) ("lines={0}" -f $warnings.Count)
-Check 'd3d warning says the alpha may not apply' ($warn -match 'alpha=153') $warn
-$d3dOpacity = @(Get-OpacityLines $r.Lines)
-$line = if ($d3dOpacity.Count -gt 0) { $d3dOpacity[-1] } else { '(no opacity line)' }
-Check 'd3d still applies the bit' ($line -match 'opacity=153 layered=true') $line
+$warn = Last-Line $warnings '(no warning line)'
+Check 'd3d warning printed once' ($warnings.Count -eq 1) ("lines={0}" -f $warnings.Count)
+Check 'd3d warning names alpha 153' ($warn -match 'alpha=153') $warn
+$sets = @(Get-SetLines $r.Lines)
+$line = Last-Line $sets '(no opacity-set line)'
+Check 'd3d still applies the layered bit' ($line -match 'percent=60 alpha=153 layered=true') $line
 
-# --- 7. back to 100% through the panel ---------------------------------------
+# --- 7. invalid values: named error, exit 1, no window at all ----------------
 Write-Output ''
-Write-Output '== 7. panel: 60% -> 100%, close, persist =='
-$script100 = "at:$xSettings,$ySettings;at:$x100,$sliderY;at:$xClose,$yClose"
-$r = Run-Case 'panel-100' ($baseArgs + @("--nanoui-snapshot=$shots", "--nanoui-script=$script100"))
-$lines = @(Get-OpacityLines $r.Lines)
-$line = if ($lines.Count -gt 0) { $lines[-1] } else { '(no opacity line)' }
-Check 'slider back to 100%' ($line -match 'opacity=255 layered=false getOpacity=null visible=false') $line
-$saved = if (Test-Path $settings) { [System.IO.File]::ReadAllText($settings) } else { '' }
-Check 'close persists 255' ($saved -match '"opacity":255') $saved
+Write-Output '== 6. invalid values: named error + exit 1 =='
+$bad = Invoke-Probe @('--settings-probe', '--set-opacity=150')
+$named = @($bad.Lines | Where-Object { $_ -match 'set-opacity-invalid' })
+$applied = @($bad.Lines | Where-Object { $_ -match 'opacity-set|hwnd=' })
+Check '150 rejected with a named error' (($bad.Code -eq 1) -and ($named.Count -eq 1) -and ($applied.Count -eq 0)) (
+  'exit={0} named={1} applied={2} line={3}' -f $bad.Code, $named.Count, $applied.Count, (Last-Line $named '(none)'))
+
+$bad = Invoke-Probe @('--settings-probe', '--set-opacity=abc')
+$named = @($bad.Lines | Where-Object { $_ -match 'set-opacity-invalid' })
+$applied = @($bad.Lines | Where-Object { $_ -match 'opacity-set|hwnd=' })
+Check 'abc rejected with a named error' (($bad.Code -eq 1) -and ($named.Count -eq 1) -and ($applied.Count -eq 0)) (
+  'exit={0} named={1} applied={2} line={3}' -f $bad.Code, $named.Count, $applied.Count, (Last-Line $named '(none)'))
+
+# --- 8. panel snapshot: slider UI still there, opened by label ---------------
+Write-Output ''
+Write-Output '== 7. settings panel snapshot (image only, no coordinate assertions) =='
+if (Test-Path $panelShot) { Remove-Item $panelShot -ErrorAction SilentlyContinue }
+$r = Run-Case 'panel' ($baseArgs + @(
+  "--nanoui-snapshot=$panelShot",
+  "--nanoui-script=click:$settingsLabel"
+))
+$shotOk = $false
+$shotDetail = 'missing'
+if (Test-Path $panelShot) {
+  $bytes = [System.IO.File]::ReadAllBytes($panelShot)
+  $isPng = ($bytes.Length -gt 8 -and $bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50 -and
+    $bytes[2] -eq 0x4E -and $bytes[3] -eq 0x47)
+  $shotOk = ($isPng -and $bytes.Length -gt 10000)
+  $shotDetail = ('{0} bytes png={1}; opened with click:TEXT' -f $bytes.Length, $isPng)
+}
+Check 'panel snapshot written' $shotOk $shotDetail
+
+# --- 9. the whole run never showed our window --------------------------------
+Write-Output ''
+Write-Output '== 8. every opacity line stayed hidden =='
+$visibleFields = @($script:allProbeLines | Where-Object { $_ -match '^otto-lite: (opacity=|opacity-set )' })
+$visibleOnes = @($visibleFields | Where-Object { $_ -notmatch 'visible=false' })
+Check 'every opacity line says visible=false' (($visibleFields.Count -gt 0) -and ($visibleOnes.Count -eq 0)) (
+  '{0} opacity lines, {1} visible' -f $visibleFields.Count, $visibleOnes.Count)
 
 # --- summary ---------------------------------------------------------------
 $failed = @($results | Where-Object { -not $_.Ok })
 Write-Output ''
-Write-Output '== summary: window opacity (real hidden HWND, GDI present) =='
+Write-Output '== summary: window opacity (real hidden HWND, product entry --set-opacity) =='
 $results | ForEach-Object {
   $tag = if ($_.Ok) { 'PASS' } else { 'FAIL' }
   Write-Output ('  [{0}] {1}' -f $tag, $_.Name)

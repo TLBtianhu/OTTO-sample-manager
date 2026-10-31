@@ -12,13 +12,15 @@
 #      `--no-shell-preview`, asserting which provider answers (the 0.9.0
 #      "each format is self-sufficient" claim; also runs under -Quick)
 #   5. bench.ps1 (-Big, six rows), scroll.ps1, mem.ps1
-#   6. opacity.ps1
+#   6. opacity.ps1: real hidden HWND; product entry --set-opacity (also runs
+#      under -Quick)
 #   7. --demo / --demo-rescan / --demo-thumbs / --demo-transport
 #   8. verify-minisign.js on the newest portable.zip + setup.exe in zig\dist
 #
 # -Quick keeps the pre-commit subset: builds + tests + distribution audit +
-# provider matrix + signatures (bench / scroll / mem / opacity / self-checks are
-# skipped).
+# provider matrix + opacity + signatures (bench / scroll / mem / self-checks are
+# skipped). Opacity is cheap now: no pixel coordinates, one hidden HWND per
+# case, so it belongs in the pre-commit gate.
 # -Release skips the debug build; release is what ships.
 #
 # A sub-script failure is recorded and the run continues; the exit code is
@@ -758,7 +760,7 @@ function Invoke-Signing {
 Write-Output 'OTTO Lite 健康检查'
 Write-Output ('zig: {0}' -f $Zig)
 if ($Quick) {
-  Write-Output '模式: -Quick（跳过 bench / scroll / mem / 透明度 / 自检）'
+  Write-Output '模式: -Quick（跳过 bench / scroll / mem / 自检）'
 } elseif ($Release) {
   Write-Output '模式: 完整（-Release：只构建 release）'
 } else {
@@ -784,7 +786,13 @@ if (-not $Quick) {
   Invoke-Bench
   Invoke-Scroll
   Invoke-Mem
-  Invoke-Opacity
+}
+
+# Opacity is cheap now (one hidden HWND per case, no pixel coordinates), so it
+# is part of the -Quick pre-commit gate as well as the full run.
+Invoke-Opacity
+
+if (-not $Quick) {
   Invoke-SelfChecks
 }
 

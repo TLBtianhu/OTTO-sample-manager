@@ -231,6 +231,16 @@ pub const Panel = struct {
         );
     }
 
+    /// 验收探针入口（`--set-opacity=<n>`，见 `opacity_probe.zig`）：与滑块
+    /// **同一条**链路——写同一个字段、调同一个 `commitOpacityPercent`（→
+    /// `applyOpacity`）、用关闭面板时同一个原子写。返回写进 Win32 的 alpha。
+    pub fn setOpacityPercent(self: *Panel, percent: u8, hwnd: ?*anyopaque) u8 {
+        self.opacity_percent = @floatFromInt(percent);
+        const alpha = self.commitOpacityPercent(hwnd);
+        self.save();
+        return alpha;
+    }
+
     /// 覆盖在列表上的面板。只在 `open` 时构建；关闭后本帧不再画。
     pub fn draw(
         self: *Panel,
@@ -325,8 +335,15 @@ pub const Panel = struct {
 
     /// 滑块动了：写进 `settings.opacity`，并立刻改窗口（不等关闭面板）。
     fn setOpacityFromSlider(self: *Panel, hwnd: ?*anyopaque) void {
+        _ = self.commitOpacityPercent(hwnd);
+    }
+
+    /// 把 `opacity_percent` 写进设置并立刻改窗口。滑块与验收探针共用这一条，
+    /// 探针不复制任何应用逻辑。返回写进设置文件的 alpha。
+    fn commitOpacityPercent(self: *Panel, hwnd: ?*anyopaque) u8 {
         self.settings.opacity = settings_store.alphaFromPercent(self.opacity_percent);
         self.applyOpacity(hwnd);
+        return self.settings.opacity;
     }
 
     fn apply(self: *Panel, thumbs: *thumbs_mod.Thumbs, update: *update_ui.Update) void {
