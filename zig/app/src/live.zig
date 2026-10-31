@@ -21,6 +21,12 @@
 //!     `Index` 处理（它会按 `created` 收下新路径）；
 //!   * `overflow` 没有路径，`lost` 原样透传；空路径的路径事件丢弃。
 //!
+//! 什么时候不监听（首次启动最容易撞上）：库所在目录还不存在；或者根里没有本库
+//! 引用的样本——默认库在 `<dataDir>`，那里只有库文件 / `cache\thumbs` / settings，
+//! 监听它会把应用自己刚写的缓存当成新素材（空库同样满足这一条）。这时 watcher
+//! 是 null、`poll` 返回全零账；显式 `--watch` 不受影响。导入写出库之后
+//! `import_ui.reload` 按同一规则重建 `Live`；其余监听打开失败仍然是错误。
+//!
 //! 线程模型：`ports.Watcher` 的后台线程只往固定队列里写；`poll()` 在调用方线程
 //! 排空队列 → 适配 → `Index.apply` / `Rescan.service`。重扫的扫描线程只把
 //! `scan.Scan` 放进自旋锁保护的单格结果里；`Index` 仍然只在调用方线程上改。
@@ -38,8 +44,7 @@ const core = @import("otto_core");
 const watch = @import("otto_watch");
 const rescan_ui = @import("rescan_ui.zig");
 
-/// `Live.init` 可能失败的集合：监听口岸打不开目录 / 起不了线程、根路径非法、
-/// 以及任何一次分配失败。
+/// `Live.init` 可能失败的集合：监听口岸打不开目录 / 起不了线程、根路径非法、分配失败。
 pub const InitError = watch.InitError || watch.StartError || error{ OutOfMemory, InvalidRoot };
 
 /// 监听器专用的分配器包装：保证每次分配至少 16 字节对齐。
@@ -58,8 +63,7 @@ const AlignedAllocator = struct {
     child: std.mem.Allocator,
 
     /// 对齐下限。本机实测：地址是 2 的倍数但不是 4 的倍数时必定失败；4 字节是
-    /// `FILE_NOTIFY_INFORMATION`（DWORD 字段）的自然要求，这里取 16 留余量，
-    /// 顺便覆盖常见 SIMD / 原子类型。
+    /// `FILE_NOTIFY_INFORMATION`（DWORD）的自然要求，这里取 16 留余量。
     const min_align: usize = 16;
     /// 对齐后的指针前面存两个 usize：原始地址、原始总长度（free 需要原长度）。
     const header_size: usize = 2 * @sizeOf(usize);
@@ -112,9 +116,12 @@ pub const Live = struct {
     /// 被监视目录的绝对路径（末尾分隔符已去掉）；`poll` 用它把相对路径 join 成绝对路径。
     root: []u8,
     index: core.index.Index,
-    /// 监听器放在堆上：`Watcher.start()` 之后对象不能移动（后台线程持有它的指针），
-    /// 而 `Live` 会按值返回。
-    watcher: *watch.Watcher,
+    /// 显式 `--watch`：无条件监听（哪怕根里还没有样本）；默认根只在确实有样本时监听。
+    force_watch: bool,
+    /// 监听器放在堆上（`start()` 之后对象不能移动，而 `Live` 按值返回）。
+    /// null = 没有监听根：库所在目录不存在、空库，或根里没有本库样本（见 `init`）。
+    /// 这时视图就是库里的那份；导入重载会按同一规则再决定。
+    watcher: ?*watch.Watcher,
     /// 监听器各次分配走这层包装（RDCW 缓冲区必须对齐，见 `AlignedAllocator`）。
     watch_allocator: *AlignedAllocator,
     /// 每次 poll 重置：本批 join 出来的路径只活到 `Index.apply` 返回。
@@ -124,14 +131,20 @@ pub const Live = struct {
     last_rescan: rescan_ui.Report = .{},
     rescan_serial: u64 = 0,
 
-    /// 建立视图并开始监听 `root`。返回时后台线程已经挂好第一轮读。
+    /// 建立视图并按需开始监听 `root`（`force_watch` 或根里有本库样本才监听）。
     ///
+    /// 为什么不是"有目录就监听"：默认库是 `<dataDir>\library.json`，`Index.apply`
+    /// 会把 watcher 报的 created 路径当成新素材——启动时建 `cache\thumbs`、写缩略图
+    /// 缓存都会凭空多出几行，首次启动的空状态也会被顶掉；而那个目录里本来也永远
+    /// 收不到用户素材的事件。`root` 不存在不是错误（watcher 为 null、poll 空账），
+    /// 其它打开失败（权限 / 根不是目录 / 起不了线程）仍然照原样是启动错误。
     /// `allocator` 必须线程安全：重扫线程会用它在扫描结果里分配 arena。
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         library: *const core.store.Library,
         root: []const u8,
+        force_watch: bool,
     ) InitError!Live {
         const owned_root = try normalizeRoot(allocator, root);
         errdefer allocator.free(owned_root);
@@ -145,18 +158,41 @@ pub const Live = struct {
         watch_allocator.* = .{ .child = allocator };
         const watcher_memory = watch_allocator.allocator();
 
+        const should_watch = force_watch or rootHasSamples(library, owned_root);
         const watcher = try watcher_memory.create(watch.Watcher);
-        errdefer watcher_memory.destroy(watcher);
-        watcher.* = try watch.Watcher.init(watcher_memory, owned_root, .{});
-        errdefer watcher.deinit();
-        try watcher.start();
+        const watching_started = blk: {
+            if (!should_watch) {
+                std.debug.print("otto-lite: 监听根没有本库的样本，暂不监听 dir={s}\n", .{owned_root});
+                break :blk false;
+            }
+            watcher.* = watch.Watcher.init(watcher_memory, owned_root, .{}) catch |err| switch (err) {
+                // 目录还不存在：没有监听根。不启动 watcher（也不建目录、不监听
+                // 别处——那会把事件路径对到不存在的样本上）。
+                error.FileNotFound => {
+                    std.debug.print("otto-lite: 监听根不存在，暂不监听 dir={s}\n", .{owned_root});
+                    break :blk false;
+                },
+                else => |other| return other,
+            };
+            break :blk true;
+        };
+        if (watching_started) {
+            watcher.start() catch |err| {
+                watcher.deinit();
+                watcher_memory.destroy(watcher);
+                return err;
+            };
+        } else {
+            watcher_memory.destroy(watcher);
+        }
 
         return .{
             .allocator = allocator,
             .io = io,
             .root = owned_root,
             .index = index,
-            .watcher = watcher,
+            .force_watch = force_watch,
+            .watcher = if (watching_started) watcher else null,
             .watch_allocator = watch_allocator,
             .poll_arena = std.heap.ArenaAllocator.init(allocator),
             .rescan = rescan_ui.Rescan.init(allocator, io, owned_root),
@@ -165,14 +201,26 @@ pub const Live = struct {
 
     /// 停监听、释放视图与全部字符串；之后不可再用。
     pub fn deinit(self: *Live) void {
-        self.watcher.deinit();
+        if (self.watcher) |watcher| {
+            watcher.deinit();
+            self.watch_allocator.allocator().destroy(watcher);
+        }
         self.rescan.deinit();
-        self.watch_allocator.allocator().destroy(self.watcher);
         self.allocator.destroy(self.watch_allocator);
         self.index.deinit();
         self.poll_arena.deinit();
         self.allocator.free(self.root);
         self.* = undefined;
+    }
+
+    /// 真的挂上了监听吗？空库 / 根里没有本库样本 / 根还不存在时是 false。
+    pub fn watching(self: *const Live) bool {
+        return self.watcher != null;
+    }
+
+    /// 启动时是否显式 `--watch`（`import_ui.reload` 建新 Live 时沿用）。
+    pub fn watchForced(self: *const Live) bool {
+        return self.force_watch;
     }
 
     /// 排空 watcher → 适配成 `core.Change` → 一次性 `index.apply`。
@@ -184,9 +232,11 @@ pub const Live = struct {
         const arena = self.poll_arena.allocator();
 
         var changes: std.ArrayListUnmanaged(core.index.Change) = .empty;
-        while (self.watcher.next()) |event| {
-            if (try adapt(&event, self.root, arena)) |change| {
-                try changes.append(arena, change);
+        if (self.watcher) |watcher| {
+            while (watcher.next()) |event| {
+                if (try adapt(&event, self.root, arena)) |change| {
+                    try changes.append(arena, change);
+                }
             }
         }
 
@@ -279,13 +329,16 @@ pub const Live = struct {
 
     /// 强制注入一次溢出（测试 / `--demo-rescan` 的钩子）：和 watcher 报
     /// `Change.overflow` 走同一条路——标脏 + 排重扫。不依赖真实的内核缓冲区溢出。
+    /// 没有监听根时是空操作：重扫要读的目录根本不存在，排了也只会失败重试。
     pub fn injectOverflow(self: *Live, lost: u32) error{OutOfMemory}!void {
+        if (self.watcher == null) return;
         _ = try self.index.apply(&.{.{ .overflow = lost }});
         self.rescan.request();
     }
 
     /// 不经过溢出、主动排一次重扫（`--demo-rescan` 的「再跑一次」用它）。
     pub fn requestRescan(self: *Live) void {
+        if (self.watcher == null) return;
         self.rescan.request();
     }
 
@@ -363,6 +416,29 @@ fn normalizeRoot(allocator: std.mem.Allocator, root: []const u8) error{ OutOfMem
     }
     if (end == 0) return error.InvalidRoot;
     return allocator.dupe(u8, root[0..end]);
+}
+
+/// 监听根里有没有本库引用的样本（没有就没什么可监听的，见 `Live.init`）。
+pub fn rootHasSamples(library: *const core.store.Library, root: []const u8) bool {
+    for (library.samples) |sample| {
+        if (underRoot(sample.file_path, root)) return true;
+    }
+    return false;
+}
+
+/// `path` 在 `root` 下吗？Windows：大小写不敏感、`/` 与 `\` 等价；纯字符串判断。
+fn underRoot(path: []const u8, root: []const u8) bool {
+    if (root.len == 0 or path.len <= root.len) return false;
+    for (path[0..root.len], root) |a, b| {
+        if (isSep(a) and isSep(b)) continue;
+        if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
+    }
+    // 盘根（`C:\`）以分隔符结尾：前缀对上就是它的孩子。
+    return isSep(root[root.len - 1]) or isSep(path[root.len]);
+}
+
+fn isSep(ch: u8) bool {
+    return ch == '\\' or ch == '/';
 }
 
 // ---------------------------------------------------------------------------

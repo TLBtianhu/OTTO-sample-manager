@@ -23,6 +23,8 @@
 //!                         这个 import 一起进来（真实播放由 `--play-test` 覆盖）。
 test {
     _ = @import("live.zig");
+    // 监听判据：没有监听根 / 根里没有本库样本 / 样本在根下 / 显式 --watch。
+    _ = @import("live_test.zig");
     // 溢出重扫：防抖 / Hold 的纯逻辑 + 真实文件系统上的增删改与注释保留。
     _ = @import("rescan_ui.zig");
     _ = @import("rescan_test.zig");

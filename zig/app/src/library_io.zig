@@ -7,6 +7,10 @@
 //!
 //! 文件读写只走 `ports/library_file.zig`（原子写 / 带上限的整读），序列化只走
 //! `core/store.zig` 与 `core/library_binary.zig`。本文件是两者之间唯一的接线点。
+//!
+//! 两个打开入口：`load` 是纯读取（CLI 自检用，文件不在就是 `FileNotFound`）；
+//! `open` 是**启动入口**——文件不存在 = 空库（首次启动），只有存在却读不了 /
+//! 损坏才是错误。两者的分界就是 `error.FileNotFound`，没有第二种猜测。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -42,12 +46,40 @@ pub fn formatOf(bytes: []const u8) Format {
     return .otto;
 }
 
+/// 一次"打开库"的结果。
+///
+/// `empty = true` 表示文件**不存在**，按空库启动（首次启动的正常路径）；
+/// 它不是错误，调用方照常开窗，只是列表里没有素材。
+pub const Opened = struct {
+    library: core.store.Library,
+    empty: bool,
+};
+
 /// 打开一个库文件。返回的 `Library` 自己持有 arena，调用方 `deinit()`。
 ///
 /// 读取上限取两套格式上限的较大者；JSON 再有 `store.max_file_bytes` 的独立
 /// 检查，保持原来"超大 JSON 明确报 FileTooLarge"的行为。
 pub fn load(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8) LoadError!core.store.Library {
     return loadWith(init.io, allocator, path);
+}
+
+/// 首次启动的打开方式：文件**不存在** → `core.store.empty()` 的空库；
+/// 存在但读不了 / 损坏（`AccessDenied` / `BadMagic` / `Truncated` / …）→ 原样
+/// 返回具名错误。两者不能混：把损坏文件当空库会静默丢掉用户的库，把不存在当
+/// 错误就是"点了没反应"。
+pub fn open(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8) LoadError!Opened {
+    return openWith(init.io, allocator, path);
+}
+
+/// `open` 的 io 版本：`--import-into` / 测试不必伪造 `std.process.Init`。
+pub fn openWith(io: std.Io, allocator: std.mem.Allocator, path: []const u8) LoadError!Opened {
+    const library = loadWith(io, allocator, path) catch |err| switch (err) {
+        // 文件不存在（含父目录也还不存在）：空库，不是错误。这里只认
+        // FileNotFound——读失败与解码失败都要按具名错误冒上去。
+        error.FileNotFound => return .{ .library = try core.store.empty(allocator), .empty = true },
+        else => |other| return other,
+    };
+    return .{ .library = library, .empty = false };
 }
 
 /// `load` 的 io 版本：不开窗的命令行流水线（`--import`）与测试只需要 `std.Io`，
@@ -113,6 +145,63 @@ pub fn inspectWith(io: std.Io, allocator: std.mem.Allocator, path: []const u8) L
         .groups = library.groups.len,
         .bytes = bytes.len,
     };
+}
+
+test "open：文件不存在（含父目录不存在）= 空库，不是错误" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buffer);
+    const root = buffer[0..len];
+
+    // 父目录就在、文件不在（便携版 data 已建、还没有库）。
+    const missing = try std.fs.path.join(std.testing.allocator, &.{ root, "library.otto" });
+    defer std.testing.allocator.free(missing);
+    var opened = try openWith(std.testing.io, std.testing.allocator, missing);
+    defer opened.library.deinit();
+    try std.testing.expect(opened.empty);
+    try std.testing.expectEqual(@as(usize, 0), opened.library.samples.len);
+
+    // 父目录也不在（全新安装，第一次导入之前）：同样是空库，不能崩在路径拼接上。
+    const missing_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "not-yet", "library.json" });
+    defer std.testing.allocator.free(missing_dir);
+    var opened_dir = try openWith(std.testing.io, std.testing.allocator, missing_dir);
+    defer opened_dir.library.deinit();
+    try std.testing.expect(opened_dir.empty);
+    try std.testing.expectEqual(@as(usize, 0), opened_dir.library.samples.len);
+}
+
+test "open：存在但损坏仍是具名错误，绝不当成空库" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buffer);
+    const root = buffer[0..len];
+
+    // 一个字节的垃圾：短于 OTTOLIB magic，解码器给 Truncated。
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "half.otto", .data = "X" });
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root, "half.otto" });
+    defer std.testing.allocator.free(path);
+    try std.testing.expectError(error.Truncated, openWith(std.testing.io, std.testing.allocator, path));
+}
+
+test "open：能读的库照常解析，empty = false" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buffer);
+    const root = buffer[0..len];
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "library.json",
+        .data = "{\"samples\":{\"a\":{\"id\":\"a\",\"fileName\":\"a\"}}}",
+    });
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root, "library.json" });
+    defer std.testing.allocator.free(path);
+    var opened = try openWith(std.testing.io, std.testing.allocator, path);
+    defer opened.library.deinit();
+    try std.testing.expect(!opened.empty);
+    try std.testing.expectEqual(@as(usize, 1), opened.library.samples.len);
 }
 
 test "formatOf：magic 优先，坏 magic 仍按 otto，JSON 按内容判断" {

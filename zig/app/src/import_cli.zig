@@ -315,14 +315,19 @@ pub fn importRun(
     const temp = transient.allocator();
 
     // 1) 载入底库。`base_library_path` 优先；没给时若 `save_path` 已存在就用它
-    //    当底库——"同一条命令再跑一次"必须是 added=0。已存在的库读不了就失败，
-    //    绝不悄悄覆盖用户的库。
+    //    当底库——"同一条命令再跑一次"必须是 added=0。**文件不存在 = 空库**：
+    //    首次启动还没有库文件，第一次导入不能因此失败；已存在的库读不了仍然
+    //    失败，绝不悄悄覆盖用户的库。
     const base_path = base_library_path orelse existingLibraryPath(io, save_path);
     var library = if (base_path) |path|
-        library_io.loadWith(io, allocator, path) catch |err| {
-            report.failure = .{ .stage = .library, .name = @errorName(err) };
-            report.ms = elapsedMs(io, started);
-            return report;
+        library_io.loadWith(io, allocator, path) catch |err| switch (err) {
+            // stat 之后、读之前被删了：按空库继续（写回是原子替换）。
+            error.FileNotFound => try core.store.empty(allocator),
+            else => {
+                report.failure = .{ .stage = .library, .name = @errorName(err) };
+                report.ms = elapsedMs(io, started);
+                return report;
+            },
         }
     else
         try core.store.empty(allocator);
@@ -373,6 +378,15 @@ pub fn importRun(
     }
 
     // 4) 合并（深拷贝进库的 arena）并原子写。
+    //
+    //    首次启动：目标目录（`<dataDir>`）可能还不存在。`writeAtomic` 只写
+    //    同目录的 `.tmp`，不会替调用方建目录——这里建，失败按 save 阶段报具名
+    //    错误（而不是让用户看到"导入失败 FileNotFound"却不知道缺哪个目录）。
+    ensureParentDir(io, save_path) catch |err| {
+        report.failure = .{ .stage = .save, .name = @errorName(err) };
+        report.ms = elapsedMs(io, started);
+        return report;
+    };
     report.added = try library.appendSamples(incoming.items);
     report.bytes = library_io.saveWith(io, allocator, save_path, &library) catch |err| {
         report.failure = .{ .stage = .save, .name = @errorName(err) };
@@ -402,7 +416,11 @@ pub fn runInto(
     };
     defer target.deinit(allocator);
 
-    const report = importRun(allocator, io, folder, library_path, target.path) catch |err| {
+    // 底库：调用方给的路径；它还不存在（首次启动）时用本次的落点——那是上次
+    // 导入写的 `.otto`。否则第二次 `--import-into` 会拿空库 + 本次扫描结果把
+    // 已导入的库覆盖掉（默认库名还是 `library.json`，而它并不存在）。
+    const base = runIntoBase(io, library_path, target.path);
+    const report = importRun(allocator, io, folder, base, target.path) catch |err| {
         std.debug.print("otto-lite: import-into 失败 error={s}\n", .{@errorName(err)});
         return 1;
     };
@@ -426,6 +444,14 @@ pub fn runInto(
         std.Io.File.stdout().writeStreamingAll(io, line) catch {};
     }
     return 0;
+}
+
+/// `runInto` 的底库选择：调用方给的库路径**存在**就用它；还不存在（首次启动）
+/// 时用本次落点——那是上一次导入写出的 `.otto`。纯路径判断，不打开文件；单独
+/// 拆出来是为了能在测试里断言（`runInto` 会往 stdout 打摘要，而 stdout 是
+/// `zig build test --listen=-` 的协议通道，测试里不能调它）。
+pub fn runIntoBase(io: std.Io, library_path: []const u8, save_path: []const u8) []const u8 {
+    return existingLibraryPath(io, library_path) orelse save_path;
 }
 
 fn countsFrom(report: Report) Counts {
@@ -457,6 +483,15 @@ fn existingLibraryPath(io: std.Io, path: []const u8) ?[]const u8 {
     return path;
 }
 
+/// 落盘前建出目标所在目录：首次启动时 `<dataDir>` 还不存在，而 `writeAtomic`
+/// 只写同目录的 `.tmp`（它不替调用方建目录）。只建路径里点名的那一层，不猜
+/// 别的目录；相对文件名（没有目录部分）什么都不做。
+fn ensureParentDir(io: std.Io, path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return;
+    if (parent.len == 0 or std.mem.eql(u8, parent, ".")) return;
+    try std.Io.Dir.cwd().createDirPath(io, parent);
+}
+
 fn printSummary(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -479,6 +514,7 @@ fn printSummary(
             elapsed_ms,
         },
     ) catch return;
+    defer allocator.free(line);
     std.Io.File.stdout().writeStreamingAll(io, line) catch {};
 
     // 扫描层跳过的东西（隐藏 / .tmp / 超限 / 非普通文件）不在主摘要里，
@@ -497,5 +533,6 @@ fn printSummary(
             counts.duplicate_scanned,
         },
     ) catch return;
+    defer allocator.free(extra);
     std.Io.File.stdout().writeStreamingAll(io, extra) catch {};
 }

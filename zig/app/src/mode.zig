@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const import_target = @import("import_target.zig");
 
 pub const Mode = enum {
     dev,
@@ -188,6 +189,47 @@ pub fn defaultLibraryPath(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return libraryPathFor(allocator, mode, exe_path, appdata);
 }
 
+/// 启动/自检真正打开的默认库（`defaultLibraryPath` 之上再看一眼 `.otto`）。
+///
+/// 为什么需要：首次导入按 `import_target` 的规则把 JSON 位置写成同目录的
+/// `library.otto`；下一次启动若只认名义上的 `library.json`，用户刚导入的素材
+/// 就又变回空状态。`.otto` 存在就优先它（它是导入之后的真源），否则用名义
+/// JSON（老用户的原库，不需要迁移）。
+pub fn resolveDefaultLibrary(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const nominal = try defaultLibraryPath(allocator, io);
+    return preferOtto(allocator, io, nominal);
+}
+
+/// `resolveDefaultLibrary` 的路径部分：`nominal` 归本函数所有（释放或原样返回）。
+///
+///   * 同目录 `<stem>.otto` 存在 → 返回它的副本，释放 nominal；
+///   * 否则 → 原样返回 nominal（它也可能不存在：那就是首次启动）。
+pub fn preferOtto(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    nominal: []u8,
+) error{OutOfMemory}![]u8 {
+    var target = import_target.resolve(allocator, nominal, null) catch |err| switch (err) {
+        error.OutOfMemory => {
+            allocator.free(nominal);
+            return error.OutOfMemory;
+        },
+    };
+    defer target.deinit(allocator);
+    // 名义路径本来就是 `.otto`：不用再挑，也绝不能拼成 `library.otto.otto`。
+    if (std.mem.eql(u8, target.path, nominal)) return nominal;
+    if (!fileExists(io, target.path)) return nominal;
+    allocator.free(nominal);
+    return allocator.dupe(u8, target.path);
+}
+
+/// 薄封装：只判"在不在"。查不了（没权限等）一律当"不在"——真正的读取失败
+/// 会由 `library_io.open` 报具名错误，这里不制造第二种失败。
+fn fileExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
 /// 缩略图 L3 缓存目录的纯路径：`<dataDir>\cache\thumbs`；没有 dataDir 就是 null
 /// （dev 形态不写盘，避免污染工程目录）。
 pub fn cacheDirFor(allocator: std.mem.Allocator, data_dir: ?[]const u8) !?[]u8 {
@@ -214,16 +256,52 @@ pub fn systemFontDir() ?[]const u8 {
 ///
 /// 从 `main.zig` 挪到这里：`main` 要保持 ≤600 行（`--bench-first-frame` 的接线
 /// 也要占几行），而"库路径 → 监听根"本来就是运行形态的一部分。
+///
+/// 首次启动时库所在目录可能**还不存在**（`<dataDir>` 还没建）：这条路径不能报
+/// FileNotFound（那会变成"双击没反应"），而是按 cwd 给出绝对路径；没有监听根
+/// 时 `live.Live.init` 不启动 watcher（目录不存在只是不监听的原因之一，见
+/// `live.zig`）。`--watch` 是用户点名要监听的目录，仍按真实路径解析，不存在就是错误。
 pub fn watchRoot(
     allocator: std.mem.Allocator,
     io: std.Io,
     watch_dir: ?[]const u8,
     library_path: []const u8,
-) ![]const u8 {
+) ![]u8 {
     const cwd = std.Io.Dir.cwd();
-    if (watch_dir) |dir| return try cwd.realPathFileAlloc(io, dir, allocator);
+    if (watch_dir) |dir| return realPathDupe(allocator, cwd, io, dir);
+    // `dirname` 对 "library.json" 返回 null：那时根就是 cwd，不能让 null 落到
+    // 路径拼接里。
     const parent = std.fs.path.dirname(library_path) orelse ".";
-    return try cwd.realPathFileAlloc(io, parent, allocator);
+    return realPathDupe(allocator, cwd, io, parent) catch |err| switch (err) {
+        // 首次启动：库所在目录还不存在（`<dataDir>` 还没建）。这不是错误，
+        // 给一个按 cwd 解析的绝对路径；`Live.init` 会据此不启动 watcher。
+        error.FileNotFound => absolutePath(allocator, io, parent),
+        else => |other| return other,
+    };
+}
+
+/// 真实路径 → 普通 `[]u8`。
+///
+/// 不直接用 `realPathFileAlloc`：它返回 `[:0]u8`（分配里多一个尾 0），而调用方
+/// 按普通切片释放；哨兵被抹掉后长度对不上，`testing.allocator` 会当场报
+/// "free … mismatches allocation"。这里用栈缓冲 + `dupe`，长度与分配一致。
+fn realPathDupe(
+    allocator: std.mem.Allocator,
+    cwd: std.Io.Dir,
+    io: std.Io,
+    path: []const u8,
+) ![]u8 {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try cwd.realPathFile(io, path, &buffer);
+    return try allocator.dupe(u8, buffer[0..len]);
+}
+
+/// 不碰文件系统的绝对化：把 `path` 拼到 cwd 上并归一化，不要求它存在。
+/// 只用在"库所在目录还不存在"这一条路上。
+fn absolutePath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    const cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd);
+    return try std.fs.path.resolveAlloc(allocator, &.{ cwd, path });
 }
 
 /// 启动时的数据目录：dev 没有（不写盘），其它形态按 exe 旁边的标记 /
@@ -406,4 +484,82 @@ test "L3 缓存目录：dataDir 下的 cache/thumbs；没有 dataDir 就是 null
     const dir = (try cacheDirFor(testing.allocator, "C:\\Users\\me\\AppData\\Roaming\\OTTO")).?;
     defer testing.allocator.free(dir);
     try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\cache\\thumbs", dir);
+}
+
+// ---------------------------------------------------------------------------
+// 首次启动：默认库的 `.otto` 优先，监听根在目录不存在时也不能报错
+// ---------------------------------------------------------------------------
+
+/// `preferOtto` 拿走 nominal 的所有权：测试里每次给一份副本，读完自己释放。
+fn expectPreferOtto(nominal: []const u8, expected: []const u8) !void {
+    const copy = try testing.allocator.dupe(u8, nominal);
+    const got = try preferOtto(testing.allocator, testing.io, copy);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(expected, got);
+}
+
+test "默认库：同目录 .otto 存在就用它（导入落盘之后重启还要看得见）" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &path_buffer);
+    const root = path_buffer[0..root_len];
+
+    const nominal = try std.fs.path.join(testing.allocator, &.{ root, "library.json" });
+    defer testing.allocator.free(nominal);
+    const converted = try std.fs.path.join(testing.allocator, &.{ root, "library.otto" });
+    defer testing.allocator.free(converted);
+
+    // 都没有（首次启动）：原样给名义路径，由 `library_io.open` 变成空库。
+    try expectPreferOtto(nominal, nominal);
+
+    // 只有老 JSON：用 JSON，不逼老用户迁移。
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "library.json", .data = "{}" });
+    try expectPreferOtto(nominal, nominal);
+
+    // 导入写出的 `.otto` 存在：它才是真源。
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "library.otto", .data = "OTTOLIB\x00" });
+    try expectPreferOtto(nominal, converted);
+}
+
+test "默认库：名义路径本来就是 .otto 时不会拼成 library.otto.otto" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &path_buffer);
+    const root = path_buffer[0..root_len];
+
+    const nominal = try std.fs.path.join(testing.allocator, &.{ root, "kit.otto" });
+    defer testing.allocator.free(nominal);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "kit.otto", .data = "OTTOLIB\x00" });
+    try expectPreferOtto(nominal, nominal);
+}
+
+test "监听根：库所在目录还不存在时给绝对路径，不报 FileNotFound" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &path_buffer);
+    const root = path_buffer[0..root_len];
+
+    const library = try std.fs.path.join(testing.allocator, &.{ root, "no-data", "library.json" });
+    defer testing.allocator.free(library);
+    const watch = try watchRoot(testing.allocator, testing.io, null, library);
+    defer testing.allocator.free(watch);
+
+    try testing.expect(std.fs.path.isAbsolute(watch));
+    try testing.expect(std.mem.endsWith(u8, watch, "no-data"));
+    // 只是路径，目录确实还不存在；真去 access 会 FileNotFound——正是旧启动路径
+    // 在这里报错退出。
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(testing.io, watch, .{}));
+}
+
+test "监听根：位置参数没有目录部分时落到 cwd，不把 null 拼进路径" {
+    const watch = try watchRoot(testing.allocator, testing.io, null, "library.json");
+    defer testing.allocator.free(watch);
+    try testing.expect(std.fs.path.isAbsolute(watch));
+    const cwd = try std.process.currentPathAlloc(testing.io, testing.allocator);
+    defer testing.allocator.free(cwd);
+    // Windows 路径大小写不敏感：realPath 与 currentPath 的盘符/目录大小写可能不同。
+    try testing.expect(std.ascii.eqlIgnoreCase(watch, cwd));
 }
