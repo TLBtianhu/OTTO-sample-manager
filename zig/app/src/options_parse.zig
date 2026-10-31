@@ -359,6 +359,10 @@ pub fn misc(options: *options_mod.Options, args: anytype, index: *usize, arg: []
         options.no_isolation = true;
         return true;
     }
+    if (std.mem.eql(u8, arg, "--no-prefetch")) {
+        options.no_prefetch = true;
+        return true;
+    }
     // 显式给了预算就置位：设置面板里的 L3 值只在**没给**命令行时生效。
     if (std.mem.eql(u8, arg, "--cache-budget-kib")) {
         options.disk_cache_budget_bytes = try kibToBytes(try value(args, index));

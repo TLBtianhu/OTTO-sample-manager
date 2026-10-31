@@ -41,6 +41,9 @@ pub const Options = struct {
     disk_cache_dir: ?[]const u8 = null,
     /// L3 预算（字节）。默认 256 MiB，启动时裁剪到预算以内。
     disk_cache_budget: u64 = l3.default_budget_bytes,
+    /// 空闲预取开关（`--no-prefetch` 关掉）。关掉时 `prefetch()` 是空操作，
+    /// 其余路径（可见行 `acquire`）完全不受影响——对比实验只差这一项。
+    prefetch: bool = true,
 };
 
 /// 一次成功命中的借用视图。`key` 与 `pixels` 都归缓存所有，pin 期间有效。
@@ -68,9 +71,12 @@ pub const Lookup = union(enum) {
 
 /// 取图层的账。UI / `--demo-thumbs` 只读这个快照。
 pub const Stats = struct {
-    /// 真正进了队列的取图请求。现在**所有可见行**都会入队一次，provider 的
+    /// 真正进了队列的**可见**取图请求。现在所有可见行都会入队一次，provider 的
     /// 谢绝发生在工作线程上（不再有 UI 线程的能力门禁）。
     requested: u32 = 0,
+    /// 空闲预取入队的请求数。和 `requested` 分开记：预取不是用户"要"的图，
+    /// 混进 requested 就看不出滚动本身到底请求了多少（验收按这个差值判断省了多少）。
+    prefetched: u32 = 0,
     /// 取图成功、已放进缓存的次数（= `readyCount()`）。
     ready: u32 = 0,
     /// provider 全部谢绝且原因是 no_handler/unsupported 的次数；每条只记一次
@@ -80,7 +86,7 @@ pub const Stats = struct {
     cached: u32 = 0,
     /// provider 返回 failed/file_missing（含 OOM、Shell 出错）的次数；每条只记一次。
     failed: u32 = 0,
-    /// 队列满时被顶掉的最旧请求数。
+    /// 队列满时被顶掉的请求数（可见与预取一起记）。
     dropped: u32 = 0,
     /// 还没落地的请求：队列里的 + 正在取的那一条。
     pending: u32 = 0,
@@ -97,6 +103,11 @@ pub const Stats = struct {
     l3_corrupt: u64 = 0,
 };
 
+/// 队列优先级：可见行 > 预取。队列满时的淘汰规则只认它（见 `thumbs_queue.zig`）：
+/// 预取项只能挤掉预取项，可见请求永远进得来——"预取饿死可见请求"在数据结构层面
+/// 就不成立，不依赖调用顺序。
+pub const Priority = enum { visible, prefetch };
+
 /// 一个待取的请求。key / 样本都是本层复制的，跨线程传递安全。
 pub const Job = struct {
     key: []u8,
@@ -105,6 +116,8 @@ pub const Job = struct {
     size_px: u32,
     /// 入队时算好的 L3 摘要；`null` = 本次没有磁盘缓存。
     disk_key: ?l3.Key,
+    /// 这条请求是谁要的（可见行 / 空闲预取）。只影响队列满时谁被淘汰。
+    priority: Priority = .visible,
 };
 
 /// 自适应自旋锁：临界区只有查表、拷几十字节、入 / 出队，没有 IO。

@@ -16,7 +16,7 @@ pub fn printUsage() void {
             "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
             "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
             "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
-            "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge]\n" ++
+            "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge] [--no-prefetch]\n" ++
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
             "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
             "      otto-lite --settings-probe --set-opacity=<0..100>   （验收探针；窗口隐藏）\n" ++

@@ -34,13 +34,13 @@ pub const Reporter = struct {
         self.printed_l3 = l3;
 
         std.debug.print(
-            "otto-lite: 缩略图 ready={d} 本帧画图={d} requested={d} no_handler={d} cached={d} failed={d} pending={d} " ++
+            "otto-lite: 缩略图 ready={d} 本帧画图={d} requested={d} prefetched={d} no_handler={d} cached={d} failed={d} pending={d} " ++
                 "l3_hit={d} l3_miss={d} l3_write={d} l3_evicted={d} l3_bytes={d} l3_corrupt={d}\n",
             .{
-                stats.ready,      rows_with_image, stats.requested,  stats.no_handler,
-                stats.cached,     stats.failed,    stats.pending,    stats.l3_hit,
-                stats.l3_miss,    stats.l3_write,  stats.l3_evicted, stats.l3_bytes,
-                stats.l3_corrupt,
+                stats.ready,      rows_with_image, stats.requested,  stats.prefetched,
+                stats.no_handler, stats.cached,     stats.failed,     stats.pending,
+                stats.l3_hit,     stats.l3_miss,    stats.l3_write,   stats.l3_evicted,
+                stats.l3_bytes,   stats.l3_corrupt,
             },
         );
     }

@@ -68,3 +68,20 @@ test "--no-shell-preview：开关，不吞下一个参数，不占位置参数" 
     try testing.expectEqualStrings("a.mp3", on.preview_path.?);
     try testing.expect(on.library_path == null);
 }
+
+test "--no-prefetch：默认开（false）、是开关、不吞下一个参数、不影响基准参数" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(!plain.no_prefetch);
+
+    // 和 --bench-scroll 一起用（验收就是这么跑的）：两个参数都到位，库路径还在。
+    const bench = try parse(&[_][]const u8{ "otto-lite", "--bench-scroll", "lib.json", "--frames=120", "--no-prefetch" });
+    try testing.expect(bench.no_prefetch);
+    try testing.expectEqualStrings("lib.json", bench.bench_scroll.?);
+    try testing.expectEqualStrings("lib.json", bench.library_path.?);
+    try testing.expectEqual(@as(u32, 120), bench.frames);
+
+    // 放在位置参数之后也不能把库路径吃掉。
+    const after = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--no-prefetch" });
+    try testing.expect(after.no_prefetch);
+    try testing.expectEqualStrings("lib.json", after.library_path.?);
+}

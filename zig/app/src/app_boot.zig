@@ -109,6 +109,8 @@ pub fn boot(
     const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{
         .isolation = !options.no_isolation,
         .no_shell_preview = options.no_shell_preview,
+        // `--no-prefetch` 同时关掉取图层的预取入口（视图那一侧由 Scheduler 关）。
+        .prefetch = !options.no_prefetch,
         .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null,
         .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(),
         .budget_bytes = settings.l2BudgetBytes(),

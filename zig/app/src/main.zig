@@ -38,11 +38,13 @@ const mem_probe = @import("mem_probe.zig");
 const opacity_probe = @import("opacity_probe.zig");
 const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
+const row_probe = @import("row_probe.zig");
 const row_ui = @import("row_ui.zig");
 const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
 const settings_ui = @import("settings_ui.zig");
 const thumbs_mod = @import("thumbs.zig");
+const thumbs_prefetch = @import("thumbs_prefetch.zig");
 const thumbs_report = @import("thumbs_report.zig");
 const trace = @import("trace.zig");
 const transport_mod = @import("transport.zig");
@@ -79,6 +81,10 @@ pub const State = struct {
     last_ready: u32 = 0,
     /// 本帧真正画出缩略图的可见行数（tick / 打印用）。
     rows_with_image: u32 = 0,
+    /// 空闲预取：视口窗口 + 150ms 节流（见 `thumbs_prefetch.zig`）。
+    prefetch: thumbs_prefetch.Scheduler = .{},
+    /// 行就绪探针：每帧建过的行 + 有没有画出图；`--bench-scroll` 数 ready/visited。
+    row_probe: row_probe.RowProbe = .{},
     /// 缩略图的排队/取图情况，数字变了才打印一行（见 `thumbs_report.zig`）。
     reporter: thumbs_report.Reporter = .{},
     /// 按下时的行与位置（只记一次；松手/离开后清掉）。
@@ -95,6 +101,7 @@ pub const State = struct {
         // 上一帧 pin 住的条目到这里才放掉：view 之后还有 paint，paint 期间像素要有效。
         s.thumbs.beginFrame();
         s.rows_with_image = 0;
+        s.row_probe.begin();
         // 拖放循环里窗口仍可能收到 WM_PAINT：这一帧只按现有状态重画，不处理输入、
         // 不调用任何口岸。`Transport.execute` 返回后 `busy` 才落回 false。
         const busy = s.transport.busy;
@@ -155,10 +162,17 @@ pub const State = struct {
 
         // 列表只遍历行映射：第 row 行 → 第 index 个样本（选择/预览/拖拽仍只认样本下标）。
         var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44 });
+        // 本帧建出来的行范围（含 list 的 overscan）。预取与验收都用它，不改列表行为。
+        var first_row: usize = 0;
+        var last_row: usize = 0;
+        var built_rows: usize = 0;
         while (rows.next()) |row| {
             const index = s.search.sampleAt(row) orelse continue;
             const it = row_ui.drawRow(s, c, row, index, s.samples[index]);
             if (!busy) row_ui.rowInput(s, c, index, it);
+            if (built_rows == 0) first_row = row;
+            last_row = row;
+            built_rows += 1;
         }
         rows.end();
 
@@ -189,6 +203,41 @@ pub const State = struct {
         s.reporter.report(s.thumbs, s.rows_with_image);
         // 设置面板是最后一层：遮罩 + 卡片覆盖列表，点击优先级由树序保证。
         s.settings.draw(c, s.thumbs, &s.update, window_util.nativeHandle(s.window));
+
+        // 帧尾：记下这一帧的视口，然后（有空的话）补一轮预取。每帧最多一次；
+        // 滚动中队列几乎从不清空，所以真正跑起来的是停下之后的那一拍。
+        // 拖放循环里的重画不预取（按约定那一帧不碰口岸），拖完由 tick / 下一帧补。
+        if (built_rows > 0) s.prefetch.noteWindow(first_row, last_row);
+        if (!busy) s.maybePrefetch();
+    }
+
+    /// 空闲预取的一趟：队列空闲（`pending == 0`）才把视口上下几十行提前入队。
+    ///
+    /// 三道闸在 `thumbs_prefetch.Scheduler`：开关（`--no-prefetch`）、视口是否变了、
+    /// 距上一轮 ≥120ms。这里只做行号翻译（过滤后的行 → 样本下标）与入队；预取优先级
+    /// 由 `Thumbs` 的队列保证（可见 > 预取），所以这一趟**挤不掉**任何可见请求。
+    fn maybePrefetch(s: *State) void {
+        const now = trace.now();
+        if (!s.prefetch.due(now)) return;
+        // 可见行还在排队：这一拍跳过，下一拍再看。队列空闲是"真的闲下来"的唯一判据。
+        if (s.thumbs.stats().pending != 0) {
+            s.prefetch.markBusy(now);
+            return;
+        }
+        s.prefetch.markPass(now);
+
+        var rows: [thumbs_prefetch.max_rows]usize = undefined;
+        const count = thumbs_prefetch.windowRows(&rows, s.prefetch.first, s.prefetch.last, s.search.len());
+        // 过滤后的行号必须翻译成样本下标：取图层只认样本（和选择/预览一致）。
+        var indices: [thumbs_prefetch.max_rows]usize = undefined;
+        var used: usize = 0;
+        for (rows[0..count]) |row| {
+            const index = s.search.sampleAt(row) orelse continue;
+            if (index >= s.samples.len) continue;
+            indices[used] = index;
+            used += 1;
+        }
+        s.thumbs.prefetch(s.samples, indices[0..used]);
     }
 
     /// 自续期定时器回调：poll 一次，有实际变更就重画；然后重新挂 150ms。
@@ -223,6 +272,8 @@ pub const State = struct {
                 s.flash_left -= 1;
                 if (s.flash_left == 0) if (s.window) |window| window.redraw();
             }
+            // 150ms 一拍：滚轮停下之后不再有 view，预取靠这一拍补上（同一套闸门）。
+            s.maybePrefetch();
         }
         nanoui.App.after(tick_ms, ctx, tick);
     }
@@ -340,6 +391,8 @@ pub fn main(init: std.process.Init) !void {
         .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse boot.settings.update_url, options.no_exec, options.update_current),
         .settings = try settings_ui.Panel.init(init.gpa, init.io, boot.settings, boot.settings_path, .{ .d3d = options.d3d }),
         .transport = transport_mod.Transport.init(init.gpa),
+        // `--no-prefetch`：空闲预取关掉（对比实验只差这一项）。
+        .prefetch = .{ .enabled = !options.no_prefetch, .last_try_s = trace.now() },
     };
     trace.mark("setup.state");
     defer state.import.deinit();
@@ -355,7 +408,8 @@ pub fn main(init: std.process.Init) !void {
     // `--bench-first-frame` 是离屏探针：不建真实 HWND，也不 show。
     if (options.bench_first_frame) boot.app.gui = false;
     // `--bench-scroll`：真实窗口、屏外、从不激活；窗口由基准自己建，进程交给它。
-    if (options.bench_scroll != null) try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title);
+    // 行就绪探针交出去：基准要靠它数"滚动经过的行里有多少已经画出图标"。
+    if (options.bench_scroll != null) try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe);
     state.window = try boot.app.newWindow(.{
         .title = title,
         .width = 380,

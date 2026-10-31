@@ -27,8 +27,11 @@
 
 const std = @import("std");
 const nanoui = @import("nanoui");
+const core = @import("otto_core");
 const bench_stats = @import("bench_stats.zig");
 const bench_win = @import("bench_win.zig");
+const library_io = @import("library_io.zig");
+const row_probe = @import("row_probe.zig");
 const scroll_stats = @import("bench_scroll_stats.zig");
 const thumbs_mod = @import("thumbs.zig");
 const trace = @import("trace.zig");
@@ -42,6 +45,8 @@ pub const Options = struct {
     notches: u32 = 1,
     /// 主屏右下角 1 像素（DWM 会合成它），而不是完全屏外。
     edge: bool = false,
+    /// 空闲预取开着吗（`--no-prefetch` 的反面）；只用于报表，判据在 `Thumbs`。
+    prefetch: bool = true,
 };
 
 const mib: f64 = 1024.0 * 1024.0;
@@ -159,6 +164,7 @@ pub fn runCli(
     options: anytype,
     view: nanoui.ui.View,
     title: []const u8,
+    probe: *row_probe.RowProbe,
 ) !noreturn {
     const library = options.bench_scroll orelse return error.NoLibrary;
     const window = try app.newWindow(.{
@@ -171,11 +177,12 @@ pub fn runCli(
         .x = -4000,
         .y = 0,
     });
-    const code = try run(init, app, window, thumbs, .{
+    const code = try run(init, app, window, thumbs, probe, .{
         .library = library,
         .frames = options.frames,
         .notches = options.scroll_notches,
         .edge = options.bench_scroll_edge,
+        .prefetch = !options.no_prefetch,
     });
     std.process.exit(code);
 }
@@ -185,6 +192,7 @@ pub fn run(
     app: *nanoui.App,
     window: *nanoui.Window,
     thumbs: *thumbs_mod.Thumbs,
+    probe: *row_probe.RowProbe,
     options: Options,
 ) !u8 {
     if (app.flags.hidden) {
@@ -284,6 +292,16 @@ pub fn run(
         _ = UpdateWindow(h);
     }
 
+    // 预取验收：量"滚动经过的行里，图标已就绪的比例"。行 → 样本的下标由视图写进
+    // `probe`（每帧一份），这里按样本去重、只看**第一次**出现在视口的那一帧。
+    var loaded: ?core.store.Library = library_io.loadWith(io, allocator, options.library) catch null;
+    defer if (loaded) |*value| value.deinit();
+    var visits: Visits = .{ .seen = &.{} };
+    if (loaded) |*value| {
+        visits.seen = try allocator.alloc(bool, value.samples.len);
+        @memset(visits.seen, false);
+    }
+
     // 从这里开始记每一帧。日志在内存里（不带 path = 不写文件）。
     const log = try surface.recordFrames(init.gpa);
     const inject_times = try allocator.alloc(f64, options.frames);
@@ -296,6 +314,8 @@ pub fn run(
     const started = trace.now();
     next = started + period_s;
     var posted: usize = 0;
+    // 这一拍结束时队列是空的帧数：预取只有在这样的帧尾才可能入队（见 Scheduler）。
+    var idle_frames: usize = 0;
     while (posted < options.frames) : (posted += 1) {
         pacer.waitUntil(next);
         next += period_s;
@@ -306,6 +326,9 @@ pub fn run(
         if (pumpToWheel(log)) |index| wheel_indices[posted] = index;
         // WM_PAINT 有时会排到下一轮消息之后；强制现在画掉，让"这一拍"闭合。
         _ = UpdateWindow(h);
+        // 这一帧画了哪些行、有没有图：只看第一次出现的行（见 `Visits`）。
+        visits.record(probe);
+        if (thumbs.stats().pending == 0) idle_frames += 1;
     }
     drain(io, h, 20);
     _ = UpdateWindow(h);
@@ -353,9 +376,17 @@ pub fn run(
         std.debug.print("scroll-bench: ws_mib=n/a（K32GetProcessMemoryInfo 不可用）\n", .{});
     }
     std.debug.print(
-        "scroll-bench: thumbs ready={d} pending={d} entries={d} bytes_mib={d:.2}\n",
-        .{ thumbs.readyCount(), thumb_stats.pending, thumb_stats.entries, @as(f64, @floatFromInt(thumb_stats.bytes)) / mib },
+        "scroll-bench: thumbs ready={d} pending={d} entries={d} bytes_mib={d:.2} prefetched={d} dropped={d}\n",
+        .{
+            thumbs.readyCount(),
+            thumb_stats.pending,
+            thumb_stats.entries,
+            @as(f64, @floatFromInt(thumb_stats.bytes)) / mib,
+            thumb_stats.prefetched,
+            thumb_stats.dropped,
+        },
     );
+    reportPrefetch(thumbs, if (loaded) |*value| value else null, &visits, options, thumb_stats, idle_frames, posted);
 
     // 判据：帧产量 ≥ 60/s、单帧做工 p95 在 16.67 ms 内、没有一帧超预算、
     // 我们的窗口从来不是前台。无关程序抢前台不影响 verdict。
@@ -380,6 +411,79 @@ pub fn run(
         },
     );
     return if (pass) 0 else 1;
+}
+
+// ---------------------------------------------------------------------------
+// 预取验收：滚动经过的行里，图标已就绪的比例
+// ---------------------------------------------------------------------------
+
+/// 行就绪的账：一行只在第一次出现在视口的那一帧记一次（按样本下标去重），
+/// 否则"盯了很久的那一屏"会把比例稀释成 100%。字段含义见各自注释。
+const Visits = struct {
+    /// 每个样本是否出现过（长度 = 库的样本数；库读不出来时是空切片）。
+    seen: []bool,
+    /// 第一次出现在视口里的行数（去重后的 `visited`）。
+    visited: usize = 0,
+    /// 其中**那一帧就已经画出图标**的行数。
+    ready_arriving: usize = 0,
+    frames: usize = 0,
+
+    fn record(self: *Visits, probe: *const row_probe.RowProbe) void {
+        if (probe.len == 0) return;
+        self.frames += 1;
+        for (probe.samples[0..probe.len], probe.ready[0..probe.len]) |sample, ready| {
+            if (sample >= self.seen.len) continue;
+            if (self.seen[sample]) continue;
+            self.seen[sample] = true;
+            self.visited += 1;
+            if (ready) self.ready_arriving += 1;
+        }
+    }
+};
+
+/// 预取的账：`ready_arriving` = 滚动经过的行里**进入视口那一帧就已经有图标**的比例
+/// （没有预取时新行是滚到眼前才入队的，所以接近 0）；`ready_end` 只证明"没有漏画"。
+fn reportPrefetch(
+    thumbs: *thumbs_mod.Thumbs,
+    library: ?*core.store.Library,
+    visits: *const Visits,
+    options: Options,
+    thumb_stats: thumbs_mod.Stats,
+    idle_frames: usize,
+    total_frames: usize,
+) void {
+    const percent = if (visits.visited == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(visits.ready_arriving)) / @as(f64, @floatFromInt(visits.visited));
+    const idle_pct = if (total_frames == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(idle_frames)) / @as(f64, @floatFromInt(total_frames));
+    if (library == null) {
+        std.debug.print(
+            "scroll-bench: prefetch enabled={} visited={d} ready_arriving={d} ({d:.1}%) ready_end=n/a prefetched={d} idle_frames={d}/{d}（库读不出来，末态不统计）\n",
+            .{ options.prefetch, visits.visited, visits.ready_arriving, percent, thumb_stats.prefetched, idle_frames, total_frames },
+        );
+        return;
+    }
+    var ready_end: usize = 0;
+    const samples = library.?.samples;
+    for (visits.seen, 0..) |seen, index| {
+        if (!seen or index >= samples.len) continue;
+        if (thumbs.has(samples[index])) ready_end += 1;
+    }
+    std.debug.print(
+        "scroll-bench: prefetch enabled={} visited={d} ready_arriving={d} ({d:.1}%) ready_end={d} ({d:.1}%) prefetched={d} dropped={d} frames={d} idle_frames={d}/{d} ({d:.1}%)\n",
+        .{
+            options.prefetch,
+            visits.visited,
+            visits.ready_arriving,
+            percent,
+            ready_end,
+            if (visits.visited == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(ready_end)) / @as(f64, @floatFromInt(visits.visited)),
+            thumb_stats.prefetched,
+            thumb_stats.dropped,
+            visits.frames,
+            idle_frames,
+            total_frames,
+            idle_pct,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------

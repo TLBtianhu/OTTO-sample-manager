@@ -50,7 +50,11 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     const it = ui.pressable(c, style, hover_color);
     defer ui.end(c);
 
-    if (row_thumb.draw(c, s.thumbs, sample)) s.rows_with_image += 1;
+    const drew_image = row_thumb.draw(c, s.thumbs, sample);
+    if (drew_image) s.rows_with_image += 1;
+    // 验收探针：这一帧这一行画的是真图还是占位。`--bench-scroll` 用它数
+    // "滚动经过的行里，图标已就绪的比例"（见 `row_probe.zig`）。
+    s.row_probe.add(index, drew_image);
     // 行号是**过滤结果里的位置**（第 1 行是当前列表的第一行），不是样本下标。
     ui.textf(c, .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
     // 名字是唯一可截断的：后缀用次要色贴在名字后面，长名字先被省略号吃掉，后缀永远完整。
