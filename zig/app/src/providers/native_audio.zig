@@ -33,10 +33,11 @@
 //! 小端字节序与 WAV 的 PCM16 一致——`session.build` 与播放器看不出两者的差别。
 //!
 //! 不做重采样。单声道 / 立体声**原样**交给 `session.build`；多于 2 声道时，
-//! 与 `audio/wav.zig` 共用 `audio/downmix.zig` 的同一条规则（偶数下标 → L、
-//! 奇数下标 → R、各自简单平均，5.1 的 C/LFE/环绕按同一份映射），逐块混成双声道
-//! PCM16 再交给会话。`audio/player.zig` 的 WASAPI 路径只接受 1–2 声道，这一步是
-//! 消费端的硬要求；下混规则只存在一份，FLAC 与 WAV 不会各混各的。
+//! 与 `audio/wav.zig` 共用 `audio/downmix.zig` 的同一条规则（标准顺序
+//! `FL, FR, FC, LFE, BL, BR…`，C/环绕按 0.7071 进两侧，**LFE 丢弃**，矩阵
+//! 表与理由都在那边），逐块混成双声道 PCM16 再交给会话。`audio/player.zig` 的
+//! WASAPI 路径只接受 1–2 声道，这一步是消费端的硬要求；下混规则只存在一份，
+//! FLAC 与 WAV 不会各混各的。
 //!
 //! 下混后 `Info.channels = 2`、`bits = 16`，帧数与时长不变（每帧独立混，不改变
 //! 采样率与时间轴）。

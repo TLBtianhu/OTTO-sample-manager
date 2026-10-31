@@ -7,7 +7,7 @@
 //!      与 provider 无关——"没有预览"不等于"什么都不知道"；
 //!   2. **Outcome**：落到哪个 provider（`provider=`）/ 它声明的 `kind` / 五个分支的
 //!      哪一个 / 载荷摘要（image 尺寸与字节数、audio 的采样率/声道/位深/时长/PCM
-//!      字节、text 行数与内容、none 的原因）。
+//!      字节与峰值的全局上下界、text 行数与内容、none 的原因）。
 //!
 //! 退出码：拿到任何 `Outcome` 都算成功（`none` 是诚实答案，不是错误），返回 0；
 //! 只有参数缺失、`open` 抛 `OutOfMemory` 这类"连答案都构造不出来"时返回 1。
@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const core = @import("otto_core");
+const peaks_mod = @import("audio/peaks.zig");
 const preview = @import("preview.zig");
 const providers = @import("providers/root.zig");
 const sample_facts = @import("sample_facts.zig");
@@ -102,8 +103,11 @@ pub fn run(
         .audio => |session| {
             // 波形也打出来：`peaks=` 是桶数，`waveform=` 是那张 BGRA 位图的尺寸，
             // `bytes=` 是它的字节数——一行就能核对"解码后确实算了峰值、也渲染了"。
+            // `peak_min` / `peak_max` 是所有桶合起来的全局上下界：多声道下混矩阵
+            // 改动时（尤其 LFE 被丢弃），一行就能看出输出是不是真的接近静音。
+            const bounds = peakBounds(session.peaks);
             std.debug.print(
-                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} waveform={d}x{d} bytes={d}\n",
+                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} peak_min={d} peak_max={d} waveform={d}x{d} bytes={d}\n",
                 .{
                     session.sample_rate,
                     session.channels,
@@ -111,6 +115,8 @@ pub fn run(
                     session.duration_ms,
                     session.pcm.len,
                     session.peaks.len(),
+                    bounds.min,
+                    bounds.max,
                     session.waveform.width,
                     session.waveform.height,
                     session.waveform.byteLen(),
@@ -133,4 +139,14 @@ pub fn run(
 
     std.debug.print("preview: OK\n", .{});
     return 0;
+}
+
+/// 所有波形桶的全局上下界（i16）。空 peaks 返回 0/0，不冒充数据。
+fn peakBounds(peaks: peaks_mod.Peaks) struct { min: i16, max: i16 } {
+    if (peaks.len() == 0) return .{ .min = 0, .max = 0 };
+    var low: i16 = std.math.maxInt(i16);
+    var high: i16 = std.math.minInt(i16);
+    for (peaks.min) |value| low = @min(low, value);
+    for (peaks.max) |value| high = @max(high, value);
+    return .{ .min = low, .max = high };
 }

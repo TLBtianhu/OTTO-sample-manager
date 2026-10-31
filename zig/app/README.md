@@ -179,6 +179,40 @@ next one):
 | `mf-video` | `.mp4` `.m4v` `.mov` `.wmv` | image (first frame) | Media Foundation |
 | `shell-thumbnail` | anything with a registered handler | image | Shell `IThumbnailProvider` (isolated helper) |
 
+### Multichannel downmix: one matrix for WAV and FLAC
+
+Anything with more than 2 channels is mixed down to stereo by
+`src/audio/downmix.zig` — the only implementation. The WAV decoder calls
+`allocate` (output keeps the source format) and the FLAC provider calls
+`pcm16Into` block by block (output is PCM16); there is no second set of
+coefficients. Channels follow the standard WAVE/FLAC order
+`FL, FR, FC, LFE, BL, BR, ...`:
+
+```
+L' = L + 0.7071·(C + BL [+ SL])        R' = R + 0.7071·(C + BR [+ SR])
+LFE: discarded (0 gain, never enters either side)
+```
+
+| source channels | layout | C | LFE | BL / BR | SL / SR |
+| --- | --- | --- | --- | --- | --- |
+| 3 | L R C | both | — | — | — |
+| 4 | L R BL BR | — | — | BL→L, BR→R | — |
+| 5 (5.0) | L R C BL BR | both | — | BL→L, BR→R | — |
+| 6 (5.1) | L R C LFE BL BR | both | **dropped** | BL→L, BR→R | — |
+| 7 (6.1) | L R C LFE BL BR BC | both | **dropped** | BL→L, BR→R | BC→both |
+| 8 (7.1) | L R C LFE BL BR SL SR | both | **dropped** | BL→L, BR→R | SL→L, SR→R |
+
+LFE is dropped **on purpose**: it is an effects channel, not program audio, and
+it is only safe to fold into full-range channels after a low-pass filter and
+bass management, neither of which this player has. The old rule (even index →
+left, odd index → right, each side averaged) put 5.1's LFE on the right only —
+an audibly wrong, one-sided bass boost. Mono and stereo are copied bit for bit;
+7-channel files use the WAVE 6.1 order (`BC` last; FLAC 7-channel streams order
+`BC` differently, but 5.1 — the only common multichannel FLAC — is identical);
+above 8 channels only the 7.1 positions are mapped and the rest are dropped.
+Every sample is clamped to the target range (no wraparound), with 8/16/24/32-bit
+PCM and float32 all converted through f64 and then back to the source format.
+
 `none.*` is a **decline**, not the final answer: a provider declares "I might
 handle this" cheaply in `supports`, and only `open` knows the truth. When `open`
 returns `none.*`, the registry asks the next provider; only a success branch
