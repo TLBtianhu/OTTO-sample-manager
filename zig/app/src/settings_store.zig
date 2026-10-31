@@ -11,11 +11,13 @@
 //! ## 格式
 //!
 //! ```json
-//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256}
+//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255}
 //! ```
 //!
 //! 缺字段用默认值，未知字段忽略，坏 JSON / 读不到 / 类型不对**一律**回到默认值：
 //! 设置文件坏了只该丢设置，不该让应用起不来（没有弹窗）。
+//! **例外是 `opacity` 的越界值**：它是个 u8，手改出来的 300 / -5 不该让整份设置
+//! 回默认（那会把用户的置顶与预算一起丢掉），所以按 0..255 钳住。
 //!
 //! ## 写
 //!
@@ -29,7 +31,7 @@ const std = @import("std");
 const library_file = @import("otto_library_file");
 const mode_mod = @import("mode.zig");
 
-/// 设置文件的上限。四个字段的 JSON 不到 300 字节；64 KiB 只用来拒绝
+/// 设置文件的上限。五个字段的 JSON 不到 300 字节；64 KiB 只用来拒绝
 /// "把别的文件改名成 settings.json"这种明显不对的输入，不是产品策略。
 pub const max_file_bytes: usize = 64 * 1024;
 
@@ -42,6 +44,26 @@ pub const max_budget_mib: u32 = 1024;
 
 pub const default_l2_mib: u32 = 64;
 pub const default_l3_mib: u32 = 256;
+/// 窗口不透明度默认值：255 = 完全不透明（和没有这个功能时一样）。
+pub const default_opacity: u8 = 255;
+
+/// 百分比（0..100）→ 0..255 的 alpha。四舍五入，越界钳住。
+///
+/// 设置面板的滑块是浮点的（`ui.slider` 的入参），持久化的是 u8；先转成
+/// 0..255 再存，读回来时 `alpha * 100 / 255` 正好能还原成同一个百分比
+/// （60% → 153 → 60.0%）。
+pub fn alphaFromPercent(percent: f32) u8 {
+    // NaN / inf 不该走到这里（滑块和测试给的都是有限数）；真来了按"不透明"
+    // 处理，而不是让 `@intFromFloat` 在安全模式下 panic。
+    if (!std.math.isFinite(percent)) return default_opacity;
+    const clamped = std.math.clamp(percent, 0, 100);
+    return @intFromFloat(@round(clamped * 255.0 / 100.0));
+}
+
+/// 0..255 → 0..100 的百分比（滑块的初始位置）。
+pub fn percentFromAlpha(alpha: u8) f32 {
+    return @as(f32, @floatFromInt(alpha)) * 100.0 / 255.0;
+}
 
 /// dev 形态的文件名（在 exe 旁边，不是 cwd）。
 pub const dev_file_name = ".otto-settings.json";
@@ -53,6 +75,9 @@ pub const Settings = struct {
     allocator: std.mem.Allocator,
     /// 窗口置顶。启动时应用一次；面板里的开关改完立即生效、关闭时持久化。
     always_on_top: bool = false,
+    /// 窗口整体不透明度：0 = 全透明，255 = 完全不透明。启动时应用一次，滑块
+    /// 拖动时立即生效、关闭面板时持久化（见 `settings_ui.zig`）。
+    opacity: u8 = default_opacity,
     /// 更新 feed 地址；null = 未配置（点击「检查更新」只提示，不联网）。
     update_url: ?[]u8 = null,
     /// L2（缩略图内存缓存）预算，MiB。
@@ -91,12 +116,13 @@ pub const Settings = struct {
     pub fn describe(self: *const Settings, buffer: []u8) []const u8 {
         return std.fmt.bufPrint(
             buffer,
-            "always_on_top={} update_url={s} l2_budget_mib={d} l3_budget_mib={d}",
+            "always_on_top={} update_url={s} l2_budget_mib={d} l3_budget_mib={d} opacity={d}",
             .{
                 self.always_on_top,
                 self.update_url orelse "(未配置)",
                 self.l2_budget_mib,
                 self.l3_budget_mib,
+                self.opacity,
             },
         ) catch "?";
     }
@@ -108,6 +134,7 @@ pub const Settings = struct {
             .update_url = self.update_url,
             .l2_budget_mib = self.l2_budget_mib,
             .l3_budget_mib = self.l3_budget_mib,
+            .opacity = self.opacity,
         }, .{});
     }
 
@@ -168,6 +195,9 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
         update_url: ?[]const u8 = null,
         l2_budget_mib: u32 = default_l2_mib,
         l3_budget_mib: u32 = default_l3_mib,
+        /// 用 i64 接：手改出来的 300 / -5 要能读进来再钳到 0..255，用 u8 的话
+        /// 300 会让整份解析失败、把别的设置一起丢回默认值。
+        opacity: i64 = default_opacity,
     };
 
     var parsed = std.json.parseFromSlice(Wire, allocator, bytes, .{
@@ -183,6 +213,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
     // 缺字段时 Wire 的默认值已经生效；这里再夹一次范围，防止手改出来的天文数字。
     settings.l2_budget_mib = @min(parsed.value.l2_budget_mib, max_budget_mib);
     settings.l3_budget_mib = @min(parsed.value.l3_budget_mib, max_budget_mib);
+    settings.opacity = @intCast(std.math.clamp(parsed.value.opacity, 0, 255));
     if (parsed.value.update_url) |text| {
         settings.setUpdateUrl(text) catch |err| switch (err) {
             error.UrlTooLong => std.debug.print(
@@ -228,7 +259,7 @@ fn tempPath(tmp: *testing.TmpDir, name: []const u8) ![]u8 {
     return std.fs.path.join(testing.allocator, &.{ buffer[0..length], name });
 }
 
-test "round-trip：四个字段经原子写读回来一模一样（含 URL 转义）" {
+test "round-trip：五个字段经原子写读回来一模一样（含 URL 转义与 opacity）" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const path = try tempPath(&tmp, "settings.json");
@@ -239,6 +270,8 @@ test "round-trip：四个字段经原子写读回来一模一样（含 URL 转�
     original.always_on_top = true;
     original.l2_budget_mib = 96;
     original.l3_budget_mib = 512;
+    original.opacity = alphaFromPercent(60);
+    try testing.expectEqual(@as(u8, 153), original.opacity);
     try original.setUpdateUrl("https://example.com/feed.json?channel=dev&lang=zh");
 
     try original.save(testing.io, path);
@@ -249,14 +282,17 @@ test "round-trip：四个字段经原子写读回来一模一样（含 URL 转�
     try testing.expect(loaded.always_on_top);
     try testing.expectEqual(@as(u32, 96), loaded.l2_budget_mib);
     try testing.expectEqual(@as(u32, 512), loaded.l3_budget_mib);
+    try testing.expectEqual(@as(u8, 153), loaded.opacity);
     try testing.expectEqualStrings("https://example.com/feed.json?channel=dev&lang=zh", loaded.update_url.?);
 
     // 重复写同一个目标：旧文件被替换，不是追加。
     original.always_on_top = false;
+    original.opacity = default_opacity;
     try original.save(testing.io, path);
     var again = load(testing.allocator, testing.io, path);
     defer again.deinit();
     try testing.expect(!again.always_on_top);
+    try testing.expectEqual(default_opacity, again.opacity);
 }
 
 test "缺字段用默认值；空 URL 读回来是 null" {
@@ -269,6 +305,7 @@ test "缺字段用默认值；空 URL 读回来是 null" {
     try testing.expect(settings.update_url == null);
     try testing.expectEqual(default_l2_mib, settings.l2_budget_mib);
     try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
+    try testing.expectEqual(default_opacity, settings.opacity);
 
     const empty_url =
         \\{"update_url":""}
@@ -295,18 +332,68 @@ test "坏 JSON / 类型不对：回到默认值，不报错" {
         try testing.expect(settings.update_url == null);
         try testing.expectEqual(default_l2_mib, settings.l2_budget_mib);
         try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
+        try testing.expectEqual(default_opacity, settings.opacity);
     }
 }
 
-test "未知字段忽略；手改的超大预算夹到上限" {
+test "未知字段忽略；手改的超大预算与 opacity 夹到上限" {
     const text =
-        \\{"always_on_top":true,"future_field":{"nested":[1,2,3]},"l2_budget_mib":999999,"l3_budget_mib":999999}
+        \\{"always_on_top":true,"future_field":{"nested":[1,2,3]},"l2_budget_mib":999999,"l3_budget_mib":999999,"opacity":70000}
     ;
     var settings = decode(testing.allocator, text);
     defer settings.deinit();
     try testing.expect(settings.always_on_top);
     try testing.expectEqual(max_budget_mib, settings.l2_budget_mib);
     try testing.expectEqual(max_budget_mib, settings.l3_budget_mib);
+    try testing.expectEqual(@as(u8, 255), settings.opacity);
+}
+
+test "opacity 越界钳到 0..255，而不是让整份设置回默认" {
+    // 负数 → 0；超 255 → 255。别的字段仍然按文件里的值读（不能因为一个越界
+    // 数字就把置顶/预算一起丢掉）。
+    const low =
+        \\{"always_on_top":true,"opacity":-5,"l2_budget_mib":96}
+    ;
+    var negative = decode(testing.allocator, low);
+    defer negative.deinit();
+    try testing.expect(negative.always_on_top);
+    try testing.expectEqual(@as(u32, 96), negative.l2_budget_mib);
+    try testing.expectEqual(@as(u8, 0), negative.opacity);
+
+    const high =
+        \\{"opacity":4096}
+    ;
+    var too_big = decode(testing.allocator, high);
+    defer too_big.deinit();
+    try testing.expectEqual(@as(u8, 255), too_big.opacity);
+}
+
+test "百分比 ↔ alpha：60% = 153、100% = 255、越界钳住、往返不漂" {
+    try testing.expectEqual(@as(u8, 153), alphaFromPercent(60));
+    try testing.expectEqual(@as(u8, 255), alphaFromPercent(100));
+    try testing.expectEqual(@as(u8, 0), alphaFromPercent(0));
+    try testing.expectEqual(@as(u8, 255), alphaFromPercent(120));
+    try testing.expectEqual(@as(u8, 0), alphaFromPercent(-10));
+    // 四舍五入：0.5% 落在 1（1.275 → 1），99.9% 落在 255（254.7 → 255）。
+    try testing.expectEqual(@as(u8, 1), alphaFromPercent(0.5));
+    try testing.expectEqual(@as(u8, 255), alphaFromPercent(99.9));
+    // NaN 不 panic：按"不透明"处理（滑块的浮点值也可能是 NaN 之外的脏值，
+    // 但这条边界至少不会让程序在安全模式下崩）。
+    try testing.expectEqual(default_opacity, alphaFromPercent(std.math.nan(f32)));
+
+    try testing.expectEqual(@as(f32, 60), percentFromAlpha(153));
+    try testing.expectEqual(@as(f32, 100), percentFromAlpha(255));
+    try testing.expectEqual(@as(f32, 0), percentFromAlpha(0));
+
+    // 往返：256 个 alpha 全部落回同一个值（存 u8 不会因为浮点漂移变一格）。
+    var alpha: u16 = 0;
+    while (alpha <= 255) : (alpha += 1) {
+        const round_trip = alphaFromPercent(percentFromAlpha(@intCast(alpha)));
+        if (round_trip != alpha) {
+            std.debug.print("opacity round-trip 漂了：{d} -> {d}\n", .{ alpha, round_trip });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "读不到文件：默认值，不向上抛错" {

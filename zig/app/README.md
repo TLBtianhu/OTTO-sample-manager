@@ -385,6 +385,38 @@ working directory or a path guess:
 `--version` prints the mode in parentheses and exits 0; it never opens the
 library or a window, so it works on a freshly unpacked portable copy.
 
+## Settings panel (topmost, opacity, budgets)
+
+The header's 「设置」 entry opens a card over the list. Three kinds of state live
+in `<exe dir>\.otto-settings.json` (dev) or `<data dir>\settings.json` (portable /
+installed), all with defaults when the field is missing:
+
+```json
+{"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255}
+```
+
+| field | effect | when it applies |
+| --- | --- | --- |
+| `always_on_top` | `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)` | on the click, and once at startup |
+| `opacity` | `WS_EX_LAYERED` + `SetLayeredWindowAttributes(LWA_ALPHA)` | on every slider frame (hot), and once at startup |
+| `l2_budget_mib` / `l3_budget_mib` | thumbnail caches | on close |
+| `update_url` | feed used by 「检查更新」 | on close |
+
+`opacity` is 0..255 (`60%` is 153). At **255 the layered bit is removed** instead
+of leaving an alpha=255 layered window: same pixels, but a window nobody has
+touched stays on the plain DWM path. `getOpacity` therefore returns `null` for a
+fully opaque window — the port documents that (`src/win_window.zig`).
+
+With `--d3d` the alpha may not work: the DXGI flip model is composed by DWM and
+ignores `SetLayeredWindowAttributes`. That run prints one
+`opacity-d3d-warning` line instead of failing silently; the default GDI present
+path is the one that supports it.
+
+```powershell
+# one command: real hidden HWND, flags read back from Windows, panel screenshots
+powershell -NoProfile -ExecutionPolicy Bypass -File ../opacity.ps1
+```
+
 ## Update check (M5)
 
 The header has a small 「检查更新」 entry at its right edge. Clicking it starts one

@@ -78,7 +78,7 @@ const State = struct {
     import: import_ui.Import,
     /// 「检查更新」：入口 → 工作线程取 feed → 一行提示（`update_ui.zig`）；默认不联网。
     update: update_ui.Update,
-    /// 设置面板（置顶 / 更新源 / 缓存预算，见 `settings_ui.zig`）。
+    /// 设置面板（置顶 / 不透明度 / 更新源 / 缓存预算，见 `settings_ui.zig`）。
     settings: settings_ui.Panel,
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
     transport: transport_mod.Transport,
@@ -554,7 +554,7 @@ pub fn main(init: std.process.Init) !void {
         .search = search_ui.Search.init(init.gpa),
         .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
         .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse settings.update_url, options.no_exec, options.update_current),
-        .settings = try settings_ui.Panel.init(init.gpa, init.io, settings, settings_path),
+        .settings = try settings_ui.Panel.init(init.gpa, init.io, settings, settings_path, .{ .d3d = options.d3d }),
         .transport = transport_mod.Transport.init(init.gpa),
     };
     trace.mark("setup.state");
@@ -582,8 +582,8 @@ pub fn main(init: std.process.Init) !void {
     });
     trace.mark("setup.window");
     probe.mark("window", .{ .window = state.window, .thumbs = thumbs });
-    // 置顶在启动时应用一次；保存了 true 的用户重启后窗口直接回到置顶层。
-    if (state.settings.alwaysOnTop()) state.settings.applyTopmost(window_util.nativeHandle(state.window));
+    // 窗口状态启动时应用一次：置顶（true 才碰 Win32）+ 不透明度（重启后恢复）。
+    state.settings.applyWindowState(window_util.nativeHandle(state.window));
     if (options.bench_first_frame) {
         try bench_mod.firstFrame(init, app, started);
         // 一次性探针：打印完就退出，不 join 缩略图/预览工作线程。它们可能正在
