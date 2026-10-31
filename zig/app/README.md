@@ -404,12 +404,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ..\verify-distribution.ps1
 installed for real: `--version` must name the expected form; dev must write no
 user data and keep `fixtures/library.json` read-only; portable must put the
 imported library, settings, cache and update downloads under `<exe>\data`;
-installed must put all of them under `%APPDATA%\OTTO`. Each form is started
-twice so the second process has to read the first one's settings and library
-back. The installed run points the child's `APPDATA` at a throw-away directory
-(deleted at the end); the real `%APPDATA%\OTTO` is only snapshotted before and
-after. Any mismatch makes the script exit 1, and the last thing it prints is a
-three-row PASS/FAIL table.
+installed must put all of them under the **real** `%APPDATA%\OTTO`, so the test
+proves this machine's `%APPDATA%` works instead of only proving the code reads
+the variable. Each form is started twice so the second process has to read the
+first one's settings and library back. If `%APPDATA%\OTTO` already exists (the
+user is running OTTO), it is moved to a stash under `%TEMP%` before the forms and
+moved back in a `finally`; the script then asserts the restored directory matches
+the pre-test one entry by entry (existence + top-level name/size/mtime) and exits
+1 if it does not. The stash is never deleted while it is the only copy: on
+failure its path is printed. `-Hermetic` switches the installed form back to a
+throw-away `APPDATA` (the table then says `installed(hermetic)`) and leaves the
+real directory in place — that only proves the child honours the variable. Any
+mismatch makes the script exit 1, and the last thing it prints is a three-row
+PASS/FAIL table (`installed(real)` / `installed(hermetic)`).
 
 ## Settings panel (topmost, opacity, budgets)
 
