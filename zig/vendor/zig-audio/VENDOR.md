@@ -7,12 +7,12 @@
 | --- | --- |
 | 上游 | https://github.com/TLBtianhu/zig-audio |
 | 分支 | `main`（上游只有一个真源，没有 OTTO 专用分支） |
-| 本副本对应提交 | `b38b968`（`b38b968414c2b8559c9b22705a05bcf1a1d5cf01`，版本 **v0.4**） |
+| 本副本对应提交 | `6c111d1`（`6c111d1414c2b8559c9b22705a05bcf1a1d5cf01`，版本 **v0.5**） |
 | 本副本的用途 | FLAC 解码（`providers/native_audio.zig`）；WAV 仍由 OTTO 自己的 `audio/wav.zig` 解 |
 
 ## 这个副本带了哪些补丁
 
-**零补丁**，逐字节等于上游 `b38b968` 的 `src/`、`build.zig`、`build.zig.zon`、`LICENSE`。
+**零补丁**，逐字节等于上游 `6c111d1` 的 `src/`、`build.zig`、`build.zig.zon`、`LICENSE`。
 OTTO 侧的适配全部在 `zig/app/src/providers/native_audio.zig`（自己的 provider 文件），
 不改这个目录里的任何一行。
 

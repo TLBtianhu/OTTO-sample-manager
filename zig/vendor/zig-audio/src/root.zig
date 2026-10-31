@@ -18,6 +18,24 @@ pub const Format = types.Format;
 pub const Info = types.Info;
 pub const Error = types.Error;
 
+/// Reader buffer size used by `openFile` / `openFileWithIo`. One refill is one
+/// read from the file, so a 512 KiB file takes at least eight reads and never
+/// one file-sized allocation.
+const file_read_buffer_len = 64 * 1024;
+
+/// State owned by the convenience constructors. It lives on the heap because
+/// `wav.Decoder` and `flac.Decoder` store a pointer to the Reader, and a
+/// `Decoder` returned by value would otherwise move the Reader's address.
+const OwnedSource = union(enum) {
+    bytes: *std.Io.Reader,
+    file: *FileSource,
+};
+
+const FileSource = struct {
+    reader: std.Io.File.Reader,
+    buffer: [file_read_buffer_len]u8,
+};
+
 /// Identify a format from its first bytes without touching a reader or
 /// modifying `header`.
 ///
@@ -78,6 +96,54 @@ pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder 
     return error.NotAudio;
 }
 
+/// Open a decoder over a byte slice, without consuming or copying it.
+///
+/// `bytes` is borrowed, not copied: the caller keeps ownership and must keep
+/// it alive (and unmodified) until `deinit`. The only allocation is a small
+/// `std.Io.Reader` record; the audio bytes themselves stay where they are. For
+/// a copy-free wrapper around a caller-owned handle, see README
+/// "接入你自己的文件层".
+pub fn openBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!Decoder {
+    const reader = try allocator.create(std.Io.Reader);
+    errdefer allocator.destroy(reader);
+    reader.* = std.Io.Reader.fixed(bytes);
+
+    var dec = try open(allocator, reader);
+    dec.source = .{ .bytes = reader };
+    return dec;
+}
+
+/// Open a decoder over a `std.Io.File`, streaming from the file.
+///
+/// The file is borrowed: `deinit` does not close it. A 64 KiB read buffer and
+/// the Reader state are allocated from `allocator` and released by `deinit`;
+/// the file itself is never read into one buffer. Reads are positional and
+/// start at offset 0, matching `file.reader()`'s default.
+///
+/// Zig 0.17 moved `File` to `std.Io.File` and made `file.reader()` take an
+/// `Io`. This convenience entry uses `std.Io.Threaded.global_single_threaded`,
+/// which is the right choice for a single-threaded blocking app. If the caller
+/// already owns an `Io` (concurrency, cancelation, a custom event loop), use
+/// `openFileWithIo` instead so the library never reaches for a global.
+pub fn openFile(allocator: std.mem.Allocator, file: std.Io.File) Error!Decoder {
+    return openFileWithIo(allocator, std.Io.Threaded.global_single_threaded.io(), file);
+}
+
+/// Like `openFile`, but with an explicit `Io` to perform the reads.
+pub fn openFileWithIo(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file: std.Io.File,
+) Error!Decoder {
+    const source = try allocator.create(FileSource);
+    errdefer allocator.destroy(source);
+    source.reader = file.reader(io, &source.buffer);
+
+    var dec = try open(allocator, &source.reader.interface);
+    dec.source = .{ .file = source };
+    return dec;
+}
+
 /// Public surface: `info`, `read`, and `deinit`. The remaining fields are
 /// implementation details and must not be mutated by callers.
 pub const Decoder = struct {
@@ -87,6 +153,9 @@ pub const Decoder = struct {
         wav: wav.Decoder,
         flac: flac.Decoder,
     },
+    /// Non-null only for `openBytes` / `openFile*`: reader state owned by this
+    /// decoder. Plain `open` borrows the caller's reader and leaves it null.
+    source: ?OwnedSource = null,
 
     /// Decode up to `out.len / info.channels` frames into `out` as
     /// interleaved i16, returning the number of i16 elements written.
@@ -111,12 +180,18 @@ pub const Decoder = struct {
         }
     }
 
-    /// Release decoder-owned memory. Does not close the caller's reader.
+    /// Release decoder-owned memory. Does not close the caller's reader or
+    /// file; for `openBytes` / `openFile*` it also releases the wrapper state
+    /// (but never the bytes or the file).
     pub fn deinit(self: *Decoder) void {
         switch (self.impl) {
             .wav => |*dec| dec.deinit(),
             .flac => |*dec| dec.deinit(),
         }
+        if (self.source) |source| switch (source) {
+            .bytes => |reader| self.allocator.destroy(reader),
+            .file => |file_source| self.allocator.destroy(file_source),
+        };
         self.* = undefined;
     }
 };
