@@ -1,4 +1,4 @@
-﻿# One command: run the whole OTTO Lite verification gate and print one table.
+# One command: run the whole OTTO Lite verification gate and print one table.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\health.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\health.ps1 -Quick
@@ -189,11 +189,30 @@ function Invoke-Child {
   )
   $watch = [System.Diagnostics.Stopwatch]::StartNew()
   $code = -1
+  $lines = @()
   try {
-    $lines = @(& $script:powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @ChildArgs 2>&1 | ForEach-Object {
-      if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
-    })
-    $code = $LASTEXITCODE
+    # 从没有控制台的宿主进程里直接 `& powershell.exe` 会为子进程新开一个控制台
+    # 窗口——用户看到的就是那些一闪而过的黑框。所以这里显式地创建进程、要求
+    # CreateNoWindow，并且自己读走两个流（否则子进程写满管道会卡住）。
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:powershell
+    $quoted = '"' + $ScriptPath + '"'
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quoted) + $ChildArgs
+    $psi.Arguments = [string]::Join(' ', $argList)
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEndAsync()
+    $stderr = $proc.StandardError.ReadToEndAsync()
+    $proc.WaitForExit()
+    $text = [string]$stdout.Result + [string]$stderr.Result
+    $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+    $code = $proc.ExitCode
+    $proc.Dispose()
   } catch {
     $lines = @($_.Exception.Message)
     $code = -1
