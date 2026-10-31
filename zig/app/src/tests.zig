@@ -21,6 +21,8 @@
 //!                         `--preview` / `--demo-thumbs` 覆盖）与音频 provider 的
 //!                         `supports`/文件缺失分支；`audio/wav.zig` 的解析测试也随
 //!                         这个 import 一起进来（真实播放由 `--play-test` 覆盖）。
+//!   * `providers/image*.zig` —— WIC 解码链与图片 provider（真 PNG/BMP/缩放/坏文件）；
+//!                         WIC 是系统解码器，不需要窗口、Shell 或音频设备。
 test {
     _ = @import("live.zig");
     // 监听判据：没有监听根 / 根里没有本库样本 / 样本在根下 / 显式 --watch。
@@ -57,6 +59,8 @@ test {
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");
     _ = @import("providers/root.zig");
+    // WIC 解码器的真解码测试（素材不在时 Skip）；拆文件是为了守住 600 行。
+    _ = @import("providers/image_wic_test.zig");
     // 更新检查的纯逻辑（M5）：feed 解析、版本判定、minisign 信封与真实签名向量。
     _ = @import("update_check.zig");
     // 更新检查的接线：表头文案、poll 落地、本地 feed 的三种判定与信封失败。

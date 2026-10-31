@@ -52,6 +52,9 @@ pub const Options = struct {
     save_path: ?[]const u8 = null,
     /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
     no_isolation: bool = false,
+    /// `--no-shell-preview`：临时把 Shell 缩略图从预览注册表里拿掉。
+    /// 用来证明图片/音频 provider 自给自足（验收开关，不是日常选项）。
+    no_shell_preview: bool = false,
     /// L3 缩略图磁盘缓存的预算（字节）。默认 256 MiB；`--cache-budget-kib=<n>`
     /// 按 KiB 调小，用于验证淘汰（正常用户不需要碰它）。
     disk_cache_budget_bytes: u64 = 256 * 1024 * 1024,
@@ -211,6 +214,8 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.save_path = arg["--save=".len..];
         } else if (std.mem.eql(u8, arg, "--no-isolation")) {
             options.no_isolation = true;
+        } else if (std.mem.eql(u8, arg, "--no-shell-preview")) {
+            options.no_shell_preview = true;
         } else if (std.mem.eql(u8, arg, "--cache-budget-kib")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -339,7 +344,7 @@ pub fn printUsage() void {
             "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge]\n" ++
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
             "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
-            "      otto-lite --preview <file> | --play-test <file> [--seek-at <ms>]\n" ++
+            "      otto-lite --preview <file> [--no-shell-preview] | --play-test <file> [--seek-at <ms>]\n" ++
             "      otto-lite --copy-now <file>\n" ++
             "      otto-lite --convert <in.json> <out.otto>\n" ++
             "      otto-lite --library-info <file>\n" ++

@@ -26,6 +26,19 @@ test "--cache-budget-kib：两种写法、KiB → 字节、默认 256 MiB、非�
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=x" }));
 }
 
+test "--no-shell-preview：是开关、不吞下一个参数、不影响位置参数" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(!plain.no_shell_preview);
+
+    const enabled = try parse(&[_][]const u8{ "otto-lite", "--no-shell-preview", "lib.json" });
+    try testing.expect(enabled.no_shell_preview);
+    try testing.expectEqualStrings("lib.json", enabled.library_path.?);
+
+    const with_preview = try parse(&[_][]const u8{ "otto-lite", "--preview", "img00.png", "--no-shell-preview" });
+    try testing.expect(with_preview.no_shell_preview);
+    try testing.expectEqualStrings("img00.png", with_preview.preview_path.?);
+}
+
 test "--seek-at：两种写法都收、0 合法、缺值/非数字报错，不占位置参数" {
     const spaced = try parse(&[_][]const u8{ "otto-lite", "--play-test", "tone.wav", "--seek-at", "600" });
     try testing.expectEqualStrings("tone.wav", spaced.play_test_path.?);
