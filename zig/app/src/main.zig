@@ -24,6 +24,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const bench_mod = @import("bench.zig");
+const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
 const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
@@ -573,6 +574,8 @@ pub fn main(init: std.process.Init) !void {
     const title = version_mod.windowTitle(&title_buffer, state.samples.len);
     // `--bench-first-frame` 是离屏探针：不建真实 HWND，也不 show。
     if (options.bench_first_frame) app.gui = false;
+    // `--bench-scroll`：真实窗口、屏外、从不激活；窗口由基准自己建，进程交给它。
+    if (options.bench_scroll != null) try bench_scroll.runCli(init, app, thumbs, options, .init(&state, State.view), title);
     state.window = try app.newWindow(.{
         .title = title,
         .width = 380,
