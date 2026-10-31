@@ -192,9 +192,11 @@ next); the branches exist so the view is written once.
 ```powershell
 # facts + what the registry answers for one file, without a window:
 zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\img00.png
-#   provider=shell-thumbnail kind=image  →  outcome=image 96x96 stride=384
+#   provider=image-wic kind=image        →  outcome=image 96x96 stride=384
+zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\img00.png --no-shell-preview
+#   shell-preview=disabled，仍然 provider=image-wic：图片不依赖 Shell
 zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\tone_440.wav
-#   provider=shell-thumbnail kind=image  →  outcome=none reason=no_handler
+#   provider=wasapi-pcm kind=audio       →  outcome=audio（没有端点时谢绝，继续问下一位）
 zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
 #   provider=<none> kind=unknown         →  outcome=none reason=unsupported
 #   (its facts are printed before the outcome either way)
