@@ -12,7 +12,7 @@
 //!   * `filter.zig`     —— 搜索的行→样本映射、↑↓ 越界不环绕、过滤后光标保持/回落；
 //!   * `transport.zig`  —— 帧里的拖拽快照、取消、无窗口执行（真拖拽由人工验收）；
 //!   * `options.zig`    —— 命令行解析（--version / --select / --preview / --copy-now / --demo-transport）；
-//!   * `mode.zig`       —— dev/portable/installed 判定、数据目录与默认库（纯函数 + 真标记文件）；
+//!   * `mode_test.zig` —— dev/portable/installed 判定、数据目录与默认库（纯函数 + 真标记文件）；
 //!   * `version.zig`    —— 编译期注入的版本号与 `--version` 输出格式；
 //!   * `preview.zig`    —— 注册表顺序、谢绝（none）后继续问、最终原因优先级、行数统计；
 //!   * `preview_test.zig` —— 上面这些契约行为的测试（从 `preview.zig` 拆出来，守住单文件行数）；
@@ -59,6 +59,8 @@ test {
     _ = @import("drop_files.zig");
     _ = @import("drop_ui.zig");
     _ = @import("mode.zig");
+    // 形态判定与数据目录的测试；拆文件是为了守住 mode.zig 的行数。
+    _ = @import("mode_test.zig");
     // 设置文件的 JSON 编解码 / 原子写 / 路径（真临时目录；坏文件必须回默认值）。
     _ = @import("settings_store.zig");
     _ = @import("version.zig");

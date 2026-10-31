@@ -51,7 +51,15 @@ $ErrorActionPreference = 'Continue'
 $root = $PSScriptRoot
 $appDir = Join-Path $root 'app'
 $exe = Join-Path $appDir 'zig-out\bin\otto-lite.exe'
-$settings = Join-Path $appDir 'zig-out\bin\.otto-settings.json'
+# dev data lives under %LOCALAPPDATA%\OTTO\dev now, not in zig-out. Point the
+# child at a throw-away LOCALAPPDATA so the probe never touches the developer's
+# own dev settings / caches.
+$previousLocalAppData = $env:LOCALAPPDATA
+$devLocalAppData = Join-Path $env:TEMP 'otto-opacity-localappdata'
+if (Test-Path $devLocalAppData) { Remove-Item -Recurse -Force $devLocalAppData -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $devLocalAppData -Force | Out-Null
+$env:LOCALAPPDATA = $devLocalAppData
+$settings = Join-Path $devLocalAppData 'OTTO\dev\settings.json'
 $library = Join-Path $appDir 'fixtures\library.json'
 $shotDir = Join-Path $env:TEMP 'otto-opacity-probe'
 $startupShot = Join-Path $shotDir 'startup.png'
@@ -355,5 +363,6 @@ $results | Where-Object { $_.Name -like '* foreground' } | ForEach-Object {
 Write-Output ('  {0} checks, {1} passed, {2} failed' -f $results.Count, ($results.Count - $failed.Count), $failed.Count)
 Write-Output ('  panel snapshot: {0}' -f $panelShot)
 
+$env:LOCALAPPDATA = $previousLocalAppData
 if ($failed.Count -gt 0) { exit 1 }
 exit 0

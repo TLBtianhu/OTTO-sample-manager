@@ -170,7 +170,7 @@ Cache: key → { payload: []u8, cost_bytes, last_used, hits, protected }
 
 | 指标 | 目标 | 怎么量 |
 | --- | --- | --- |
-| 冷启动（2000 素材库） | ≤ 100 ms | `--bench`：CreateProcess → 首帧报告行；**便携/安装形态**（有字体索引缓存），dev 无缓存约 130 ms |
+| 冷启动（2000 素材库） | ≤ 100 ms | `--bench`：CreateProcess → 首帧报告行；**便携/安装形态**（有字体索引缓存），dev 首次无缓存约 130 ms（dev 缓存现在也落在 `%LOCALAPPDATA%\OTTO\dev`） |
 | 常驻内存（不含 L2） | ≤ 50 MiB | `mem.ps1`：**真实窗口**空闲 10 s 的 WorkingSet，减 L2 图像账 |
 | 列表滚动 380×700 | 60 fps | `--bench-scroll`：真实窗口、屏外、`WS_EX_NOACTIVATE`，每 16 ms 注入滚轮 300 帧 |
 | 音频首次试听（冷） | p95 ≤ 50 ms | `--bench` 的 `play()` → `position>0` ×20 |
@@ -351,14 +351,15 @@ OTTO 能防的。M4 起这条调用整体搬进 `otto-thumb-host.exe`：
 ## 九、三种形态：开发产物、便携版、安装版
 
 **编译产物不是分发物。** `zig-out/bin/otto-lite.exe` 是开发环境里的东西：没有版本号、
-没有数据目录约定、可能是 debug 构建、可能依赖旁边的工作树。它不该被当成"能发人的
-软件"，也不该被随手拿去测用户状态——那会把开发时的残留写进真实数据里。
+可能是 debug 构建、可能依赖旁边的工作树。它的唯一用途是**再生成便携版与安装包**，
+本身不该被用户使用，也不承载任何运行数据。同一台电脑上，开发时是程序员、日常使用时
+是用户：程序员跑 `zig build`，用户装安装包，两者用的不是同一个运行环境。
 
-| 形态 | 位置 | 数据目录 | 判据 |
+| 形态 | 谁用 | 程序在哪 | 数据在哪 |
 | --- | --- | --- | --- |
-| **dev** | `zig-out/bin/` | **不写用户目录**（用 `fixtures/` 或显式参数） | 可执行文件路径里有 `zig-out` |
-| **portable** | 用户解压到任意目录 | **exe 同目录的 `data\`** | 同目录有 `otto-portable.flag` |
-| **installed** | `%ProgramFiles%\OTTO` | `%APPDATA%\OTTO`（用户级） | 既非 dev 也无标记 |
+| **编译产物** | 只有 CI / 开发者，用来产出分发物 | `zig-out/` | **无（必须纯净）**；dev 运行数据在开发者的 `%LOCALAPPDATA%\OTTO\dev`，不属于产物 |
+| **便携版** | 用户拷走，自包含 | 任意目录 | `<exe 目录>\data` |
+| **安装版** | 用户日常使用 | 安装目录（默认 `%ProgramFiles%\OTTO Lite`） | `%APPDATA%\OTTO` |
 
 规则：
 
@@ -367,8 +368,10 @@ OTTO 能防的。M4 起这条调用整体搬进 `otto-thumb-host.exe`：
 2. **安装目录永不写数据。** `Program Files` 需要提权，写在那里等于把自己变成管理员
    程序；数据一律进 `%APPDATA%`（多用户各自一份）或 `%PROGRAMDATA%`（共享库，
    要单独决定）。
-3. **dev 模式绝不碰用户目录。** 开发时跑出来的东西不能污染真实库，否则"测用户状态"
-   这件事本身就失真了。
+3. **编译产物必须纯净。** `zig-out/bin` 只允许出现构建产出的 exe / pdb；dev 的设置、
+   库、缓存、更新包都在 `%LOCALAPPDATA%\OTTO\dev`（没有 `LOCALAPPDATA` 时退回
+   `%TEMP%\OTTO-dev`）。dev 形态同样**绝不碰真实 `%APPDATA%\OTTO`**，否则"测用户
+   状态"这件事本身就失真了。从 `zig-out` 拷一份 exe 出去也必须是干净的。
 4. **分发物由打包步骤生成**：版本号、标记文件、README、图标都由脚本产出，不靠人手工
    从 `zig-out` 里拷一个 exe 出来。
 

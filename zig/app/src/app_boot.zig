@@ -42,7 +42,7 @@ pub const Boot = struct {
     /// 位置参数或形态默认值；`Import` 用它当载入路径。
     library_path: []const u8,
     settings: settings_store.Settings,
-    /// 设置文件路径（dev 是 exe 旁边；portable/installed 是数据目录）。
+    /// 设置文件路径（三种形态都在各自的数据目录；dev 在 %LOCALAPPDATA%）。
     settings_path: ?[]const u8,
     thumbs: *thumbs_mod.Thumbs,
     preview: *preview_panel.Panel,
@@ -98,14 +98,14 @@ pub fn boot(
         init.gpa.destroy(live);
     }
 
-    // 设置：dev 写 exe 旁边的 `.otto-settings.json`（不碰用户目录），
-    // portable / installed 写数据目录；读不到 / 坏了都用默认值（见 settings_store）。
+    // 设置：三种形态都写各自的数据目录（dev 在 %LOCALAPPDATA%\OTTO\dev），
+    // 编译产物里不落任何运行数据；读不到 / 坏了都用默认值（见 settings_store）。
     const settings_path = settings_store.resolvePath(allocator, init.io) catch null;
     const settings = settings_store.load(init.gpa, init.io, settings_path);
 
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
-    // 运行形态决定：dev 没有 dataDir → null（不写盘）。预算来自设置；显式
-    // `--cache-budget-kib` 仍优先于设置里的 L3 值。
+    // 运行形态决定（dev 在 %LOCALAPPDATA%\OTTO\dev\cache，不写工程目录）。预算
+    // 来自设置；显式 `--cache-budget-kib` 仍优先于设置里的 L3 值。
     const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{
         .isolation = !options.no_isolation,
         .no_shell_preview = options.no_shell_preview,
@@ -124,7 +124,7 @@ pub fn boot(
     });
     errdefer preview.deinit();
 
-    // 字体索引只写进数据目录形态（portable/installed）；dev 传 null → 每次重扫。
+    // 字体索引写进各自的数据目录；dev 也在 %LOCALAPPDATA%，不在 zig-out 里。
     // 上屏：默认 GDI（`--mem-probe` 实测比 D3D11 翻转交换链少 29 MiB 常驻、
     // present 便宜一个数量级）；`--d3d` 回到旧的 D3D 路径（要 vsync 时用）。
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });

@@ -6,6 +6,9 @@
 > 机器、构建、素材与 `zig/PERF.md` 一致：AMD Ryzen 9 9955HX / Win11 25H2 /
 > Zig 0.17.0 / release（ReleaseSafe）/ `fixtures/library.json`（2000 条）+
 > `C:\src\otto-testkit\samples`。所有数字都是本机、本次会话实测。
+>
+> 注（0.15.0 之后）：dev 的数据目录已迁到 `%LOCALAPPDATA%\OTTO\dev`（CHARTER 九）。
+> 本文数字测于迁移之前，文中"dev 没有数据目录"指的是当时的状态。
 
 ## 0. 结论先说
 
@@ -254,8 +257,8 @@ zig build -Drelease=true → 成功（ReleaseSafe）
 
 ## 7. 没做的部分（明确写出来）
 
-1. **字体索引落盘缓存**（`<dataDir>/cache/fonts.idx`）：没做。dev 形态不写数据目录、而
-   `--bench` 跑的就是 dev 形态，做了也不会体现在这张表里；对便携/安装形态它能把
+1. **字体索引落盘缓存**（`<dataDir>/cache/fonts.idx`）：没做。当时的 dev 形态不写数据
+   目录、而 `--bench` 跑的就是 dev 形态，做了也不会体现在这张表里；对便携/安装形态它能把
    30 ms 压到 ~2 ms，建议下一轮单独做并单独度量。
 2. **并行字体扫描**：没做（收益最大、但要动 vendor 的线程模型与合并顺序，风险与本轮
    时间不允许）。

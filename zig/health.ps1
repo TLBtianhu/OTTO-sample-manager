@@ -8,6 +8,7 @@
 #   1. zig build (debug, then release; -Release runs release only)
 #   2. core / ports / app `zig build test`
 #   3. verify-distribution.ps1 against the real %APPDATA% (it snapshots/restores)
+#   3b. zig-out\bin purity: only otto-lite.exe / otto-lite.pdb / otto-thumb-host.exe
 #   4. provider-matrix.ps1: `--preview` on six samples, default and
 #      `--no-shell-preview`, asserting which provider answers (the 0.9.0
 #      "each format is self-sufficient" claim; also runs under -Quick)
@@ -18,9 +19,9 @@
 #   8. verify-minisign.js on the newest portable.zip + setup.exe in zig\dist
 #
 # -Quick keeps the pre-commit subset: builds + tests + distribution audit +
-# provider matrix + opacity + signatures (bench / scroll / mem / self-checks are
-# skipped). Opacity is cheap now: no pixel coordinates, one hidden HWND per
-# case, so it belongs in the pre-commit gate.
+# build-output purity + provider matrix + opacity + signatures (bench / scroll /
+# mem / self-checks are skipped). Opacity is cheap now: no pixel coordinates,
+# one hidden HWND per case, so it belongs in the pre-commit gate.
 # -Release skips the debug build; release is what ships.
 #
 # A sub-script failure is recorded and the run continues; the exit code is
@@ -406,6 +407,34 @@ function Invoke-Audit {
     $stat = '{0} PASS / {1} FAIL' -f $passChecks, $failChecks
     Add-Row $item 'FAIL' $stat ('exit {0}；形态 PASS {1}/3；{2:N1} s' -f $result.Code, $formPass, $result.Seconds)
     Write-FailureTail $result.Lines 40
+  }
+}
+
+# ---------------------------------------------------------------------------
+# 3b. Build-output purity
+# ---------------------------------------------------------------------------
+
+# zig-out\bin is a build output, not a data directory. Only the two exes and the
+# pdb may appear there; anything else (settings, cache, data, updates) means a
+# run wrote into the artifact tree. Kept as its own row so `-Quick` catches it
+# even when the full distribution audit is skipped or fails early.
+function Invoke-Purity {
+  $item = '编译产物纯净性'
+  Write-Step $item
+  $bin = Join-Path $script:appDir 'zig-out\bin'
+  $allowed = @('otto-lite.exe', 'otto-lite.pdb', 'otto-thumb-host.exe')
+  if (-not (Test-Path -LiteralPath $bin)) {
+    Add-Row $item 'SKIP' '—' ('没有 {0}（先构建）' -f $bin)
+    return
+  }
+  $extra = @(Get-ChildItem -LiteralPath $bin -Force -ErrorAction SilentlyContinue |
+    Where-Object { $allowed -notcontains $_.Name } |
+    Sort-Object Name |
+    ForEach-Object { $_.Name })
+  if ($extra.Count -eq 0) {
+    Add-Row $item 'PASS' '0 extra' ('zig-out\bin 只有 {0}' -f ($allowed -join ' / '))
+  } else {
+    Add-Row $item 'FAIL' ('{0} extra' -f $extra.Count) ('白名单外: ' + ($extra -join ', '))
   }
 }
 
@@ -799,6 +828,7 @@ Invoke-TestSuite 'ports'
 Invoke-TestSuite 'app'
 
 Invoke-Audit
+Invoke-Purity
 Invoke-ProviderMatrix
 
 if (-not $Quick) {

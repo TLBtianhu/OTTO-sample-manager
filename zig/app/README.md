@@ -513,8 +513,9 @@ unrelated shell window; the table says so when that happens.
 ## Settings panel (topmost, opacity, budgets)
 
 The header's 「设置」 entry opens a card over the list. Three kinds of state live
-in `<exe dir>\.otto-settings.json` (dev) or `<data dir>\settings.json` (portable /
-installed), all with defaults when the field is missing:
+in `<data dir>\settings.json` for every form — `%LOCALAPPDATA%\OTTO\dev` (dev),
+`<exe dir>\data` (portable), or `%APPDATA%\OTTO` (installed) — with defaults when
+the field is missing. The build output (`zig-out`) never carries run data:
 
 ```json
 {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255}
