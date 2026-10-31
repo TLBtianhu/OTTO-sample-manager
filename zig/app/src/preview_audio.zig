@@ -3,7 +3,8 @@
 //!
 //! 为什么单独一个文件：`preview_panel.zig` 已经贴着单文件行数上限；这一节只依赖
 //! `preview.AudioSession` 的公开字段，拆出来两边都留有余量，五个分支的 switch
-//! 仍然在 `preview_panel.zig` 里（视图依然是"按 Outcome 分支画"，不按媒体类型分叉）。
+//! 仍然在视图那一枝（`preview_view.zig`）里（视图依然是"按 Outcome 分支画"，
+//! 不按媒体类型分叉）。
 //!
 //! 为什么视图只画"一张图"：波形不是视图算出来的，是解码时顺带算好、存在会话里的
 //! （`audio/peaks.zig` + `audio/waveform.zig`）。这里不认识 WAV、不认识采样率、

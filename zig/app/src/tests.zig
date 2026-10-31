@@ -3,7 +3,8 @@
 //! `search_ui.zig`（要窗口），由 `--nanoui-script` 的无头脚本覆盖；这里测它
 //! 下面的纯函数。
 //!
-//!   * `live.zig`       —— ports 事件 → core.Change 的适配（合成事件，不碰磁盘）；
+//!   * `live.zig` / `live_adapt.zig` —— `Live` 的驱动与 ports 事件 → core.Change 的
+//!                         适配（合成事件，不碰磁盘）；
 //!   * `thumbs_test.zig`—— 缓存键与载荷头的纯函数（线程与真实 Shell 由 `--demo-thumbs` 覆盖）；
 //!   * `selection.zig`  —— 普通/Ctrl/Shift 点击、拖拽取集合、行号 → 路径；
 //!   * `filter.zig`     —— 搜索的行→样本映射、↑↓ 越界不环绕、过滤后光标保持/回落；
