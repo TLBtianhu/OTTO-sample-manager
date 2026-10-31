@@ -60,6 +60,9 @@ pub const Panel = struct {
     d3d_warned: bool = false,
     /// 上屏是否是 D3D 翻转交换链（`--d3d`）。
     d3d: bool = false,
+    /// 启动置顶被前台锁拒绝（`error.TopmostRejected`）：等窗口第一次成为前台时
+    /// 补一次。只排一次，补完就清掉——不在 tick 里循环重试。
+    topmost_retry_pending: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -115,20 +118,71 @@ pub const Panel = struct {
         self.applyOpacity(hwnd);
     }
 
-    /// 启动时应用一次保存的置顶状态；面板里的开关也走这里。
+    /// 应用一次保存的置顶状态；面板里的开关也走这里。
     pub fn applyTopmost(self: *Panel, hwnd: ?*anyopaque) void {
-        const state = self.settings.always_on_top;
-        win_window.setTopmost(hwnd, state) catch |err| {
+        // 新的一次应用（启动或用户点开关）作废旧补救计划：只认最后一次状态。
+        self.topmost_retry_pending = false;
+        win_window.setTopmost(hwnd, self.settings.always_on_top) catch |err| {
+            self.logTopmostFailure(err);
+            return;
+        };
+        self.logTopmostState(hwnd);
+    }
+
+    /// 启动置顶被前台锁拒绝后，窗口第一次成为前台时补一次。
+    ///
+    /// 由 `main.zig` 的 tick 每 150ms 调一次。nanoui 没有 focus 回调（只有每帧的
+    /// `Context.window_focused`），所以用系统事实 `GetForegroundWindow() == 我们的
+    /// hwnd` 判断"第一次被激活"；不激活窗口、不改前台。补一次就清掉 pending：
+    /// 再失败也只记一行，不会在 tick 里循环。
+    pub fn retryTopmostIfActivated(self: *Panel, hwnd: ?*anyopaque) void {
+        if (!self.topmost_retry_pending) return;
+        if (!win_window.isForeground(hwnd)) return;
+        self.topmost_retry_pending = false;
+        std.debug.print(
+            "otto-lite: 窗口已激活，重试置顶 topmost-retry state={}\n",
+            .{self.settings.always_on_top},
+        );
+        win_window.setTopmost(hwnd, self.settings.always_on_top) catch |err| {
             std.debug.print(
-                "otto-lite: topmost={} 未应用（{s}，无窗口时正常）\n",
-                .{ state, @errorName(err) },
+                "otto-lite: 重试置顶仍失败（{s}），不再重试\n",
+                .{@errorName(err)},
             );
             return;
         };
+        self.logTopmostState(hwnd);
+    }
+
+    /// 置顶失败的日志。`TopmostRejected` 是"系统拒绝"，必须让人看见，并且排一次
+    /// 窗口激活后的补救；其它错误（无窗口 / 句柄无效）沿用原来那行。
+    fn logTopmostFailure(self: *Panel, err: win_window.Error) void {
+        if (err == error.TopmostRejected) {
+            self.topmost_retry_pending = true;
+            // `topmost-rejected` 是给验收脚本 grep 的 ASCII 锚点（PS 5.1 读不了
+            // 无 BOM 的中文脚本，中文部分只给人看）。
+            std.debug.print(
+                "otto-lite: 置顶失败：系统拒绝（后台进程限制）topmost-rejected " ++
+                    "retry_on_activate=1 state={}\n",
+                .{self.settings.always_on_top},
+            );
+            return;
+        }
+        std.debug.print(
+            "otto-lite: topmost={} 未应用（{s}，无窗口时正常）\n",
+            .{ self.settings.always_on_top, @errorName(err) },
+        );
+    }
+
+    fn logTopmostState(self: *Panel, hwnd: ?*anyopaque) void {
         const address: usize = if (hwnd) |handle| @intFromPtr(handle) else 0;
         std.debug.print(
-            "otto-lite: topmost={} WS_EX_TOPMOST={} hwnd=0x{x}\n",
-            .{ state, win_window.isTopmost(hwnd), address },
+            "otto-lite: topmost={} WS_EX_TOPMOST={} visible={} hwnd=0x{x}\n",
+            .{
+                self.settings.always_on_top,
+                win_window.isTopmost(hwnd),
+                win_window.isVisible(hwnd),
+                address,
+            },
         );
     }
 
