@@ -309,72 +309,47 @@ function Invoke-TestSuite {
     return
   }
 
-  # The real-window ports tests check that the foreground window does not move.
-  # An unrelated shell/notification change can fail that check once even though
-  # the code is fine, so a failed attempt is retried once. A real regression
-  # fails both attempts and still ends up FAIL below.
-  $attempts = @()
-  for ($attempt = 1; $attempt -le 2; $attempt++) {
-    Reset-TestRunCache $pkgDir
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $code = -1
-    $lines = @()
-    Push-Location $pkgDir
-    try {
-      $lines = @(& $Zig build test --summary all 2>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
-      })
-      $code = $LASTEXITCODE
-    } catch {
-      $lines = @($_.Exception.Message)
-      $code = -1
-    } finally {
-      Pop-Location
-    }
-    $watch.Stop()
-    $seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
-    $text = [string]::Join("`n", [string[]]$lines)
-
-    $match = [regex]::Match($text, '(\d+)/(\d+) tests passed')
-    $passed = $null
-    $total = $null
-    if ($match.Success) {
-      $passed = [int]$match.Groups[1].Value
-      $total = [int]$match.Groups[2].Value
-    }
-    $ok = ($code -eq 0 -and $null -ne $passed -and $total -gt 0 -and $passed -eq $total)
-
-    $attempts += (New-Object psobject -Property @{
-      Ok = $ok
-      Code = $code
-      Passed = $passed
-      Total = $total
-      Seconds = $seconds
-      Lines = [string[]]$lines
+  # One run, no retry. The real-window tests now assert "our HWND is not the
+  # foreground window" instead of "the foreground window did not change", so an
+  # unrelated shell/notification change can no longer fail them; retrying would
+  # only hide a real regression.
+  Reset-TestRunCache $pkgDir
+  $watch = [System.Diagnostics.Stopwatch]::StartNew()
+  $code = -1
+  $lines = @()
+  Push-Location $pkgDir
+  try {
+    $lines = @(& $Zig build test --summary all 2>&1 | ForEach-Object {
+      if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
     })
-    if ($ok) { break }
-    if ($attempt -eq 1) {
-      Write-Output '  首次未通过，重试一次（真实窗口测试对系统焦点敏感）'
-      Write-FailureTail $lines 15
-    }
+    $code = $LASTEXITCODE
+  } catch {
+    $lines = @($_.Exception.Message)
+    $code = -1
+  } finally {
+    Pop-Location
   }
+  $watch.Stop()
+  $seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+  $text = [string]::Join("`n", [string[]]$lines)
 
-  $totalSeconds = 0.0
-  foreach ($attemptResult in $attempts) { $totalSeconds += $attemptResult.Seconds }
-  $totalSeconds = [math]::Round($totalSeconds, 1)
-  $last = $attempts[$attempts.Count - 1]
-  $retried = ($attempts.Count -gt 1)
+  $match = [regex]::Match($text, '(\d+)/(\d+) tests passed')
+  $passed = $null
+  $total = $null
+  if ($match.Success) {
+    $passed = [int]$match.Groups[1].Value
+    $total = [int]$match.Groups[2].Value
+  }
+  $ok = ($code -eq 0 -and $null -ne $passed -and $total -gt 0 -and $passed -eq $total)
 
-  if ($last.Ok) {
-    $note = 'debug；{0:N1} s' -f $totalSeconds
-    if ($retried) { $note += '；首次失败后重试通过' }
-    Add-Row $item 'PASS' ('{0}/{1}' -f $last.Passed, $last.Total) $note
-  } elseif ($null -ne $last.Passed) {
-    Add-Row $item 'FAIL' ('{0}/{1}' -f $last.Passed, $last.Total) ('2 次尝试均失败；exit {0}；{1:N1} s' -f $last.Code, $totalSeconds)
-    Write-FailureTail $last.Lines 25
+  if ($ok) {
+    Add-Row $item 'PASS' ('{0}/{1}' -f $passed, $total) ('debug；{0:N1} s' -f $seconds)
+  } elseif ($null -ne $passed) {
+    Add-Row $item 'FAIL' ('{0}/{1}' -f $passed, $total) ('exit {0}；{1:N1} s' -f $code, $seconds)
+    Write-FailureTail $lines 25
   } else {
-    Add-Row $item 'FAIL' '—' ('2 次尝试均失败；exit {0}；未抓到 tests passed；{1:N1} s' -f $last.Code, $totalSeconds)
-    Write-FailureTail $last.Lines 25
+    Add-Row $item 'FAIL' '—' ('exit {0}；未抓到 tests passed；{1:N1} s' -f $code, $seconds)
+    Write-FailureTail $lines 25
   }
 }
 
@@ -559,54 +534,29 @@ function Invoke-Opacity {
   }
 
   $opacityArgs = @('-Release', '-NoBuild', '-Zig', $Zig)
-  # Same foreground-window sensitivity as the ports tests: retry a failed
-  # attempt once, but let a real failure fail both attempts.
-  $attempts = @()
-  for ($attempt = 1; $attempt -le 2; $attempt++) {
-    $result = Invoke-Child (Join-Path $script:root 'opacity.ps1') $opacityArgs
-    $match = [regex]::Match($result.Text, '(\d+) checks, (\d+) passed, (\d+) failed')
-    $checks = $null
-    $passed = $null
-    $failed = $null
-    $ok = $false
-    if ($match.Success) {
-      $checks = [int]$match.Groups[1].Value
-      $passed = [int]$match.Groups[2].Value
-      $failed = [int]$match.Groups[3].Value
-      $ok = ($result.Code -eq 0 -and $failed -eq 0 -and $checks -gt 0 -and $passed -eq $checks)
-    }
-    $attempts += (New-Object psobject -Property @{
-      Ok = $ok
-      Code = $result.Code
-      Checks = $checks
-      Passed = $passed
-      Failed = $failed
-      Seconds = $result.Seconds
-      Lines = [string[]]$result.Lines
-    })
-    if ($ok) { break }
-    if ($attempt -eq 1) {
-      Write-Output '  首次未通过，重试一次（前台窗口检查对系统焦点敏感）'
-      Write-FailureTail $result.Lines 20
-    }
+  # One run, no retry: opacity.ps1 now asserts "our HWND is never the foreground
+  # window" (sampled), so unrelated foreground changes cannot fail it.
+  $result = Invoke-Child (Join-Path $script:root 'opacity.ps1') $opacityArgs
+  $match = [regex]::Match($result.Text, '(\d+) checks, (\d+) passed, (\d+) failed')
+  $checks = $null
+  $passed = $null
+  $failed = $null
+  $ok = $false
+  if ($match.Success) {
+    $checks = [int]$match.Groups[1].Value
+    $passed = [int]$match.Groups[2].Value
+    $failed = [int]$match.Groups[3].Value
+    $ok = ($result.Code -eq 0 -and $failed -eq 0 -and $checks -gt 0 -and $passed -eq $checks)
   }
 
-  $totalSeconds = 0.0
-  foreach ($attemptResult in $attempts) { $totalSeconds += $attemptResult.Seconds }
-  $totalSeconds = [math]::Round($totalSeconds, 1)
-  $last = $attempts[$attempts.Count - 1]
-  $retried = ($attempts.Count -gt 1)
-
-  if ($last.Ok) {
-    $note = '真实隐藏窗口；{0:N1} s' -f $totalSeconds
-    if ($retried) { $note += '；首次失败后重试通过' }
-    Add-Row $item 'PASS' ('{0}/{1}' -f $last.Passed, $last.Checks) $note
-  } elseif ($null -ne $last.Passed) {
-    Add-Row $item 'FAIL' ('{0}/{1}' -f $last.Passed, $last.Checks) ('failed {0}；exit {1}；2 次尝试；{2:N1} s' -f $last.Failed, $last.Code, $totalSeconds)
-    Write-FailureTail $last.Lines 25
+  if ($ok) {
+    Add-Row $item 'PASS' ('{0}/{1}' -f $passed, $checks) ('真实隐藏窗口；{0:N1} s' -f $result.Seconds)
+  } elseif ($null -ne $passed) {
+    Add-Row $item 'FAIL' ('{0}/{1}' -f $passed, $checks) ('failed {0}；exit {1}；{2:N1} s' -f $failed, $result.Code, $result.Seconds)
+    Write-FailureTail $result.Lines 25
   } else {
-    Add-Row $item 'FAIL' '—' ('opacity exit {0}；没有 checks 汇总；2 次尝试；{1:N1} s' -f $last.Code, $totalSeconds)
-    Write-FailureTail $last.Lines 25
+    Add-Row $item 'FAIL' '—' ('opacity exit {0}；没有 checks 汇总；{1:N1} s' -f $result.Code, $result.Seconds)
+    Write-FailureTail $result.Lines 25
   }
 }
 

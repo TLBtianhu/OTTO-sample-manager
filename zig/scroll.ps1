@@ -89,9 +89,59 @@ Write-Output ("== bench library: {0} rows, 100 image files under {1} ==" -f $Row
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 public class ScrollFocus {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+
+  private static readonly object gate = new object();
+  private static readonly List<IntPtr> seen = new List<IntPtr>();
+  private static volatile bool running;
+  private static volatile int sampleCount;
+  private static Thread worker;
+
+  public static int SampleCount { get { return sampleCount; } }
+
+  public static int DistinctCount {
+    get { lock (gate) { return seen.Count; } }
+  }
+
+  public static void StartSampling() {
+    lock (gate) { seen.Clear(); }
+    sampleCount = 0;
+    running = true;
+    worker = new Thread(new ThreadStart(delegate {
+      while (running) {
+        IntPtr fg = GetForegroundWindow();
+        sampleCount = sampleCount + 1;
+        lock (gate) { if (!seen.Contains(fg)) { seen.Add(fg); } }
+        Thread.Sleep(1);
+      }
+    }));
+    worker.IsBackground = true;
+    worker.Start();
+    for (int i = 0; i < 100 && sampleCount == 0; i++) { Thread.Sleep(1); }
+  }
+
+  public static void StopSampling() {
+    running = false;
+    if (worker != null) { worker.Join(2000); worker = null; }
+  }
+
+  public static bool SawForeground(long hwnd) {
+    lock (gate) { return seen.Contains(new IntPtr(hwnd)); }
+  }
+
+  public static string SeenText() {
+    lock (gate) {
+      string[] parts = new string[seen.Count];
+      for (int i = 0; i < seen.Count; i++) {
+        parts[i] = "0x" + seen[i].ToInt64().ToString("x");
+      }
+      return string.Join(",", parts);
+    }
+  }
 }
 '@
 
@@ -110,13 +160,26 @@ foreach ($run in $runs) {
   $argv = @('--bench-scroll', $library, "--frames=$Frames", '--scroll-notches=1') + $run.Arg
   if ($Edge) { $argv += '--bench-scroll-edge' }
   $fgBefore = [ScrollFocus]::GetForegroundWindow()
-  $output = @(& $exe @argv 2>&1 | ForEach-Object {
-    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
-  })
-  $code = $LASTEXITCODE
+  [ScrollFocus]::StartSampling()
+  try {
+    $output = @(& $exe @argv 2>&1 | ForEach-Object {
+      if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+    })
+    $code = $LASTEXITCODE
+  } finally {
+    [ScrollFocus]::StopSampling()
+  }
   $fgAfter = [ScrollFocus]::GetForegroundWindow()
   $output | Where-Object { $_ -match '^scroll-bench: ' } | ForEach-Object { Write-Output $_ }
-  Write-Output ("== exit={0} foreground before=0x{1:x} after=0x{2:x} changed={3} ==" -f $code, $fgBefore.ToInt64(), $fgAfter.ToInt64(), ($fgBefore -ne $fgAfter))
+  # Assertion evidence: our window is never the foreground window. before/after
+  # are printed as diagnostics only - an unrelated window taking the foreground
+  # is legal and must not fail the run.
+  $hwndMatch = [regex]::Match(($output -join "`n"), 'window hwnd=0x([0-9a-fA-F]+)')
+  $ourHwnd = if ($hwndMatch.Success) { [Convert]::ToInt64($hwndMatch.Groups[1].Value, 16) } else { $null }
+  $ourText = if ($null -eq $ourHwnd) { 'unknown' } else { '0x{0:x}' -f $ourHwnd }
+  $neverOurs = (($null -ne $ourHwnd) -and ([ScrollFocus]::SampleCount -gt 0) -and
+    (-not [ScrollFocus]::SawForeground([long]$ourHwnd)))
+  Write-Output ("== exit={0} foreground before=0x{1:x} after=0x{2:x} samples={3} distinct={4} seen=[{5}] our_hwnd={6} never_foreground={7} ==" -f $code, $fgBefore.ToInt64(), $fgAfter.ToInt64(), [ScrollFocus]::SampleCount, [ScrollFocus]::DistinctCount, [ScrollFocus]::SeenText(), $ourText, $neverOurs)
   $line = $output | Where-Object { $_ -match '^scroll-bench: summary ' } | Select-Object -Last 1
   if ($line -match 'summary mode=(\S+) fps=([0-9.]+).*p95=([0-9.]+) max=([0-9.]+) drops=(\d+)/(\d+).*work_p95=([0-9.]+) ws_mib=([0-9.]+) verdict=(\S+)') {
     $summary += [pscustomobject]@{

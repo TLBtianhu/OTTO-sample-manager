@@ -279,9 +279,9 @@ zig\app\zig-out\bin\otto-lite.exe --bench-scroll <library.json> --frames 300 --d
 * **窗口**：真实 `HWND`，客户区 380×700（本机 96 DPI → 380×700 像素），位置
   **-4000,0（完全屏外）**；`WS_EX_NOACTIVATE`（实测 `ex_style=0x8000100`）+
   `SW_SHOWNOACTIVATE`。窗口是"可见"的（`IsWindowVisible=1`、`cloaked=0`），所以
-  `WM_PAINT` 真的会来；但它从来不是前台窗口，也不进任务栏。前后
-  `GetForegroundWindow` 相同、外部每 100 ms 采样 62 次也只有一个前台窗口
-  （浏览器），`stolen=false`。
+  `WM_PAINT` 真的会来；但它从来不是前台窗口，也不进任务栏。采样判据是
+  「`GetForegroundWindow()` 从未等于我们的窗口」（前后值只作诊断，无关程序
+  抢前台是合法的），实测 `stolen=false`。
 * **注入**：每 **16.0 ms**（62.5 Hz，比 60 Hz 高 4%，理由见 7.5）向窗口
   `PostMessage(WM_MOUSEWHEEL)`（1 格 = 48 点 ≈ 1.09 行），同一拍把消息泵空并用
   `UpdateWindow` 强制把这一帧画完，再等下一拍。`--frames 300` = 300 次注入。

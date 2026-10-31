@@ -6,7 +6,7 @@
 //! 这样：
 //!   * 窗口是"可见"的，所以消息循环真的会收到 `WM_PAINT`（隐藏窗口收不到）；
 //!   * 它从来不是前台窗口，用户看不到、点不到，也不进任务栏（见 `run` 里的
-//!     `GetForegroundWindow` 前后对比）；
+//!     `GetForegroundWindow` 采样：只断言"我们不是前台"，前后值仅作诊断）；
 //!   * `paint` 走和用户滚动时**同一条**路：`pixels.draw` 光栅化 → GDI 位图复制
 //!     或 D3D11 `Present(1,0)`；缩略图、预览条、搜索框都在真实视图里。
 //!
@@ -18,8 +18,8 @@
 //! build/layout/paint/raster/present/wait），本文件只读它，不在视图里插桩。
 //!
 //! 报表：帧间隔 p50/p95/max、有效 fps、`>16.7 ms` 丢帧比例、真正超预算的帧数
-//! （`work > 16.67 ms`）、分阶段 p50/p95、`WorkingSetSize`，以及**前台窗口没有变**
-//! 的证据（`GetForegroundWindow` 前后对比）。
+//! （`work > 16.67 ms`）、分阶段 p50/p95、`WorkingSetSize`，以及**前台窗口
+//! 不是我们的**证据（`GetForegroundWindow` 采样；无关程序抢前台不影响结论）。
 //!
 //! 测量边界写在 `PERF.md` §7：屏外（或主屏 1 像素边缘）窗口、DWM 可能不给离屏窗口
 //! 上 vsync、节拍器是软件的（±0.4 ms）、机器负载会改变数字。跑完用 `std.process.exit`
@@ -315,12 +315,14 @@ pub fn run(
     const records = log.spanFrom(0);
     const stats = try scroll_stats.summarize(allocator, records, wheel_indices[0..posted], inject_times[0..posted], started, ended);
 
-    // 前台窗口对比：before / show 之后 / 跑完，三个都必须是同一个（且不是我们）。
+    // 前台窗口对比：只要求"我们的窗口任何时候都不是前台"。通知弹窗、后台
+    // 更新、用户切窗口都会合法地改变前台，所以 before/show/after 三个值只
+    // 打印出来做诊断，不要求相等；stolen 只表示其中之一是我们。
     const fg_value = hwndValue(fg_after_run);
-    const same_focus = fg_before == fg_after_show and fg_before == fg_after_run and (fg_after_run != h);
+    const stolen = isOurWindow(fg_before, h) or isOurWindow(fg_after_show, h) or isOurWindow(fg_after_run, h);
     std.debug.print(
         "scroll-bench: focus foreground_before=0x{x} after_show=0x{x} after_run=0x{x} hwnd=0x{x} stolen={}\n",
-        .{ hwndValue(fg_before), hwndValue(fg_after_show), fg_value, @intFromPtr(h), !same_focus },
+        .{ hwndValue(fg_before), hwndValue(fg_after_show), fg_value, @intFromPtr(h), stolen },
     );
 
     const memory = bench_win.resident();
@@ -355,10 +357,11 @@ pub fn run(
         .{ thumbs.readyCount(), thumb_stats.pending, thumb_stats.entries, @as(f64, @floatFromInt(thumb_stats.bytes)) / mib },
     );
 
-    // 判据：帧产量 ≥ 60/s、单帧做工 p95 在 16.67 ms 内、没有一帧超预算。
+    // 判据：帧产量 ≥ 60/s、单帧做工 p95 在 16.67 ms 内、没有一帧超预算、
+    // 我们的窗口从来不是前台。无关程序抢前台不影响 verdict。
     const fps_ok = stats.fps >= target_fps;
     const work_ok = stats.work.p95 <= budget_ms;
-    const pass = fps_ok and work_ok and stats.over_budget == 0 and same_focus;
+    const pass = fps_ok and work_ok and stats.over_budget == 0 and !stolen;
     std.debug.print(
         "scroll-bench: summary mode={s} fps={d:.2} p50={d:.2} p95={d:.2} max={d:.2} drops={d}/{d} over_budget={d} work_p50={d:.2} work_p95={d:.2} ws_mib={d:.2} verdict={s}\n",
         .{
@@ -432,6 +435,11 @@ fn pumpToWheel(log: *frame_log.FrameLog) ?usize {
 /// A window handle as a number, for the report: 0 when there is none.
 fn hwndValue(handle: ?HWND) usize {
     return if (handle) |value| @intFromPtr(value) else 0;
+}
+
+/// "没有抢焦点"：我们的窗口不是前台窗口。无关程序改变前台不算 stolen。
+fn isOurWindow(handle: ?HWND, hwnd: HWND) bool {
+    return if (handle) |value| value == hwnd else false;
 }
 
 /// 抽 `ms` 毫秒消息（收尾用）：让最后几帧的 paint 落完。
