@@ -167,6 +167,18 @@ src/sample_facts.zig     name / size / duration / path / extension — not a pro
 src/preview_panel.zig    worker thread + the five-branch strip (the only view)
 ```
 
+The providers, in registry order (order is preference; a `none.*` decline asks the
+next one):
+
+| provider | formats | payload | decode path |
+| --- | --- | --- | --- |
+| `wasapi-pcm` | `.wav` | audio | own RIFF/WAVE parser + WASAPI |
+| `native-audio` | `.flac` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
+| `mf-audio` | `.mp3` `.m4a` `.aac` `.wma` | audio | Media Foundation |
+| `image-wic` | `.png` `.jpg` `.bmp` `.gif` `.tif` | image | own WIC decode |
+| `mf-video` | `.mp4` `.m4v` `.mov` `.wmv` | image (first frame) | Media Foundation |
+| `shell-thumbnail` | anything with a registered handler | image | Shell `IThumbnailProvider` (isolated helper) |
+
 `none.*` is a **decline**, not the final answer: a provider declares "I might
 handle this" cheaply in `supports`, and only `open` knows the truth. When `open`
 returns `none.*`, the registry asks the next provider; only a success branch
@@ -205,14 +217,14 @@ zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
 ### Provider matrix (the gate for "every format is self-sufficient")
 
 ```powershell
-# six samples × two rounds; exits 1 if a provider name or an exit code changes
+# seven samples × two rounds; exits 1 if a provider name or an exit code changes
 powershell -NoProfile -ExecutionPolicy Bypass -File zig\provider-matrix.ps1
 ```
 
 `zig/provider-matrix.ps1` runs `--preview` on `img00.png`, `img00.bmp`,
-`viper.mp3`, `rabbit320.mp4`, `tone_440.wav` and `mystery.xyz` twice — default and
+`viper.mp3`, `rabbit320.mp4`, `tone_440.wav`, `tone_660.flac` and `mystery.xyz` twice — default and
 `--no-shell-preview` — and asserts which provider each round must name
-(`image-wic`, `image-wic`, `mf-audio`, `mf-video`, `wasapi-pcm`, `none` +
+(`image-wic`, `image-wic`, `mf-audio`, `mf-video`, `wasapi-pcm`, `native-audio`, `none` +
 `unsupported`), that the process exits 0, and that the no-shell round really
 printed `shell-preview=disabled` (otherwise the flag could be ignored and the
 column would prove nothing). `open_ms` is printed for every round with **no

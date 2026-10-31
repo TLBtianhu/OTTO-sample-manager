@@ -10,6 +10,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // 纯 Zig 的音频解码库（FLAC）。只用它的 module，不需要库自带的 exe/bench 目标。
+    const zig_audio_dep = b.dependency("zig_audio", .{
+        .target = target,
+        .optimize = optimize,
+    });
     // 版本号的唯一来源是 build.zig.zon 的 .version：配置阶段读出来注入成
     // `@import("build_options").version`。源码里不再抄第二份。
     const app_version = manifestVersion(b);
@@ -44,6 +49,8 @@ pub fn build(b: *std.Build) void {
 
     const app_imports: []const std.Build.Module.Import = &.{
         .{ .name = "nanoui", .module = nanoui_dep.module("nanoui") },
+        // FLAC 解码（providers/native_audio.zig）；import 名与库的 build.zig 一致。
+        .{ .name = "zig_audio", .module = zig_audio_dep.module("zig_audio") },
         .{ .name = "otto_core", .module = core_dep.module("otto_core") },
         .{ .name = "otto_watch", .module = ports_dep.module("otto_watch") },
         // 缩略图口岸（公共 API + Windows Shell 后端）与能力表口岸（只读注册表）。
@@ -124,6 +131,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "otto_core", .module = core_dep.module("otto_core") },
+            // providers/root.zig → providers/native_audio.zig 会 import 这个模块。
+            .{ .name = "zig_audio", .module = zig_audio_dep.module("zig_audio") },
             .{ .name = "otto_watch", .module = ports_dep.module("otto_watch") },
             .{ .name = "otto_thumb", .module = thumb_dep.module("otto_thumb") },
             .{ .name = "otto_thumb_host", .module = thumb_host_dep.module("otto_thumb_host") },

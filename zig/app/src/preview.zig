@@ -69,10 +69,10 @@
 //! ## 注册顺序
 //!
 //! `Registry.providers` 的数组顺序是**偏好**：先问谁、谁的成功的答案先被采用。
-//! 具体顺序由 `providers/root.zig` 给出（当前是 `[wasapi-pcm, mf-audio, image-wic,
-//! mf-video, shell-thumbnail]`），本文件不认识任何具体 provider。`metadata`
-//! **不是** provider：名字/大小/时长/路径是 `Sample` 自带的事实，无条件显示在
-//! 预览区，不参与 `Outcome`。
+//! 具体顺序由 `providers/root.zig` 给出（当前是 `[wasapi-pcm, native-audio, mf-audio,
+//! image-wic, mf-video, shell-thumbnail]`），本文件不认识任何具体 provider。
+//! `metadata` **不是** provider：名字/大小/时长/路径是 `Sample` 自带的事实，
+//! 无条件显示在预览区，不参与 `Outcome`。
 //!
 //! 只依赖 Zig 0.17 标准库、`zig/core`，以及 app 内的 `audio/player.zig`（设备句柄与
 //! 播放线程在那边，UI 只读原子位置）和 `audio/peaks.zig`（波形峰值只是两个 i16
