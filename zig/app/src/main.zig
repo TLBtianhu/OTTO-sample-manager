@@ -525,8 +525,8 @@ pub fn main(init: std.process.Init) !void {
     // `--cache-budget-kib` 仍优先于设置里的 L3 值。
     const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation, .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null, .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(), .budget_bytes = settings.l2BudgetBytes() });
     defer thumbs.deinit();
-    // 预览条也用 `init.gpa`：工作线程要用它分配位图/文本。注册表由
-    // `providers/root.zig` 给出（`--no-shell-preview` 只换表，不换 provider 顺序）。
+    // 预览条也用 `init.gpa`（工作线程分配位图/文本）。注册表只有一张
+    // （`providers/root.zig`）：UI、`--preview`、`--no-shell-preview` 共用同一份顺序。
     const panel = try preview_panel.Panel.init(init.gpa, init.io, preview_providers.registryFor(options.no_shell_preview), .{});
     defer panel.deinit();
     // 字体索引只写进数据目录形态（portable/installed）；dev 传 null → 每次重扫。

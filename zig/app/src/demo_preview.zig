@@ -20,9 +20,10 @@
 //!     otto-lite.exe --preview C:\src\otto-testkit\samples\img00.png
 //!     otto-lite.exe --preview C:\src\otto-testkit\samples\img00.png --no-shell-preview
 //!
-//! `--no-shell-preview` 从注册表里拿掉 Shell provider，用来证明图片是被 `image-wic`
-//! 自己解出来的。`open_ms` 是 `Registry.open` 的墙钟（含 provider 查找与解码），
-//! 96×96 PNG 的目标是 ≤15 ms。
+//! `--no-shell-preview` 从注册表里拿掉 Shell provider，用来证明结果出自自给自足的
+//! provider（`image-wic` / `mf-audio` / `mf-video`），而不是系统缩略图。
+//! `open_ms` 是 `Registry.open` 的墙钟（含 provider 查找与解码），96×96 PNG 的目标
+//! 是 ≤15 ms。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -31,7 +32,8 @@ const providers = @import("providers/root.zig");
 const sample_facts = @import("sample_facts.zig");
 
 /// 打开路径、打印事实与预览摘要。`path` 原样交给口岸（相对路径按当前目录解析）。
-/// `no_shell` 为 true 时用去掉 Shell provider 的注册表（`--no-shell-preview`）。
+/// `no_shell` 为 true 时用去掉 Shell provider 的注册表（`--no-shell-preview`）：
+/// 音频/图片/视频 provider 自给自足，不靠系统缩略图兜底。
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8, no_shell: bool) !u8 {
     const io = init.io;
 

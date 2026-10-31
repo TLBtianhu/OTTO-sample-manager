@@ -80,6 +80,7 @@ pub fn run(
     if (options.demo_rescan_dir) |dir_path| return try demo_rescan.run(init, dir_path);
 
     // 预览注册表自检：和 UI 走同一个 registry，但不开窗、不碰 nanoui。
+    // `--no-shell-preview` 只换这张表（去掉 Shell 缩略图），解码链本身不动。
     if (options.preview_path) |path| return try demo_preview.run(init, init.gpa, path, options.no_shell_preview);
 
     // 音频试听自检：真解码、真播放、真 sleep；没有端点时以 0 退出。

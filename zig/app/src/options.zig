@@ -6,6 +6,7 @@
 //! 解析层不碰文件系统，也不猜形态——那是 `mode.zig` 的事。
 
 const std = @import("std");
+const usage = @import("usage.zig");
 
 /// `--convert <in.json> <out.otto>` 的两个位置值。用 struct 而不是两个可选字段，
 /// 避免"有输入没输出"这种只可能来自解析 bug 的中间状态。
@@ -55,8 +56,8 @@ pub const Options = struct {
     save_path: ?[]const u8 = null,
     /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
     no_isolation: bool = false,
-    /// `--no-shell-preview`：临时把 Shell 缩略图从预览注册表里拿掉。
-    /// 用来证明图片/音频 provider 自给自足（验收开关，不是日常选项）。
+    /// `--no-shell-preview`：预览注册表去掉 Shell 缩略图，音频/图片/视频 provider
+    /// 仍然自给自足（验收"不依赖系统缩略图"；见 `providers/root.zig`，不是日常选项）。
     no_shell_preview: bool = false,
     /// L3 缩略图磁盘缓存的预算（字节）。默认 256 MiB；`--cache-budget-kib=<n>`
     /// 按 KiB 调小，用于验证淘汰（正常用户不需要碰它）。
@@ -336,30 +337,10 @@ fn parseMillis(text: []const u8) error{InvalidValue}!u64 {
     return std.fmt.parseInt(u64, text, 10) catch error.InvalidValue;
 }
 
-/// 命令行用法。放在这里（而不是 `main.zig`）是为了让 `main` 保持在 600 行以内：
-/// 这段是纯数据，和解析器贴身放也不会漂移。
-pub fn printUsage() void {
-    std.debug.print(
-        "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
-            "      otto-lite --version\n" ++
-            "      otto-lite [library.json|library.otto] --filter=<text> [--filter-ext=<list>]\n" ++
-            "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
-            "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
-            "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
-            "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge]\n" ++
-            "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
-            "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
-            "      otto-lite --preview <file> [--no-shell-preview] | --play-test <file> [--seek-at <ms>]\n" ++
-            "      otto-lite --copy-now <file>\n" ++
-            "      otto-lite --convert <in.json> <out.otto>\n" ++
-            "      otto-lite --library-info <file>\n" ++
-            "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n" ++
-            "      otto-lite --import-into <folder> [--save <file>]\n" ++
-            "      otto-lite --check-update <url> | <library> --update-url <url>\n" ++
-            "      otto-lite --update-download <url>   （下载 + 验签，不执行安装包）\n",
-        .{},
-    );
-}
+/// 命令行用法。搬到了 `usage.zig`：合并三条分支的参数后本文件贴着 600 行上限
+/// （AGENTS.md），而用法是纯数据、和解析器没有逻辑耦合。入口留在这里，调用方
+/// （`main.zig`）不用改。
+pub const printUsage = usage.printUsage;
 
 // ---------------------------------------------------------------------------
 // 测试：只跑解析，不碰文件系统
