@@ -418,6 +418,28 @@ real directory in place — that only proves the child honours the variable. Any
 mismatch makes the script exit 1, and the last thing it prints is a three-row
 PASS/FAIL table (`installed(real)` / `installed(hermetic)`).
 
+### One command: health check
+
+```
+# from zig/app; from the repo root use zig\health.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\health.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\health.ps1 -Quick
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\health.ps1 -Release
+```
+
+`zig/health.ps1` runs the whole gate in one process and prints a single table:
+debug + release builds, the core / ports / app test suites, the distribution
+audit above, the six-row bench plus the real-window scroll and memory probes,
+the opacity probe, the four `--demo*` self-checks, and minisign verification of
+the newest `zig/dist` artifacts. No window is shown and no focus is taken. A
+failure in one step is recorded and the rest still run; the exit code is decided
+at the end (any failed row -> 1). The charter's known unmet first-frame
+<= 100 ms row is labeled `KNOWN-FAIL` and does not fail the run. `-Quick` is the
+pre-commit subset (builds + tests + audit + signatures), `-Release` skips the
+debug build. The test suites and the opacity probe are retried once because
+their real-window foreground checks are sensitive to an unrelated shell window;
+the table says so when that happens.
+
 ## Settings panel (topmost, opacity, budgets)
 
 The header's 「设置」 entry opens a card over the list. Three kinds of state live
