@@ -17,6 +17,7 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
+const duration_text = @import("duration_text.zig");
 const filter = @import("filter.zig");
 const row_thumb = @import("row_thumb.zig");
 const transport_mod = @import("transport.zig");
@@ -61,7 +62,13 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     ui.text(c, sample.file_name, .{ .size = 13, .truncate = .ellipsis });
     const ext = filter.trimExt(sample.file_ext);
     if (ext.len > 0) ui.textf(c, .{ .size = 11, .color = c.theme.muted }, ".{s}", .{ext});
-    ui.textf(c, .{ .size = 11 }, "{d:.2}s", .{sample.duration});
+    // 估算时长必须显示成 `≈40.9s`：这个数是从文件大小 / 比特率推出来的，不是
+    // 容器声明的。`duration_trust` 只对 MP3 读一次头部（见那边的文件头）。
+    var duration_buffer: [32]u8 = undefined;
+    const estimated = s.duration_trust.isEstimated(sample);
+    ui.textf(c, .{ .size = 11 }, "{s}", .{
+        duration_text.format(sample.duration, estimated, &duration_buffer),
+    });
     return it;
 }
 

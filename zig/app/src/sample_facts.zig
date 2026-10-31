@@ -32,7 +32,12 @@ pub const Facts = struct {
 };
 
 /// 造一份 UI 事实。`sample` 的字符串可以在返回后失效：两个字段都复制了。
-pub fn init(allocator: std.mem.Allocator, sample: *const core.model.Sample) std.mem.Allocator.Error!Facts {
+/// `estimated` = 这条样本的时长是估算的（显示成 `≈`），与列表行同一口径。
+pub fn init(
+    allocator: std.mem.Allocator,
+    sample: *const core.model.Sample,
+    estimated: bool,
+) std.mem.Allocator.Error!Facts {
     var size_buffer: [32]u8 = undefined;
     var duration_buffer: [32]u8 = undefined;
     const summary = try std.fmt.allocPrint(
@@ -41,7 +46,7 @@ pub fn init(allocator: std.mem.Allocator, sample: *const core.model.Sample) std.
         .{
             sample.displayName(),
             formatSize(sample.file_size, &size_buffer),
-            formatDuration(sample.duration, &duration_buffer),
+            formatDuration(sample.duration, estimated, &duration_buffer),
             extensionText(sample),
         },
     );
@@ -51,7 +56,11 @@ pub fn init(allocator: std.mem.Allocator, sample: *const core.model.Sample) std.
 }
 
 /// `--preview` 用的五行块。固定行数，缺失值写"未知 / （无）"而不是省略行。
-pub fn formatBlock(allocator: std.mem.Allocator, sample: *const core.model.Sample) std.mem.Allocator.Error![]u8 {
+pub fn formatBlock(
+    allocator: std.mem.Allocator,
+    sample: *const core.model.Sample,
+    estimated: bool,
+) std.mem.Allocator.Error![]u8 {
     var size_buffer: [32]u8 = undefined;
     var duration_buffer: [32]u8 = undefined;
     return std.fmt.allocPrint(
@@ -60,7 +69,7 @@ pub fn formatBlock(allocator: std.mem.Allocator, sample: *const core.model.Sampl
         .{
             sample.displayName(),
             formatSize(sample.file_size, &size_buffer),
-            formatDuration(sample.duration, &duration_buffer),
+            formatDuration(sample.duration, estimated, &duration_buffer),
             sample.file_path,
             extensionText(sample),
         },
@@ -89,11 +98,13 @@ pub fn formatSize(bytes: u64, buffer: *[32]u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
 }
 
-/// 时长：已知（> 0）打印两位小数秒，未知打印"未知"。
+/// 时长：已知（> 0）打印两位小数秒，未知打印"未知"。`estimated = true` 时加
+/// `≈`（与列表行的 `duration_text.format` 同一规则）。
 /// `0` 在模型里就是"还没读过头"（见 `Sample.duration`），不能显示成 `0.00 s`。
-pub fn formatDuration(seconds: f64, buffer: *[32]u8) []const u8 {
+pub fn formatDuration(seconds: f64, estimated: bool, buffer: *[32]u8) []const u8 {
     if (!(seconds > 0)) return "未知";
-    return std.fmt.bufPrint(buffer, "{d:.2} s", .{seconds}) catch "?";
+    const prefix = if (estimated) "≈" else "";
+    return std.fmt.bufPrint(buffer, "{s}{d:.2} s", .{ prefix, seconds }) catch "?";
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +126,7 @@ fn fakeSample() core.model.Sample {
 
 test "Facts.init 给两行并复制路径；原样本失效不影响事实" {
     var sample = fakeSample();
-    const facts = try init(testing.allocator, &sample);
+    const facts = try init(testing.allocator, &sample, false);
     defer facts.deinit(testing.allocator);
 
     try testing.expect(std.mem.indexOf(u8, facts.summary, "名称: Kick") != null);
@@ -131,7 +142,7 @@ test "Facts.init 给两行并复制路径；原样本失效不影响事实" {
 
 test "formatBlock 五行：名字/大小/时长/路径/扩展名" {
     const sample = fakeSample();
-    const text = try formatBlock(testing.allocator, &sample);
+    const text = try formatBlock(testing.allocator, &sample, false);
     defer testing.allocator.free(text);
 
     try testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "\n") + 1);
@@ -149,7 +160,7 @@ test "缺字段时写“未知/（无）”，扩展名可从路径推导" {
         .file_ext = "",
         .file_path = "C:\\lib\\Take.PNG",
     };
-    const text = try formatBlock(testing.allocator, &no_ext);
+    const text = try formatBlock(testing.allocator, &no_ext, false);
     defer testing.allocator.free(text);
 
     try testing.expect(std.mem.indexOf(u8, text, "大小: 0 B") != null);
@@ -162,7 +173,7 @@ test "缺字段时写“未知/（无）”，扩展名可从路径推导" {
         .file_ext = "",
         .file_path = "C:\\lib\\noext",
     };
-    const other = try formatBlock(testing.allocator, &no_name);
+    const other = try formatBlock(testing.allocator, &no_name, false);
     defer testing.allocator.free(other);
     try testing.expect(std.mem.endsWith(u8, other, "扩展名: （无）"));
 }
@@ -175,7 +186,9 @@ test "formatSize / formatDuration 的边界" {
     try testing.expectEqualStrings("34.5 KiB", formatSize(35324, &buffer));
     try testing.expectEqualStrings("1.0 MiB", formatSize(1024 * 1024, &buffer));
 
-    try testing.expectEqualStrings("未知", formatDuration(0, &buffer));
-    try testing.expectEqualStrings("未知", formatDuration(-1, &buffer));
-    try testing.expectEqualStrings("0.10 s", formatDuration(0.1, &buffer));
+    try testing.expectEqualStrings("未知", formatDuration(0, false, &buffer));
+    try testing.expectEqualStrings("未知", formatDuration(-1, false, &buffer));
+    try testing.expectEqualStrings("0.10 s", formatDuration(0.1, false, &buffer));
+    try testing.expectEqualStrings("≈40.93 s", formatDuration(40.933, true, &buffer));
+    try testing.expectEqualStrings("40.93 s", formatDuration(40.933, false, &buffer));
 }

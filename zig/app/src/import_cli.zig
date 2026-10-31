@@ -215,7 +215,7 @@ pub fn uniqueSampleId(
 
 /// 把 L0 事实 + L1 元数据拼成一条 Sample。纯函数：不读盘、不算时间。
 ///
-/// `metadata == null`（非 WAV / 坏头 / 截断）时时长与采样率留 0，并置
+/// `metadata == null`（不认识的容器 / 坏头 / 截断）时时长与采样率留 0，并置
 /// `pending_metadata = true`：这是"还没人读过"，不是"确认是 0 秒"。
 pub fn buildSample(
     fact: scan_mod.FileFact,

@@ -30,6 +30,7 @@ const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
 const drop_ui = @import("drop_ui.zig");
+const duration_trust = @import("duration_trust.zig");
 const empty_state = @import("empty_state.zig");
 const import_ui = @import("import_ui.zig");
 const list_header = @import("list_header.zig");
@@ -61,6 +62,9 @@ pub const State = struct {
     live: *live_mod.Live,
     /// 当前视图；每次 poll 之后都要重新取——`Index.apply` 的扩容会让数组搬家。
     samples: []const core.model.Sample,
+    /// 行内时长的可信度 side table：MP3 的时长是不是按比特率估算的。
+    /// core 的 `Sample` 只有一个 f64，估算位放不进模型，只能放在 app 侧。
+    duration_trust: duration_trust.Trust,
     thumbs: *thumbs_mod.Thumbs,
     /// 底部预览条：注册表 + 工作线程 + 五分支渲染（见 `preview_panel.zig`）。
     preview: *preview_panel.Panel,
@@ -197,7 +201,9 @@ pub const State = struct {
         body.end();
 
         // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由 `tick` 接手。
-        s.preview.sync(row_ui.previewRow(s));
+        // 事实摘要的时长与列表行同一口径：MP3 估算值也带 ≈。
+        const preview_sample = row_ui.previewRow(s);
+        s.preview.sync(preview_sample, if (preview_sample) |p| s.duration_trust.isEstimated(p.*) else false);
         s.preview.draw(c);
 
         s.reporter.report(s.thumbs, s.rows_with_image);
@@ -283,11 +289,12 @@ pub const State = struct {
     fn afterReload(s: *State) void {
         s.live = s.import.live();
         s.samples = s.live.samples();
+        s.duration_trust.clear();
         s.thumbs.clearFailures();
         s.search.markStale();
         s.selection.clear();
         s.selection.resize(s.gpa, s.samples.len) catch {};
-        s.preview.sync(null);
+        s.preview.sync(null, false);
         if (s.window) |window| {
             window_util.setTitle(window, s.samples.len);
             window.redraw();
@@ -384,6 +391,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = init.gpa,
         .live = boot.live,
         .samples = boot.live.samples(),
+        .duration_trust = duration_trust.Trust.init(init.gpa, init.io),
         .thumbs = boot.thumbs,
         .preview = boot.preview,
         .search = search_ui.Search.init(init.gpa),
@@ -401,6 +409,7 @@ pub fn main(init: std.process.Init) !void {
     defer state.selection.deinit(init.gpa);
     defer state.search.deinit();
     defer state.transport.deinit();
+    defer state.duration_trust.deinit();
     state.selection.resize(init.gpa, state.samples.len) catch {};
     if (options.select) |text| selection_mod.seedSelection(&state.selection, state.samples.len, text);
     var title_buffer: [96]u8 = undefined;
