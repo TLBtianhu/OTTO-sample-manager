@@ -200,10 +200,10 @@ pub const State = struct {
         // 列表到此为止：预览条必须是它的兄弟，不能变成列表的子节点。
         body.end();
 
-        // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由 `tick` 接手。
-        // 事实摘要的时长与列表行同一口径：MP3 估算值也带 ≈。
+        // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由
+        // `tick` 接手。事实摘要的时长与列表行同一条 `duration_trust.display`。
         const preview_sample = row_ui.previewRow(s);
-        s.preview.sync(preview_sample, if (preview_sample) |p| s.duration_trust.isEstimated(p.*) else false);
+        s.preview.sync(preview_sample, row_ui.previewDuration(s, preview_sample));
         s.preview.draw(c);
 
         s.reporter.report(s.thumbs, s.rows_with_image);
@@ -294,7 +294,7 @@ pub const State = struct {
         s.search.markStale();
         s.selection.clear();
         s.selection.resize(s.gpa, s.samples.len) catch {};
-        s.preview.sync(null, false);
+        s.preview.sync(null, .{});
         if (s.window) |window| {
             window_util.setTitle(window, s.samples.len);
             window.redraw();

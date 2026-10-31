@@ -60,9 +60,10 @@ pub fn run(
     std.debug.print("preview: path={s}\n", .{path});
 
     // 事实先打：即使下面整个 none，用户也先看到"这是什么"。
-    // `--preview` 没有库上下文，`estimated` 只知道 false；UI 列表里由
-    // `duration_trust` 判 MP3 的估算位（见 `row_ui.zig`）。
-    const facts = try sample_facts.formatBlock(allocator, &sample, false);
+    // `--preview` 没有库上下文：时长就是样本自己的（这里没有旧库条目），估算位
+    // 只知道 false；UI 列表/预览条由 `duration_trust` 判 MP3 的估算位、并给旧库
+    // 补时长（见 `row_ui.zig` / `main.zig`）。
+    const facts = try sample_facts.formatBlock(allocator, &sample, sample_facts.Duration.of(&sample));
     defer allocator.free(facts);
     std.debug.print("preview: facts:\n", .{});
     var fact_lines = std.mem.splitScalar(u8, facts, '\n');

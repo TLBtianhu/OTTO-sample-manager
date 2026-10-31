@@ -20,6 +20,7 @@ const core = @import("otto_core");
 const duration_text = @import("duration_text.zig");
 const filter = @import("filter.zig");
 const row_thumb = @import("row_thumb.zig");
+const sample_facts = @import("sample_facts.zig");
 const transport_mod = @import("transport.zig");
 const State = @import("main.zig").State;
 const ui = nanoui.ui;
@@ -63,13 +64,23 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     const ext = filter.trimExt(sample.file_ext);
     if (ext.len > 0) ui.textf(c, .{ .size = 11, .color = c.theme.muted }, ".{s}", .{ext});
     // 估算时长必须显示成 `≈40.9s`：这个数是从文件大小 / 比特率推出来的，不是
-    // 容器声明的。`duration_trust` 只对 MP3 读一次头部（见那边的文件头）。
+    // 容器声明的。`duration_trust.display` 对库里已有的时长只判 MP3 的估算位（读
+    // 一次头部并缓存）；对旧库 `duration <= 0` 的条目先问 `resolve`——就地补出
+    // 时长，不写回库文件。`display` 内部命中缓存时不碰磁盘。
     var duration_buffer: [32]u8 = undefined;
-    const estimated = s.duration_trust.isEstimated(sample);
+    const shown = s.duration_trust.display(sample);
     ui.textf(c, .{ .size = 11 }, "{s}", .{
-        duration_text.format(sample.duration, estimated, &duration_buffer),
+        duration_text.format(shown.seconds, shown.estimated, &duration_buffer),
     });
     return it;
+}
+
+/// 预览区事实要显示的时长：与 `drawRow` 走同一条 `duration_trust.display`，
+/// 保证一行两处（行文本 / 底部事实区）用的值完全一致。null = 没有选中。
+pub fn previewDuration(s: *State, sample: ?*const core.model.Sample) sample_facts.Duration {
+    const target = sample orelse return .{};
+    const shown = s.duration_trust.display(target.*);
+    return .{ .seconds = shown.seconds, .estimated = shown.estimated };
 }
 
 /// 点击语义、拖拽阈值。Ctrl+点击在 nanoui 里不算 clicked（它被当成右键按下，
