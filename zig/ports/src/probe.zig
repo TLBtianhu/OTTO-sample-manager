@@ -1,12 +1,17 @@
-//! L1 元数据口岸：只读文件头，产出时长 / 采样率 / 声道 / 位深。
+//! L1 元数据口岸：只读文件头，产出时长 / 采样率 / 声道 / 位深 / 画面尺寸 / 编码。
 //!
-//! 支持四种容器，各自的头部解析在独立文件里（纯字节、可单测）：
+//! 六种容器，各自的头部解析在独立文件里（纯字节、可单测）：
 //!   * WAV：`otto_wav_header.parse` 是解码器与 probe 共用的**唯一**一份块扫描，
 //!     时长由 `wav_info` 按 codec 算（PCM/float、A-law、µ-law、IMA/MS ADPCM）；
 //!   * FLAC：`flac_info.parse` 只读 STREAMINFO；
 //!   * MP3：`mp3_info.parse` 跳 ID3、读第一帧、优先 Xing/Info 帧数；
-//!   * AIFF：`aiff_info.parse` 只读 `COMM`（精确帧数 + 80 位扩展采样率）。
+//!   * AIFF：`aiff_info.parse` 只读 `COMM`（精确帧数 + 80 位扩展采样率）；
+//!   * MP4 / MOV：`mp4_info` 走 box 到 `moov`（mvhd/tkhd/mdhd/stsd）；`moov` 在
+//!     文件尾时由 `mp4_info.seek` 按 box 偏移跳过去，只读那一段，不读 `mdat`；
+//!   * MKV / WebM：`mkv_info` 读 EBML 的 `Info`（TimecodeScale/Duration）与
+//!     `Tracks`（TrackType/PixelWidth/PixelHeight/CodecID）。
 //!
+//! **视频只读容器、不解码任何一帧**：解码仍归 Media Foundation（`mf-video`）。
 //! 非上述格式、坏头、截断一律返回 `null`——**不猜**，把 `pending_metadata`
 //! 留给以后的 L1 实现，而不是凭空写 0 当作"已知是 0 秒"。`AIFC` 本轮不做，
 //! 同样返回 null。
@@ -23,6 +28,7 @@
 //! FLAC / AIFF / 带 Xing 的 MP3 都来自容器声明（false），无 Xing 的 MP3 由文件
 //! 大小 / 比特率算出（true）。界面必须把 true 显示成 `≈`，不能冒充精确值。
 //! ADPCM 的帧数由块头 + `block_align` 算出，仍是容器精确值，不是估算。
+//! MP4 / MKV 的时长是容器声明的，也是 false。
 //!
 //! 本文件只碰标准库的文件 API；不 import core。
 
@@ -32,20 +38,30 @@ const wav_info = @import("wav_info.zig");
 const flac_info = @import("flac_info.zig");
 const mp3_info = @import("mp3_info.zig");
 const aiff_info = @import("aiff_info.zig");
+const mp4_info = @import("mp4_info.zig");
+const mkv_info = @import("mkv_info.zig");
+const codec_text = @import("codec_text.zig");
 
-/// 头部读取上限。四种容器的头部（含 MP3 第一帧的 Xing）都远小于 64 KiB。
+/// 编码名的定长载体（见 `codec_text.zig`）。
+pub const CodecText = codec_text.CodecText;
+/// 头部读取上限：六种容器的头部都远小于 64 KiB。MP4 的 `moov` 在文件尾时按
+/// 偏移单独读（见 `mp4_info.max_moov_bytes`），这一条只约束"从头读的那一段"。
 pub const max_header_bytes: usize = 64 * 1024;
 
-/// 支持的类型面。不在这个列表里的扩展名一律返回 null。
-pub const Kind = enum { wav, flac, mp3, aiff };
+/// 支持的类型面。不在这个列表里的容器一律返回 null。
+pub const Kind = enum { wav, flac, mp3, aiff, mp4, mkv };
 
 pub const Metadata = struct {
     /// 声明或推算的时长（毫秒，向下取整）。
     duration_ms: u64,
-    sample_rate: u32,
-    channels: u32,
-    bits: u16,
+    sample_rate: u32 = 0,
+    channels: u32 = 0,
+    bits: u16 = 0,
     kind: Kind,
+    /// 画面尺寸与编码名：只对视频容器有值，音频 / 未知时 null。
+    width: ?u32 = null,
+    height: ?u32 = null,
+    codec: ?CodecText = null,
     /// true = 时长由文件大小 / 比特率推算，不是容器声明。显示时必须加 `≈`。
     /// 默认 false：所有解析器都显式写它，默认值只是给测试/调用方的便利。
     estimated: bool = false,
@@ -75,6 +91,8 @@ pub fn probe(
     if (isWav(bytes)) return probeWav(io, file, bytes);
     if (std.mem.eql(u8, bytes[0..4], "fLaC")) return probeFlac(bytes);
     if (isAiff(bytes)) return probeAiff(bytes);
+    if (isMp4(bytes)) return probeMp4(allocator, io, file, bytes);
+    if (isMkv(bytes)) return probeMkv(bytes);
     if (looksLikeMp3(bytes)) return probeMp3(io, file, bytes);
     return null;
 }
@@ -90,6 +108,54 @@ fn isAiff(bytes: []const u8) bool {
     return bytes.len >= 12 and
         std.mem.eql(u8, bytes[0..4], "FORM") and
         std.mem.eql(u8, bytes[8..12], "AIFF");
+}
+
+/// ISO BMFF：第一个 box 的 type 是 `ftyp`（`.mov` / `.m4a` 也是同一个容器）。
+fn isMp4(bytes: []const u8) bool {
+    return bytes.len >= 12 and std.mem.eql(u8, bytes[4..8], "ftyp");
+}
+
+/// Matroska / WebM：EBML 魔数。
+fn isMkv(bytes: []const u8) bool {
+    return bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "\x1A\x45\xDF\xA3");
+}
+
+/// MP4 / MOV：`moov` 在头部窗口里就直接解析；不在（ffmpeg 默认把 moov 放尾部）
+/// 就交给 `mp4_info.seek`，按 box size 逐个跳过、只把 `moov` 那一段读进来——
+/// `mdat` 的负载一个字节都不读。容器声明是精确值，`estimated = false`。
+fn probeMp4(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file: std.Io.File,
+    bytes: []const u8,
+) Error!?Metadata {
+    var info = mp4_info.parse(bytes);
+    if (info.duration_ms == null) {
+        const stat = try file.stat(io);
+        if (try mp4_info.seek(allocator, io, file, stat.size)) |found| info = found;
+    }
+    const duration_ms = info.duration_ms orelse return null;
+    return .{
+        .duration_ms = duration_ms,
+        .kind = .mp4,
+        .width = info.width,
+        .height = info.height,
+        .codec = info.codec,
+        .estimated = false,
+    };
+}
+
+fn probeMkv(bytes: []const u8) ?Metadata {
+    const info = mkv_info.parse(bytes) catch return null;
+    const duration_ms = info.duration_ms orelse return null;
+    return .{
+        .duration_ms = duration_ms,
+        .kind = .mkv,
+        .width = info.width,
+        .height = info.height,
+        .codec = info.codec,
+        .estimated = false,
+    };
 }
 
 /// WAV：块扫描 + 按 codec 算帧数 + 用文件大小核对 `data` 的声明长度。

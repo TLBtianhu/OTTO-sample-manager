@@ -37,10 +37,13 @@ pub const Facts = struct {
 
 /// 事实区要显示的时长。**不直接读 `Sample.duration`**：旧库条目是 0，显示层会
 /// 用 `duration_trust.display` 就地补一个（见那边文件头）。`estimated = true`
-/// 时加 `≈`，与列表行同一口径。
+/// 时加 `≈`，与列表行同一口径。`width`/`height` 只对视频有值：分辨率不在
+/// `Sample` 里，和时长一起来自 `probe` 的容器事实。
 pub const Duration = struct {
     seconds: f64 = 0,
     estimated: bool = false,
+    width: ?u32 = null,
+    height: ?u32 = null,
 
     /// 不查 side table 的默认口径：库里存的就是这个值。
     pub fn of(sample: *const core.model.Sample) Duration {
@@ -57,13 +60,15 @@ pub fn init(
 ) std.mem.Allocator.Error!Facts {
     var size_buffer: [32]u8 = undefined;
     var duration_buffer: [32]u8 = undefined;
+    var resolution_buffer: [32]u8 = undefined;
     const summary = try std.fmt.allocPrint(
         allocator,
-        "名称: {s} · 大小: {s} · 时长: {s} · 扩展名: {s}",
+        "名称: {s} · 大小: {s} · 时长: {s}{s} · 扩展名: {s}",
         .{
             sample.displayName(),
             formatSize(sample.file_size, &size_buffer),
             formatDuration(duration.seconds, duration.estimated, &duration_buffer),
+            resolutionSuffix(duration, &resolution_buffer),
             extensionText(sample),
         },
     );
@@ -80,17 +85,27 @@ pub fn formatBlock(
 ) std.mem.Allocator.Error![]u8 {
     var size_buffer: [32]u8 = undefined;
     var duration_buffer: [32]u8 = undefined;
+    var resolution_buffer: [32]u8 = undefined;
     return std.fmt.allocPrint(
         allocator,
-        "名称: {s}\n大小: {s}\n时长: {s}\n路径: {s}\n扩展名: {s}",
+        "名称: {s}\n大小: {s}\n时长: {s}{s}\n路径: {s}\n扩展名: {s}",
         .{
             sample.displayName(),
             formatSize(sample.file_size, &size_buffer),
             formatDuration(duration.seconds, duration.estimated, &duration_buffer),
+            resolutionSuffix(duration, &resolution_buffer),
             sample.file_path,
             extensionText(sample),
         },
     );
+}
+
+/// 分辨率后缀：` · 640×360`；没有画面尺寸（音频 / 未知）时是空串。
+/// 单独一格 buffer，音频行的摘要因此与 0.18 逐字节一致。
+fn resolutionSuffix(duration: Duration, buffer: *[32]u8) []const u8 {
+    const width = duration.width orelse return "";
+    const height = duration.height orelse return "";
+    return std.fmt.bufPrint(buffer, " · {d}×{d}", .{ width, height }) catch "";
 }
 
 /// 扩展名：`Sample.file_ext` 为空时从路径推导；仍没有就写"（无）"。
@@ -212,6 +227,29 @@ test "旧库（duration = 0）：事实区用显示层补出来的时长，不�
     const block = try formatBlock(testing.allocator, &sample, .{ .seconds = 2.036 });
     defer testing.allocator.free(block);
     try testing.expect(std.mem.indexOf(u8, block, "时长: 2.04 s") != null);
+}
+
+test "视频行：事实区带分辨率；音频行不多出分隔符" {
+    var video = core.model.Sample{
+        .id = "v1",
+        .file_name = "rabbit320",
+        .file_ext = ".mp4",
+        .file_path = "C:\\lib\\rabbit320.mp4",
+        .file_size = 834_563,
+        .duration = 7.8,
+    };
+    const facts = try init(testing.allocator, &video, .{ .seconds = 7.8, .width = 320, .height = 240 });
+    defer facts.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, facts.summary, "时长: 7.80 s · 320×240 · 扩展名: .mp4") != null);
+
+    var audio = fakeSample();
+    const audio_facts = try init(testing.allocator, &audio, Duration.of(&audio));
+    defer audio_facts.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, audio_facts.summary, "时长: 0.10 s · 扩展名: .wav") != null);
+    // 只有宽度没有高度：当"未知"，不写半格。
+    const half = try init(testing.allocator, &video, .{ .seconds = 7.8, .width = 320 });
+    defer half.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, half.summary, "· 320") == null);
 }
 
 test "formatSize / formatDuration 的边界" {

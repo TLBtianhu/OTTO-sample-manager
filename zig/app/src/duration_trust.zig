@@ -23,6 +23,8 @@
 //!     显示层保持原样，这条路径与没有本功能时逐字节一致）；
 //!   * `duration <= 0` 且扩展名是 `.wav/.flac/.mp3/.aiff/.aif`：缓存未命中才 probe
 //!     一次（只读 64 KiB 头，`probe.max_header_bytes`）；
+//!   * 视频后缀（`.mp4/.mov/.mkv/.webm`）另走一条：**库里已有时长也要读一次头**，
+//!     因为分辨率不在 `Sample` 里；`display` 用它决定列表行要不要写 `640×360`；
 //!   * 其它扩展名（`.xyz` / `.png` / 无后缀）：不打开文件，仍然"未知"——显示层不猜
 //!     内容，`.xyz` 里装的是 WAV 也不认（那条判断只属于 `--preview` 的 magic 分派）；
 //!   * 探到的答案（**含失败**）都写进缓存：坏文件 / 文件不在不会每帧重试打开；
@@ -37,10 +39,13 @@ const core = @import("otto_core");
 const probe_mod = @import("otto_probe");
 
 /// 旧库补出来的答案。`duration_ms` 是 `probe` 的毫秒（向下取整），`estimated`
-/// 决定显示时加不加 `≈`（无 Xing 的 MP3 才是 true）。
+/// 决定显示时加不加 `≈`（无 Xing 的 MP3 才是 true）。视频行还要 `width` /
+/// `height`：分辨率不在 `core.model.Sample` 里，只能和时长一起从文件头拿。
 pub const Answer = struct {
     duration_ms: u64,
     estimated: bool,
+    width: ?u32 = null,
+    height: ?u32 = null,
 
     /// 秒。`duration_text.format` 与 `sample_facts` 都吃秒，换算只在这里做一次。
     pub fn seconds(self: Answer) f64 {
@@ -49,10 +54,12 @@ pub const Answer = struct {
 };
 
 /// 一行要显示的时长：库里的原值，或显示层刚补出来的。0 秒 = 仍然未知，
-/// `duration_text` 会写"未知"而不是 `0.0s`。
+/// `duration_text` 会写"未知"而不是 `0.0s`。视频行还带上分辨率。
 pub const Display = struct {
-    seconds: f64,
-    estimated: bool,
+    seconds: f64 = 0,
+    estimated: bool = false,
+    width: ?u32 = null,
+    height: ?u32 = null,
 };
 
 /// 探针计数。单元测试用它证明"命中缓存不读盘"（`probes` 不随帧数增长）；
@@ -115,12 +122,32 @@ pub const Trust = struct {
 
     /// 显示层要的"这一行到底是几秒"：库里有值就直接用（不 probe）；库里是 0
     /// （旧库没存）才问 `resolve`。列表行与预览区事实都走这里，保证两处一致。
+    ///
+    /// 视频行例外：分辨率不在 `Sample` 里，库里即使已有时长也要读一次文件头
+    /// （命中缓存就不碰磁盘）。音频行仍然"库里有值就不 probe"，行为逐字节不变。
     pub fn display(self: *Trust, sample: core.model.Sample) Display {
-        if (sample.duration > 0) {
-            return .{ .seconds = sample.duration, .estimated = self.isEstimated(sample) };
+        const video = isVideo(extension(sample));
+        if (!video) {
+            if (sample.duration > 0) {
+                return .{ .seconds = sample.duration, .estimated = self.isEstimated(sample) };
+            }
+            const answer = self.resolve(sample) orelse return .{};
+            return .{ .seconds = answer.seconds(), .estimated = answer.estimated };
         }
-        const answer = self.resolve(sample) orelse return .{ .seconds = 0, .estimated = false };
-        return .{ .seconds = answer.seconds(), .estimated = answer.estimated };
+        // 视频：时长优先用库里的（导入时已由 probe 存下），分辨率来自文件头。
+        const found = self.lookup(sample);
+        const seconds = if (sample.duration > 0)
+            sample.duration
+        else if (found) |answer|
+            answer.seconds()
+        else
+            return .{};
+        return .{
+            .seconds = seconds,
+            .estimated = if (found) |answer| answer.estimated else false,
+            .width = if (found) |answer| answer.width else null,
+            .height = if (found) |answer| answer.height else null,
+        };
     }
 
     /// 这条样本的时长是不是估算值。只对 `duration > 0` 的 MP3 读文件头；读不了
@@ -157,7 +184,12 @@ pub const Trust = struct {
         const value = metadata orelse return null;
         // 0 毫秒 = 没算出时长（0 帧 / 坏头）：显示"未知"，不是 0.0s。
         if (value.duration_ms == 0) return null;
-        return .{ .duration_ms = value.duration_ms, .estimated = value.estimated };
+        return .{
+            .duration_ms = value.duration_ms,
+            .estimated = value.estimated,
+            .width = value.width,
+            .height = value.height,
+        };
     }
 
     /// 写缓存。同一路径（文件被替换过）复用键，只更新值与指纹。
@@ -183,9 +215,21 @@ fn extension(sample: core.model.Sample) []const u8 {
     return if (sample.file_ext.len > 0) sample.file_ext else core.model.fileExtFromPath(sample.file_path);
 }
 
-/// 显示层愿意打开的音频后缀。大小写不敏感，前导点必须有。
+/// 显示层愿意打开的容器后缀（音频 + 视频）。大小写不敏感，前导点必须有。
 fn parsable(ext: []const u8) bool {
-    const supported = [_][]const u8{ ".wav", ".flac", ".mp3", ".aiff", ".aif" };
+    const supported = [_][]const u8{
+        ".wav", ".flac", ".mp3", ".aiff", ".aif",
+        ".mp4", ".mov",  ".mkv", ".webm",
+    };
+    for (supported) |candidate| {
+        if (std.ascii.eqlIgnoreCase(ext, candidate)) return true;
+    }
+    return false;
+}
+
+/// 视频后缀：`display` 要读分辨率，即使库里已经存了时长。
+fn isVideo(ext: []const u8) bool {
+    const supported = [_][]const u8{ ".mp4", ".mov", ".mkv", ".webm" };
     for (supported) |candidate| {
         if (std.ascii.eqlIgnoreCase(ext, candidate)) return true;
     }
