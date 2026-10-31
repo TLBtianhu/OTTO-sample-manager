@@ -7,8 +7,11 @@
 //! left/side, right/side and mid/side assignments; the MP3 side covers long and
 //! window-switched (start/short/stop) granules, mid/side and intensity stereo;
 //! the Ogg side covers the container, the three Vorbis headers, floor 1, residue
-//! formats 0/1/2, inverse coupling, the IMDCT and the lap. Floor 0 and Opus are
-//! not supported and are named as such. See README for the support matrix.
+//! formats 0/1/2, inverse coupling, the IMDCT and the lap, and Ogg Opus up to
+//! the CELT layer (configuration 16-31): `open` returns a real decoder and
+//! `read` produces PCM, while SILK/Hybrid packets are refused as `Unsupported`
+//! rather than approximated (see `opus.zig`). Floor 0 is not supported and is
+//! named as such. See README for the support matrix.
 //!
 //! The API deliberately has one output path: interleaved i16. Source PCM
 //! (8/16/24/32) and float32 are converted inside the decoder, so a player
@@ -27,6 +30,12 @@ const vorbis_decoder = @import("vorbis_decoder.zig");
 pub const Format = types.Format;
 pub const Info = types.Info;
 pub const Error = types.Error;
+
+/// Ogg Opus: `inspect` reports the head fields, packet framing and length;
+/// `Decoder.open` returns a streaming decoder that produces PCM for CELT-only
+/// packets (configuration 16-31) and refuses SILK/Hybrid ones with
+/// `error.Unsupported`.
+pub const opus = @import("opus.zig");
 
 /// Reader buffer size used by `openFile` / `openFileWithIo`. One refill is one
 /// read from the file, so a 512 KiB file takes at least eight reads and never
@@ -57,9 +66,14 @@ const FileSource = struct {
 /// the answer is null rather than a guess, because reporting Opus as
 /// `.ogg_vorbis` would be a lie. Anything shorter than a recognizable signature
 /// returns null. RF64 and RIFX return null on purpose: they are WAV-like
-/// containers this version does not decode, and `probe` never promises a format
-/// that `open` cannot open. AIFC returns null for the same reason, even though
-/// `open` names it `Unsupported`.
+/// containers this version does not decode. AIFC returns null for the same
+/// reason, even though `open` names it `Unsupported`.
+///
+/// `.ogg_opus` is the one format this function names without being able to
+/// decode it: the Opus path reports the container and the codec truthfully
+/// (head fields, packet framing, length) and `open` still answers
+/// `error.Unsupported`. Naming it here is what lets a caller list an `.opus`
+/// file with its duration instead of showing nothing.
 pub fn probe(header: []const u8) ?Format {
     if (header.len >= 4 and std.mem.eql(u8, header[0..4], "fLaC")) return .flac;
     if (header.len >= 12 and std.mem.eql(u8, header[0..4], "RIFF") and
@@ -72,13 +86,13 @@ pub fn probe(header: []const u8) ?Format {
     {
         return .aiff;
     }
-    // Ogg: the container magic alone does not name a codec. Vorbis is claimed
-    // only when its identification packet is visible; Opus returns null here
-    // (no `Format` exists for it) and `open` names it `Unsupported`.
+    // Ogg: the container magic alone does not name a codec, so the first
+    // packet decides. Both codecs are named; only Vorbis is decodable.
     if (header.len >= 4 and std.mem.eql(u8, header[0..4], "OggS")) {
         return switch (ogg.identify(header)) {
             .vorbis => .ogg_vorbis,
-            else => null,
+            .opus => .ogg_opus,
+            .unknown => null,
         };
     }
     // MP3: an ID3v2 tag or an MPEG audio sync word. Any layer/version is
@@ -96,8 +110,10 @@ pub fn probe(header: []const u8) ?Format {
 ///
 /// For Ogg this version parses the container and all three Vorbis headers and
 /// returns a streaming decoder; `total_frames` is the stream's last granule, so
-/// it stays `null` until `read` reaches the end. Opus and unknown Ogg logical
-/// streams return `error.Unsupported` without producing a decoder.
+/// it stays `null` until `read` reaches the end. Ogg Opus parses its head,
+/// comment header and every packet's framing, then returns
+/// `error.Unsupported`: there is no Opus decoder, and no silent PCM is invented
+/// for one. Unknown Ogg logical streams return `error.Unsupported` too.
 pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder {
     var header: [12]u8 = undefined;
     const got = reader.readSliceShort(&header) catch |err| switch (err) {
@@ -147,15 +163,34 @@ pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder 
     }
 
     if (std.mem.eql(u8, header[0..4], "OggS")) {
-        // Ogg Vorbis: the container names the codec in its first packet, so an
-        // Ogg page that does not carry `\x01vorbis` is Opus or something else
-        // and is named Unsupported rather than NotAudio.
-        const dec = try vorbis_decoder.Decoder.open(allocator, reader, &header);
-        return .{
-            .info = dec.info,
-            .allocator = allocator,
-            .impl = .{ .ogg_vorbis = dec },
-        };
+        // Ogg names its codec in the first packet, and the demultiplexer has to
+        // read that page to see it, so it is created here and handed to the
+        // codec decoder that matches. Reading it twice is not an option: a
+        // caller's reader may be a socket.
+        const demux = try ogg.Demuxer.init(allocator, reader, &header);
+        switch (demux.streamCodec()) {
+            .vorbis => {
+                const dec = try vorbis_decoder.Decoder.openFromDemux(allocator, demux);
+                return .{
+                    .info = dec.info,
+                    .allocator = allocator,
+                    .impl = .{ .ogg_vorbis = dec },
+                };
+            },
+            .opus => {
+                const dec = try opus.Decoder.openFromDemux(allocator, demux);
+                return .{
+                    .info = dec.info,
+                    .allocator = allocator,
+                    .impl = .{ .ogg_opus = dec },
+                };
+            },
+            .unknown => {
+                var discarded = demux;
+                discarded.deinit();
+                return error.Unsupported;
+            },
+        }
     }
 
     // Recognize the containers we reject, so the error is Unsupported rather
@@ -228,6 +263,7 @@ pub const Decoder = struct {
         flac: flac.Decoder,
         mp3: mp3.Decoder,
         ogg_vorbis: vorbis_decoder.Decoder,
+        ogg_opus: opus.Decoder,
     },
     /// Non-null only for `openBytes` / `openFile*`: reader state owned by this
     /// decoder. Plain `open` borrows the caller's reader and leaves it null.
@@ -263,6 +299,13 @@ pub const Decoder = struct {
                 self.info.total_frames = dec.info.total_frames;
                 return written;
             },
+            .ogg_opus => |*dec| {
+                const written = try dec.read(out);
+                // Same for Opus: `granule - pre_skip` is only known once the
+                // last page has been read, which is where reading ends.
+                self.info.total_frames = dec.info.total_frames;
+                return written;
+            },
         }
     }
 
@@ -276,6 +319,7 @@ pub const Decoder = struct {
             .flac => |*dec| dec.deinit(),
             .mp3 => |*dec| dec.deinit(),
             .ogg_vorbis => |*dec| dec.deinit(),
+            .ogg_opus => |*dec| dec.deinit(),
         }
         if (self.source) |source| switch (source) {
             .bytes => |reader| self.allocator.destroy(reader),

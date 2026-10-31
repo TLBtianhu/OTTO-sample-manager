@@ -1,10 +1,10 @@
 //! zig-audio → `audio/session.Decoded` 的**唯一**解码路径。
 //!
-//! WAV / FLAC / MP3 / AIFF / Ogg Vorbis 现在都由 vendor 的 zig-audio 解（`vendored
-//! v0.10`），`providers/audio.zig`（wasapi-pcm）与 `providers/native_audio.zig` 只差在
-//! `supports` 的扩展名表与图标能力——解码循环、声道规则、256/512 MiB 上限、
-//! 流式 Reader 必须只有这一份。上一轮的 WAV/FLAC 下混分叉已经证明：两份实现
-//! 迟早会在"多声道怎么混、空流算不算成功、时长怎么取整"上漂移。
+//! WAV / FLAC / MP3 / AIFF / Ogg Vorbis / Ogg Opus（CELT 层）现在都由 vendor 的
+//! zig-audio 解（`vendored v0.13`），`providers/audio.zig`（wasapi-pcm）与
+//! `providers/native_audio.zig` 只差在 `supports` 的扩展名表与图标能力——解码循环、
+//! 声道规则、256/512 MiB 上限、流式 Reader 必须只有这一份。上一轮的 WAV/FLAC 下混
+//! 分叉已经证明：两份实现迟早会在"多声道怎么混、空流算不算成功、时长怎么取整"上漂移。
 //!
 //! ## 调用链
 //!
@@ -65,6 +65,13 @@
 //!                                                      → `failed`
 //!     （认领了、但文件损坏或 IO 出错）
 //!   * 只有 `OutOfMemory` 是 `preview.Error`，由 provider 直接上抛。
+//!
+//! `Unsupported` **不是只在开流时出现**：Opus 的包模式逐包声明，`zig_audio.open` 对
+//! 一个语音流会成功（它只知道"这是 Ogg Opus"），SILK / Hybrid 包要到第 N 次
+//! `Decoder.read` 才被拒绝（见 `vendor/zig-audio/src/opus.zig` 的 `Decoder` 注释）。
+//! 读取循环里的 `try decoder.read` 让这条中途错误与开流错误汇成同一个 `Error`，
+//! 于是**同一张** `reason` 表覆盖两条路径——不需要"读到一半"的特殊分支，也不会
+//! 因为 `open` 成功就把一个不能解的编码认领成 `failed`。
 
 const std = @import("std");
 const zig_audio = @import("zig_audio");
@@ -147,6 +154,10 @@ pub fn decode(
 
     var chunk: [chunk_samples]i16 = undefined;
     while (true) {
+        // 这一行是"读到一半才不支持"的唯一出口：Opus 的 SILK / Hybrid / 多帧包在
+        // `open` 成功之后由 `read` 返回 `error.Unsupported`，与开流阶段的同名片
+        // 错误值汇合，交给 `reason` 映射成 `unsupported`（谢绝）。`errdefer` 保证
+        // 此时已经解出来的半截 PCM 被释放，不会有半个 `Decoded` 逃出去。
         const got = try decoder.read(&chunk);
         if (got == 0) break;
         // 小端 i16 的字节就是内存里的那两字节（Windows x86_64 是 LE）。
@@ -237,6 +248,10 @@ pub fn reservePcm(
 /// 解码错误 → 四态原因。只有 OOM 不是原因（它是 `preview.Error`，调用方先挡）。
 /// 这个函数是音频链上**唯一**的映射表，wasapi-pcm 与 native-audio 都从这里取，
 /// 两份 provider 不会一个把 `Unsupported` 当 failed、另一个当 unsupported。
+///
+/// `Unsupported` 同时覆盖两种时机：`open` 就答不了（容器/编码不认），以及**读到一半**
+/// 才答不了（Opus 的 SILK / Hybrid / 多帧包）。两者都是"这个编码我没有"，不是"文件
+/// 坏了"，所以都落 `unsupported`——谢绝，注册表继续问下一个。
 pub fn reason(err: Error) preview.Reason {
     return switch (err) {
         error.FileNotFound => .file_missing,

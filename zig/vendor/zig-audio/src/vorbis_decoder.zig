@@ -124,7 +124,17 @@ pub const Decoder = struct {
         reader: *std.Io.Reader,
         prefix: []const u8,
     ) Error!Decoder {
-        var demux = try ogg.Demuxer.init(allocator, reader, prefix);
+        const demux = try ogg.Demuxer.init(allocator, reader, prefix);
+        return openFromDemux(allocator, demux);
+    }
+
+    /// Same as `open`, but from a demultiplexer the caller already created. The
+    /// dispatcher needs this: it has to look at the first packet to tell Vorbis
+    /// from Opus, and the demultiplexer has already consumed that page, so
+    /// handing the demultiplexer over is the only way not to read it twice.
+    /// On failure the demultiplexer is freed here.
+    pub fn openFromDemux(allocator: std.mem.Allocator, demux_in: ogg.Demuxer) Error!Decoder {
+        var demux = demux_in;
         var demux_owned = false;
         errdefer if (!demux_owned) demux.deinit();
         if (demux.streamCodec() != .vorbis) return error.Unsupported;

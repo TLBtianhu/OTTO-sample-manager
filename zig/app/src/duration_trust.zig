@@ -23,8 +23,10 @@
 //!     显示层保持原样，这条路径与没有本功能时逐字节一致）；
 //!   * `duration <= 0` 且扩展名是 `.wav/.flac/.mp3/.aiff/.aif/.ogg/.oga/.opus`：缓存
 //!     未命中才 probe 一次（只读 64 KiB 头；Ogg / Opus 再多读 64 KiB 尾，见
-//!     `ports/probe.zig`）。`.opus` 能算时长但**不能解码**（Opus 只到元数据），
-//!     补出来的时长只给列表行与事实区，预览仍然谢绝；
+//!     `ports/probe.zig`）。`.opus` 的时长与能不能播是**两条路**：这一条只读容器
+//!     （OpusHead + 尾页 granule），不看包模式；包是 SILK 还是 CELT 由
+//!     `native-audio` 的解码器回答。所以一个语音 `.opus` 在列表里照样有 `2.0s`，
+//!     而预览会诚实地谢绝——"知道多长"和"能播"从来不是同一件事；
 //!   * 视频后缀（`.mp4/.mov/.mkv/.webm`）另走一条：**库里已有时长也要读一次头**，
 //!     因为分辨率不在 `Sample` 里；`display` 用它决定列表行要不要写 `640×360`；
 //!   * 其它扩展名（`.xyz` / `.png` / 无后缀）：不打开文件，仍然"未知"——显示层不猜
@@ -219,9 +221,10 @@ fn extension(sample: core.model.Sample) []const u8 {
 
 /// 显示层愿意打开的容器后缀（音频 + 视频）。大小写不敏感，前导点必须有。
 ///
-/// `.opus` 在这一版里只换**时长**：`probe` 认 OpusHead、减 pre_skip、按 48 kHz 算，
-/// 而预览注册表里没有任何 provider 声明它（`native-audio` 只到 Vorbis），所以
-/// 列表行有数字、预览区仍然是"不能播"。两条路互不借用，别在这里顺手加 provider。
+/// `.opus` 在这里是**只读时长**：`probe` 认 OpusHead、减 pre_skip、按 48 kHz 算，
+/// 与预览能不能解是两条独立的路径（预览由 `native-audio` 按**包模式**回答：CELT 能播，
+/// SILK/Hybrid 谢绝）。列表行的数字不依赖解码器，旧库条目才有得补；别把两条路合并成
+/// "能 probe 就等于能播"。
 fn parsable(ext: []const u8) bool {
     const supported = [_][]const u8{
         ".wav", ".flac", ".mp3", ".aiff", ".aif", ".ogg", ".oga", ".opus",

@@ -4,12 +4,14 @@
 //!   * 与 `ffmpeg -f s16le` 逐样本对比（`max_diff ≤ 1`、样本数一致）；
 //!   * `Info.total_frames` 的 Vorbis 语义：开流时 null、读到 EOF 才由库填上
 //!     （`audio/decode.zig` 的"没有声明长度就估算"分支就是靠这个成立的）；
-//!   * `.ogg` 里装 Opus：库返回 `Unsupported` → provider 谢绝 `none.unsupported`
-//!     （不是 `failed`），注册表继续问下一个，最终仍是 `none/unsupported`。
+//!   * `.ogg` 的声明是**容器**：同一个容器里装 CELT Opus 现在能解（v0.13 起），
+//!     装 SILK Opus 仍然 `error.Unsupported` → provider 谢绝 `none.unsupported`
+//!     （不是 `failed`），注册表继续问下一个。
 //!
 //! 从 provider 文件里拆出来是为了守住单文件行数（provider 正文只留解码路径）；
-//! FLAC/AIFF 侧在 `native_audio_test.zig`，MP3 侧在 `native_audio_mp3_test.zig`。
-//! 缺素材（或 ffmpeg 不在）时 `SkipZigTest`，不把外部文件变成测试的硬依赖。
+//! FLAC/AIFF 侧在 `native_audio_test.zig`，MP3 侧在 `native_audio_mp3_test.zig`，
+//! Opus 的完整验收在 `native_audio_opus_test.zig`。缺素材（或 ffmpeg 不在）时
+//! `SkipZigTest`，不把外部文件变成测试的硬依赖。
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -26,7 +28,11 @@ const vector_dir = "C:\\src\\zig-audio-vectors\\ogg";
 const ffmpeg = "C:\\Users\\30680\\.zcode\\workspace\\default\\music-to-midi\\tools\\ffmpeg\\bin\\ffmpeg.exe";
 
 const vorbis_path = sample_dir ++ "\\vorbis-44k.ogg";
-const opus_path = vector_dir ++ "\\opus-48k-96.opus";
+/// 纯 CELT（config 31）：v0.13 起能解，容器声明照旧由首包回答。
+const opus_celt_path = vector_dir ++ "\\opus-48k-96.opus";
+/// 24k voip（SILK + hybrid）：`open` 成功，`read` 才拒绝。这份文件把"容器认下、
+/// 编码谢绝"这条语义固定在一个 `.ogg` 文件名上——判断只来自内容，不来自扩展名。
+const opus_voice_path = vector_dir ++ "\\opus-48k-24-voip.opus";
 
 fn hasFile(path: []const u8) bool {
     if (builtin.os.tag != .windows) return false;
@@ -135,24 +141,52 @@ test "Vorbis 的 total_frames：开流时 null，读到 EOF 才填上（缓冲�
     try testing.expectEqual(@as(?u64, 132_300), decoder.info.total_frames);
 }
 
-test ".ogg 里装 Opus：库给 Unsupported，provider 谢绝 none.unsupported（不是 failed）" {
-    if (!hasFile(opus_path)) return error.SkipZigTest;
+test ".ogg 里装 CELT Opus：容器声明按内容生效，解出 144000 帧（3 s）" {
+    if (!hasFile(opus_celt_path)) return error.SkipZigTest;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         testing.io,
-        opus_path,
+        opus_celt_path,
         testing.allocator,
         .limited(8 * 1024 * 1024),
     );
     defer testing.allocator.free(bytes);
     // 同一个 Opus 流换个扩展名：证明判断只来自内容，不来自文件名。
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "opus-in-ogg.ogg", .data = bytes });
-    const path = try tempPath(&tmp, "opus-in-ogg.ogg");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "celtic-opus.ogg", .data = bytes });
+    const path = try tempPath(&tmp, "celtic-opus.ogg");
     defer testing.allocator.free(path);
 
-    // 库这一层：明确说"这不是我能解的编码"。
+    // v0.13 起 Opus 的 CELT 层能解，所以 `.ogg` 装的 CELT Opus 不再是"谢绝"而是"能播"：
+    // `supports` 声明的是容器，编码由库按首包（这里是 OpusHead）回答。
+    var decoded = try native_audio.decode(testing.allocator, path);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 48_000), decoded.sample_rate);
+    try testing.expectEqual(@as(u16, 2), decoded.channels);
+    try testing.expectEqual(@as(u64, 144_000), decoded.frames);
+    try testing.expectEqual(@as(u64, 3000), decoded.duration_ms);
+    try testing.expectEqual(@as(usize, 144_000 * 2 * 2), decoded.pcm.len);
+}
+
+test ".ogg 里装 SILK Opus：库给 Unsupported，provider 谢绝 none.unsupported（不是 failed）" {
+    if (!hasFile(opus_voice_path)) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        testing.io,
+        opus_voice_path,
+        testing.allocator,
+        .limited(8 * 1024 * 1024),
+    );
+    defer testing.allocator.free(bytes);
+    // 同一个语音 Opus 流换个扩展名：证明判断只来自内容，不来自文件名。
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "voice-opus.ogg", .data = bytes });
+    const path = try tempPath(&tmp, "voice-opus.ogg");
+    defer testing.allocator.free(path);
+
+    // 库这一层：明确说"这不是我能解的编码"（SILK 包，open 成功、read 才拒绝）。
     try testing.expectError(error.Unsupported, native_audio.decode(testing.allocator, path));
 
     // provider 这一层：谢绝（unsupported），不是 failed——文件没坏。
@@ -165,20 +199,20 @@ test ".ogg 里装 Opus：库给 Unsupported，provider 谢绝 none.unsupported�
     }
 }
 
-test "注册表：.ogg 里装 Opus → native-audio 谢绝后继续问，最终 none/unsupported" {
-    if (!hasFile(opus_path)) return error.SkipZigTest;
+test "注册表：.ogg 里装 SILK Opus → native-audio 谢绝后继续问，最终 none/unsupported" {
+    if (!hasFile(opus_voice_path)) return error.SkipZigTest;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
         testing.io,
-        opus_path,
+        opus_voice_path,
         testing.allocator,
         .limited(8 * 1024 * 1024),
     );
     defer testing.allocator.free(bytes);
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "opus-in-ogg.ogg", .data = bytes });
-    const path = try tempPath(&tmp, "opus-in-ogg.ogg");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "voice-opus.ogg", .data = bytes });
+    const path = try tempPath(&tmp, "voice-opus.ogg");
     defer testing.allocator.free(path);
 
     var sample = sampleFor(path, ".ogg");

@@ -188,7 +188,7 @@ The providers, in registry order (order is preference; `unsupported` /
 | provider | formats | payload | decode path |
 | --- | --- | --- | --- |
 | `wasapi-pcm` | `.wav` (PCM/float/µ-law/A-law/IMA/MS ADPCM) | audio | vendored zig-audio + WASAPI; own coarse icon sampling |
-| `native-audio` | `.wav` `.flac` `.mp3` `.aiff` `.aif` `.ogg` `.oga` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
+| `native-audio` | `.wav` `.flac` `.mp3` `.aiff` `.aif` `.ogg` `.oga` `.opus` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
 | `mf-audio` | `.m4a` `.aac` `.wma` | audio | Media Foundation |
 | `image-wic` | `.png` `.jpg` `.bmp` `.gif` `.tif` | image | own WIC decode |
 | `mf-video` | `.mp4` `.m4v` `.mov` `.wmv` | image (first frame) | Media Foundation |
@@ -200,27 +200,35 @@ content: when a `.wav` actually holds FLAC, `wasapi-pcm` declines with
 compressed AIFC is `error.Unsupported` in the library.
 
 `.ogg` / `.oga` are claimed as a **container**, not as a codec: the first packet
-decides. Ogg Vorbis decodes (zig-audio v0.10); Ogg carrying Opus is
-`error.Unsupported` in the library, so `native-audio` *declines* with
-`none.unsupported` — the registry keeps asking, and the answer is never
-`failed` (the file is intact, it just is not an encoding we own). `.opus` is
-not claimed at all for the same reason.
+decides. Ogg Vorbis decodes (zig-audio v0.13), and so does Ogg **Opus** up to the
+CELT layer (configuration 16–31: music). Opus is two codecs in one stream —
+SILK for speech, CELT for the rest, switched per packet — so a stream may carry
+a few decodable packets and then a SILK one; `zig_audio.open` succeeds and the
+**`read`** returns `error.Unsupported` on the packet it cannot decode. That
+failure maps to `none.unsupported` (the same `reason` table as any other
+`Unsupported`), so `native-audio` *declines*: the registry keeps asking, and the
+answer is never `failed` — the file is intact, it just is not an encoding we
+own. `.opus` is claimed for exactly that reason: the extension says "try me", the
+packet mode decides. Everything decoded up to that point is released by
+`errdefer`; no half PCM and no half-started session survives.
 
-`.opus` still gets a **duration** in the list, though: metadata and decoding are
-two separate paths on purpose. `ports/probe.zig` recognises `OpusHead`, subtracts
-`pre_skip` from the last page's granule and divides by 48 kHz (Opus output is
-always 48 kHz, whatever `input_sample_rate` says), so a 2.000 s file reads `2.0s`
-in the row — while `--preview` keeps answering `none` because no provider claims
-the extension. `duration_trust.parsable` lists `.opus` so old libraries
-(`duration = 0`) get the same number without touching the library file.
+`.opus` also gets its **duration** in the list, and that is a separate path on
+purpose: `ports/probe.zig` recognises `OpusHead`, subtracts `pre_skip` from the
+last page's granule and divides by 48 kHz (Opus output is always 48 kHz,
+whatever `input_sample_rate` says), so a 2.000 s file reads `2.0s` in the row
+whether or not its packets are decodable. `duration_trust.parsable` lists
+`.opus` so old libraries (`duration = 0`) get the same number without touching
+the library file. Metadata and decoding stay independent: knowing how long a
+file is never implies we can play it.
 
 ### Multichannel downmix: one matrix for every container
 
 Anything with more than 2 channels is mixed down to stereo by
 `src/audio/downmix.zig` — the only implementation. Every decoder (WAV / FLAC /
-MP3 / AIFF / Ogg Vorbis) now hands `audio/decode.zig` interleaved i16, which calls
-`pcm16Into` block by block; the source-format-preserving `allocate` entry point
-is kept only for the equivalence tests. There is no second set of coefficients.
+MP3 / AIFF / Ogg Vorbis / Ogg Opus) now hands `audio/decode.zig` interleaved i16,
+which calls `pcm16Into` block by block; the source-format-preserving `allocate`
+entry point is kept only for the equivalence tests. There is no second set of
+coefficients.
 Channels follow the standard WAVE/FLAC order `FL, FR, FC, LFE, BL, BR, ...`:
 
 ```
@@ -291,17 +299,17 @@ zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
 ### Provider matrix (the gate for "every format is self-sufficient")
 
 ```powershell
-# ten samples × two rounds; exits 1 if a provider name or an exit code changes
+# eleven samples × two rounds; exits 1 if a provider name or an exit code changes
 powershell -NoProfile -ExecutionPolicy Bypass -File zig\provider-matrix.ps1
 ```
 
 `zig/provider-matrix.ps1` runs `--preview` on `img00.png`, `img00.bmp`,
 `viper.mp3`, `rabbit320.mp4`, `tone_440.wav`, `tone_660.flac`, `vorbis-44k.ogg`,
-`legacy-adpcm.wav`, `legacy.aiff` and `mystery.xyz` twice — default and
-`--no-shell-preview` — and asserts which provider each round must name
-(`image-wic`, `image-wic`, `native-audio`, `mf-video`, `wasapi-pcm`,
-`native-audio`, `native-audio`, `wasapi-pcm`, `native-audio`, `none` +
-`unsupported`), that the
+`opus-music.opus`, `legacy-adpcm.wav`, `legacy.aiff` and `mystery.xyz` twice —
+default and `--no-shell-preview` — and asserts which provider each round must
+name (`image-wic`, `image-wic`, `native-audio`, `mf-video`, `wasapi-pcm`,
+`native-audio`, `native-audio`, `native-audio`, `wasapi-pcm`, `native-audio`,
+`none` + `unsupported`), that the
 process exits 0, and that the no-shell round really printed
 `shell-preview=disabled` (otherwise the flag could be ignored and the column
 would prove nothing). `open_ms` is printed for every round with **no threshold**
