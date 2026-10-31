@@ -26,7 +26,14 @@ const providers = @import("providers/root.zig");
 const sample_facts = @import("sample_facts.zig");
 
 /// 打开路径、打印事实与预览摘要。`path` 原样交给口岸（相对路径按当前目录解析）。
-pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8) !u8 {
+/// `no_shell_preview` 选 `--no-shell-preview` 那张表（去掉 Shell 缩略图），
+/// 用途是证明音频/视频 provider 自给自足，不靠系统缩略图兜底。
+pub fn run(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    no_shell_preview: bool,
+) !u8 {
     const io = init.io;
 
     var sample = core.model.Sample{
@@ -52,7 +59,8 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u
         std.debug.print("preview: | {s}\n", .{line});
     }
 
-    const answered = providers.registry.openAnswered(allocator, .{
+    const registry = providers.registryFor(no_shell_preview);
+    const answered = registry.openAnswered(allocator, .{
         .sample = &sample,
         .max_px = preview.default_max_px,
     }) catch |err| {

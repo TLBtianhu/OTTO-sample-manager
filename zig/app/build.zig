@@ -86,6 +86,11 @@ pub fn build(b: *std.Build) void {
     // 音频 provider 的 WASAPI 是手写 extern（ole32：CoInitializeEx/CoCreateInstance），
     // 不经过 ports，也不引入 C shim；kernel32 由 Windows 目标默认链接。
     app_module.linkSystemLibrary("ole32", .{});
+    // Media Foundation（M2）：mfplat 是 MFStartup/MFCreateMediaType，mfreadwrite 是
+    // SourceReader。都是手写 extern + extern struct vtable，不需要 mfuuid.lib
+    // （GUID 常量在 providers/mf_com.zig 里，不引用系统符号）。
+    app_module.linkSystemLibrary("mfplat", .{});
+    app_module.linkSystemLibrary("mfreadwrite", .{});
     // 启动下载好的 NSIS 安装包：ShellExecuteW（只在这一处，且绝不弹我们的窗口）。
     app_module.linkSystemLibrary("shell32", .{});
     const exe = b.addExecutable(.{
@@ -138,6 +143,9 @@ pub fn build(b: *std.Build) void {
     // installer.zig 的 ShellExecuteW 也走同一个测试根（测试只碰 isSuccess，不执行）。
     test_module.linkSystemLibrary("ole32", .{});
     test_module.linkSystemLibrary("shell32", .{});
+    // `providers/mf.zig` 的手写 extern 落点；有 MF 不可用的测试会走 Unavailable 分支。
+    test_module.linkSystemLibrary("mfplat", .{});
+    test_module.linkSystemLibrary("mfreadwrite", .{});
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     const test_step = b.step("test", "运行 live 适配层与 thumbs 取图层的单元测试");
     test_step.dependOn(&run_tests.step);

@@ -45,3 +45,13 @@ test "--seek-at：两种写法都收、0 合法、缺值/非数字报错，不�
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--seek-at" }));
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--seek-at=x" }));
 }
+
+test "--no-shell-preview：开关，不吞下一个参数，不占位置参数" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(!plain.no_shell_preview);
+
+    const on = try parse(&[_][]const u8{ "otto-lite", "--no-shell-preview", "--preview", "a.mp3" });
+    try testing.expect(on.no_shell_preview);
+    try testing.expectEqualStrings("a.mp3", on.preview_path.?);
+    try testing.expect(on.library_path == null);
+}

@@ -24,16 +24,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("otto_core");
 const audio_file = @import("../audio/file.zig");
-const peaks_mod = @import("../audio/peaks.zig");
 const player = @import("../audio/player.zig");
+const session_mod = @import("../audio/session.zig");
 const wav = @import("../audio/wav.zig");
-const waveform = @import("../audio/waveform.zig");
 const preview = @import("../preview.zig");
-
-/// 波形位图尺寸（像素），默认值在 `audio/waveform.zig`：240 是预览条整条区域的
-/// 可用宽度，56 画得下包络又给播放键与两行事实留出纵向空间。
-const wave_width: u32 = waveform.default_width;
-const wave_height: u32 = waveform.default_height;
 
 /// 注册表里的这一项。`kind = .audio`：产出可播放的会话。
 pub const provider: preview.Provider = .{
@@ -59,50 +53,16 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) (audio_file.Error ||
 /// （`decoded.pcm` 置空），播放线程在 `Player` 里；失败时 `decoded` 仍归调用方，
 /// 可以安全 deinit。
 ///
-/// 波形在**这里**算一次并存进会话：`--preview` / `--play-test` / UI 三条路径拿到
-/// 的是同一张位图，播放时每帧重画只读它，不重新解码、不重新算峰值。
+/// 装配逻辑（峰值 / 波形 / Player / 会话字段）在 `audio/session.zig`：MF provider
+/// 解码 MP3 之后走同一个 `build`，所以两条解码链的输出逐字段可比。本函数只剩
+/// WAV → 中立 `Decoded` 的适配 + 所有权转交。
 pub fn sessionFromWav(
     allocator: std.mem.Allocator,
     decoded: *wav.Wav,
 ) player.Error!preview.AudioSession {
-    const peaks = try peaks_mod.compute(
-        allocator,
-        decoded.pcm,
-        decoded.channels,
-        decoded.bits,
-        decoded.format,
-        peaks_mod.default_buckets,
-    );
-    errdefer peaks.deinit(allocator);
-    const bitmap = try waveform.render(
-        allocator,
-        peaks,
-        wave_width,
-        wave_height,
-        waveform.default_color,
-    );
-    errdefer bitmap.deinit(allocator);
-
-    const created = try player.Player.create(
-        allocator,
-        decoded.pcm,
-        decoded.sample_rate,
-        decoded.channels,
-        decoded.bits,
-        decoded.format == .float,
-    );
-    const session: preview.AudioSession = .{
-        .pcm = decoded.pcm,
-        .sample_rate = decoded.sample_rate,
-        .channels = decoded.channels,
-        .bits = decoded.bits,
-        .duration_ms = decoded.duration_ms,
-        .position_ms = 0,
-        .player = created,
-        .peaks = peaks,
-        .waveform = bitmap,
-    };
-    // 所有权已经交给会话；调用方的 `decoded.deinit` 之后只会释放空切片。
+    var neutral = session_mod.Decoded.fromWav(decoded);
+    const session = try session_mod.build(allocator, &neutral);
+    // `build` 成功即所有权已转移；原 Wav 的 deinit 不能重复释放这块 PCM。
     decoded.pcm = &.{};
     return session;
 }
