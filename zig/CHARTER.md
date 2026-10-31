@@ -82,7 +82,8 @@ handler 没装就没有预览，装坏了就是我们的进程崩。
 | --- | --- | --- |
 | wav | `wasapi-pcm`（自己解码 + WASAPI） | 无 |
 | flac | `native-audio`（vendor 的 zig-audio，纯 Zig 解码） | 无 |
-| mp3/aac/m4a/wma | `mf-audio`（Media Foundation 解码） | 系统 codec |
+| mp3 | `native-audio`（vendor 的 zig-audio，纯 Zig 解码）；`mf-audio` 兜底 | 无 |
+| aac/m4a/wma | `mf-audio`（Media Foundation 解码） | 系统 codec |
 | png/jpg/bmp/gif/tif | `image-wic`（WIC 解码） | 系统 codec |
 | mp4/mov/wmv | `mf-video`（MF 抽首帧） | 系统 codec |
 | psd/ai/blend 等 | `shell-thumbnail`（`IShellItemImageFactory`） | **第三方 handler** |

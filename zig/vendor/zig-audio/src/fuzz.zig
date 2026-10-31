@@ -38,7 +38,16 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
     const flac_base = try buildFlacTemplate(allocator);
     defer allocator.free(flac_base);
 
-    const buf = try allocator.alloc(u8, @max(wav_base.len, flac_base.len));
+    const mp3_base = try buildMp3Template(allocator);
+    defer allocator.free(mp3_base);
+
+    const mp3_stereo_base = try buildMp3StereoTemplate(allocator);
+    defer allocator.free(mp3_stereo_base);
+
+    const buf = try allocator.alloc(
+        u8,
+        @max(@max(wav_base.len, flac_base.len), @max(mp3_base.len, mp3_stereo_base.len)),
+    );
     defer allocator.free(buf);
 
     var prng = std.Random.DefaultPrng.init(seed);
@@ -47,8 +56,15 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
 
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
-        // Half the rounds attack the WAV path, half the FLAC path.
-        const base = if (round % 2 == 0) wav_base else flac_base;
+        // Split the rounds across WAV, FLAC and MP3; the MP3 rounds alternate
+        // between a mono and a joint-stereo frame so the stereo side-info,
+        // intensity and mid/side paths are fuzzed too.
+        const base = switch (round % 4) {
+            0 => wav_base,
+            1 => flac_base,
+            2 => mp3_base,
+            else => mp3_stereo_base,
+        };
         const len = mutate(random, base, buf);
 
         if (root.probe(buf[0..@min(len, 12)]) != null) stats.probed += 1;
@@ -151,6 +167,43 @@ fn buildFlacTemplate(allocator: std.mem.Allocator) ![]u8 {
         .total_samples = 128,
         .frames = &frames,
     });
+}
+
+/// Two minimal mono MPEG-1 Layer III frames. Header only plus a zero side
+/// info: the decoder reaches the Huffman/reservoir/synthesis paths without
+/// needing a real encoder.
+fn buildMp3Template(allocator: std.mem.Allocator) ![]u8 {
+    const frame_len = 417;
+    const bytes = try allocator.alloc(u8, frame_len * 2);
+    @memset(bytes, 0);
+    for (0..2) |i| {
+        const at = i * frame_len;
+        bytes[at + 0] = 0xFF;
+        bytes[at + 1] = 0xFB;
+        bytes[at + 2] = 0x90;
+        bytes[at + 3] = 0xC0;
+    }
+    return bytes;
+}
+
+/// The same two frames as joint stereo with both `mode_extension` bits set, so
+/// a mutation lands in the 32-byte stereo side info, the intensity scan and the
+/// mid/side butterfly. `mode_extension` is copied into the payload words as
+/// well: a random flip there then produces intensity positions rather than
+/// always-zero scalefactors.
+fn buildMp3StereoTemplate(allocator: std.mem.Allocator) ![]u8 {
+    const frame_len = 417;
+    const bytes = try allocator.alloc(u8, frame_len * 2);
+    @memset(bytes, 0);
+    for (0..2) |i| {
+        const at = i * frame_len;
+        bytes[at + 0] = 0xFF;
+        bytes[at + 1] = 0xFB;
+        bytes[at + 2] = 0x90;
+        bytes[at + 3] = 0x40 | 0x30; // joint stereo, intensity + mid/side
+        for (0..3) |k| bytes[at + 5 + k] = 0x11;
+    }
+    return bytes;
 }
 
 /// Copy the valid template, then apply one mutation strategy. Returns the

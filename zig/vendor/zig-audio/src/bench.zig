@@ -2,6 +2,11 @@
 //! 20 s worth of committed ffmpeg FLAC fixtures — one fixed-predictor file and
 //! one LPC order-32 mid/side file — decoded through the public streaming API.
 //!
+//! Two MP3 rows share the same shape: a 3 s mono 128 kbps fixture and a 1 s
+//! stereo 128 kbps fixture, each decoded repeatedly until 20 s of audio has
+//! gone through. The stereo row is the one that matters for the joint-stereo
+//! work: it pays for two full synthesis chains.
+//!
 //! The benchmark always compiles as ReleaseFast (see build.zig). Each section
 //! fails if throughput drops below its target, so a regression is visible
 //! instead of being a number nobody reads.
@@ -25,12 +30,26 @@ const flac_lpc_fixture = @embedFile("fixtures/flac-s16-stereo-44100-lpc.flac");
 const flac_seconds: f64 = 20.0;
 const flac_target_speedup: f64 = 100.0;
 
+/// 3 s of a 440 Hz sine, mono MPEG-1 Layer III at 128 kbps.
+const mp3_fixture = @embedFile("fixtures/mp3-mono-44k-128.mp3");
+const mp3_seconds: f64 = 20.0;
+const mp3_target_speedup: f64 = 100.0;
+
+/// 1 s of a 440 Hz + 660 Hz two-tone, stereo MPEG-1 Layer III at 128 kbps:
+/// two independent synthesis chains, the shape real files have.
+const mp3_stereo_fixture = @embedFile("fixtures/mp3-stereo-44k-128.mp3");
+const mp3_stereo_seconds: f64 = 20.0;
+const mp3_stereo_target_speedup: f64 = 100.0;
+const mp3_stereo_total_frames: u64 = 44_100;
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     try benchWav(allocator, io);
     try benchFlac(allocator, io, "FLAC fixed", flac_fixture);
     try benchFlac(allocator, io, "FLAC LPC", flac_lpc_fixture);
+    try benchMp3(allocator, io);
+    try benchMp3Stereo(allocator, io);
 }
 
 fn benchWav(allocator: std.mem.Allocator, io: std.Io) !void {
@@ -74,6 +93,70 @@ fn benchWav(allocator: std.mem.Allocator, io: std.Io) !void {
         channels,
         wav_target_speedup,
         null,
+    );
+}
+
+fn benchMp3(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 44_100 < mp3_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(mp3_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.total_frames != 132_300) return error.UnexpectedFrameCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            decoded_frames += n;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report("MP3 128k mono", elapsed_ns, @floatFromInt(decoded_frames), 44_100, 1, mp3_target_speedup, files);
+}
+
+fn benchMp3Stereo(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 44_100 < mp3_stereo_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(mp3_stereo_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.total_frames != mp3_stereo_total_frames) return error.UnexpectedFrameCount;
+        if (dec.info.channels != 2) return error.UnexpectedChannelCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            if (n % 2 != 0) return error.UnexpectedSampleCount;
+            decoded_frames += n / 2;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report(
+        "MP3 128k stereo",
+        elapsed_ns,
+        @floatFromInt(decoded_frames),
+        44_100,
+        2,
+        mp3_stereo_target_speedup,
+        files,
     );
 }
 

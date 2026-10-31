@@ -173,8 +173,8 @@ next one):
 | provider | formats | payload | decode path |
 | --- | --- | --- | --- |
 | `wasapi-pcm` | `.wav` | audio | own RIFF/WAVE parser + WASAPI |
-| `native-audio` | `.flac` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
-| `mf-audio` | `.mp3` `.m4a` `.aac` `.wma` | audio | Media Foundation |
+| `native-audio` | `.flac` `.mp3` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
+| `mf-audio` | `.m4a` `.aac` `.wma` | audio | Media Foundation |
 | `image-wic` | `.png` `.jpg` `.bmp` `.gif` `.tif` | image | own WIC decode |
 | `mf-video` | `.mp4` `.m4v` `.mov` `.wmv` | image (first frame) | Media Foundation |
 | `shell-thumbnail` | anything with a registered handler | image | Shell `IThumbnailProvider` (isolated helper) |
@@ -258,11 +258,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File zig\provider-matrix.ps1
 `zig/provider-matrix.ps1` runs `--preview` on `img00.png`, `img00.bmp`,
 `viper.mp3`, `rabbit320.mp4`, `tone_440.wav`, `tone_660.flac` and `mystery.xyz` twice — default and
 `--no-shell-preview` — and asserts which provider each round must name
-(`image-wic`, `image-wic`, `mf-audio`, `mf-video`, `wasapi-pcm`, `native-audio`, `none` +
+(`image-wic`, `image-wic`, `native-audio`, `mf-video`, `wasapi-pcm`, `native-audio`, `none` +
 `unsupported`), that the process exits 0, and that the no-shell round really
 printed `shell-preview=disabled` (otherwise the flag could be ignored and the
 column would prove nothing). `open_ms` is printed for every round with **no
-threshold** — a cold Media Foundation jumps by hundreds of ms legitimately — so a
+threshold** — a cold decoder or a busy audio endpoint jumps by hundreds of ms
+legitimately — so a
 performance regression is visible as a number instead of becoming a flaky test.
 It is a `health.ps1` row in both full and `-Quick` mode, and
 `verify-distribution.ps1` runs the same `img00.png` preview in the portable form,

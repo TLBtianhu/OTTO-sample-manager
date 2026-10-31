@@ -3,7 +3,7 @@
 //! These live in a separate file so `wav.zig` and the FLAC implementation can
 //! use them without importing the public root (which imports them back).
 
-pub const Format = enum { wav, flac };
+pub const Format = enum { wav, flac, mp3 };
 
 pub const Info = struct {
     format: Format,

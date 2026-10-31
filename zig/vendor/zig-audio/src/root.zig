@@ -1,9 +1,10 @@
 //! zig-audio: streaming audio decoding in pure Zig.
 //!
-//! A FLAC decoder covering CONSTANT, VERBATIM, FIXED(0..4) and LPC(1..32)
-//! subframes with Rice partitions, independent channels and the left/side,
-//! right/side and mid/side channel assignments. See README for the support
-//! matrix.
+//! WAV, FLAC (CONSTANT, VERBATIM, FIXED(0..4), LPC(1..32)) and mono/stereo
+//! MPEG-1 Layer III decoders. The FLAC side covers Rice partitions, independent
+//! channels and the left/side, right/side and mid/side assignments; the MP3
+//! side covers long and window-switched (start/short/stop) granules, mid/side
+//! and intensity stereo. See README for the support matrix.
 //!
 //! The API deliberately has one output path: interleaved i16. Source PCM
 //! (8/16/24/32) and float32 are converted inside the decoder, so a player
@@ -13,6 +14,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const wav = @import("wav.zig");
 const flac = @import("flac.zig");
+const mp3 = @import("mp3.zig");
 
 pub const Format = types.Format;
 pub const Info = types.Info;
@@ -51,6 +53,10 @@ pub fn probe(header: []const u8) ?Format {
     {
         return .wav;
     }
+    // MP3: an ID3v2 tag or an MPEG audio sync word. Any layer/version is
+    // recognized here so `open` can report Unsupported instead of NotAudio.
+    if (header.len >= 3 and std.mem.eql(u8, header[0..3], "ID3")) return .mp3;
+    if (header.len >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0) return .mp3;
     return null;
 }
 
@@ -82,6 +88,17 @@ pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder 
             .info = dec.info,
             .allocator = allocator,
             .impl = .{ .wav = dec },
+        };
+    }
+
+    if (std.mem.eql(u8, header[0..3], "ID3") or
+        (header[0] == 0xFF and (header[1] & 0xE0) == 0xE0))
+    {
+        const dec = try mp3.open(allocator, reader, &header);
+        return .{
+            .info = dec.info,
+            .allocator = allocator,
+            .impl = .{ .mp3 = dec },
         };
     }
 
@@ -152,6 +169,7 @@ pub const Decoder = struct {
     impl: union(enum) {
         wav: wav.Decoder,
         flac: flac.Decoder,
+        mp3: mp3.Decoder,
     },
     /// Non-null only for `openBytes` / `openFile*`: reader state owned by this
     /// decoder. Plain `open` borrows the caller's reader and leaves it null.
@@ -177,6 +195,7 @@ pub const Decoder = struct {
         switch (self.impl) {
             .wav => |*dec| return dec.read(out),
             .flac => |*dec| return dec.read(out),
+            .mp3 => |*dec| return dec.read(out),
         }
     }
 
@@ -187,6 +206,7 @@ pub const Decoder = struct {
         switch (self.impl) {
             .wav => |*dec| dec.deinit(),
             .flac => |*dec| dec.deinit(),
+            .mp3 => |*dec| dec.deinit(),
         }
         if (self.source) |source| switch (source) {
             .bytes => |reader| self.allocator.destroy(reader),

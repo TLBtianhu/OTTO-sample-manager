@@ -19,9 +19,10 @@
 //!
 //! 解码按扩展名分流，但**装配与会话类型只有一种**：
 //!   * `.wav` → `providers/audio.zig`（自写 RIFF/WAVE 解析）；
-//!   * `.flac` → `providers/native_audio.zig`（vendor 的 zig-audio，纯 Zig 解码）；
-//!   * `.mp3` / `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media
-//!     Foundation，16-bit PCM）；
+//!   * `.flac` / `.mp3` → `providers/native_audio.zig`（vendor 的 zig-audio，
+//!     纯 Zig 解码；MP3 在 v0.7 起走这条，不再依赖 MF）；
+//!   * `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media Foundation，
+//!     16-bit PCM）；
 //! 三条路都落到 `audio/session.zig` 的 `build`，所以播放/seek/停止的断言是同一套
 //! 代码，不存在"MF 的测试松一点"。
 //!
@@ -58,11 +59,13 @@ pub fn run(
 ) !u8 {
     std.debug.print("play-test: path={s}\n", .{path});
 
-    if (mf_audio.supportsExtension(core.model.fileExtFromPath(path))) {
-        return runMf(init, allocator, path, seek_at_ms);
-    }
+    // native-audio 先问：`.flac` / `.mp3` 都归纯 Zig 解码器，能用自家的就不用 MF。
+    // 顺序与 `providers/root.zig` 的注册表一致，预览与 --play-test 不会分流到两边。
     if (native_audio.supportsExtension(core.model.fileExtFromPath(path))) {
         return runNative(init, allocator, path, seek_at_ms);
+    }
+    if (mf_audio.supportsExtension(core.model.fileExtFromPath(path))) {
+        return runMf(init, allocator, path, seek_at_ms);
     }
 
     var decoded = audio_provider.load(allocator, path) catch |err| {
@@ -134,14 +137,16 @@ fn runNative(
                 break :blk 1;
             },
             else => blk: {
-                std.debug.print("play-test: FAIL FLAC 解码失败（{s}）\n", .{@errorName(err)});
+                std.debug.print("play-test: FAIL FLAC/MP3 解码失败（{s}）\n", .{@errorName(err)});
                 break :blk 1;
             },
         };
     };
     defer decoded.deinit(allocator);
 
-    printFormat("flac", decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
+    const ext = core.model.fileExtFromPath(path);
+    const label: []const u8 = if (std.ascii.eqlIgnoreCase(ext, ".mp3")) "mp3" else "flac";
+    printFormat(label, decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
 
     var session = session_mod.build(allocator, &decoded) catch |err| return sessionFailed(err);
     defer session.deinit(allocator);

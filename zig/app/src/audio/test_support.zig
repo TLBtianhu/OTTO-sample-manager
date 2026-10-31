@@ -1,8 +1,8 @@
 //! 音频测试的小工具：峰值分配跟踪 + 给 FLAC 塞 PADDING。
 //!
-//! 只在 `builtin.is_test` 的构建里被 `providers/native_audio.zig` 引入；生产
-//! 构建不会编译到这里。抽出来的原因：`native_audio.zig` 是既有文件，行数上限
-//! 600，而流式测试的脚手架（跟踪器 / 造 padded FLAC）不该挤占 provider 正文。
+//! 只在测试构建里被 `providers/native_audio_test.zig` 引入；生产构建不会编译到
+//! 这里。抽出来的原因：流式测试的脚手架（跟踪器 / 造 padded FLAC）不该挤占
+//! provider 正文。
 
 const std = @import("std");
 

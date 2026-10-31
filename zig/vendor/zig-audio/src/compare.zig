@@ -59,8 +59,8 @@ pub fn decodePrefix(allocator: std.mem.Allocator, bytes: []const u8) !Prefix {
 }
 
 /// Run ffmpeg over `bytes` and return its raw little-endian output for
-/// `sample_format` ("s16le" or "s32le").
-fn runFfmpeg(
+/// `sample_format` ("s16le", "s32le" or "f32le").
+pub fn runFfmpeg(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     sample_format: []const u8,

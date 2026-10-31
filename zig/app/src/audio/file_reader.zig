@@ -133,7 +133,24 @@ fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
     std.debug.assert(data.len > 0);
     const self = parent(r);
 
-    // 非空 data：直接读进调用方缓冲，返回字节数（0 字节也表示 EOF 由下一次调用报）。
+    // 小请求（MP3 的源缓冲是 64 字节，一次 `ensure` 就要一次 vtable 调用）：
+    // 先一次性把 Reader.buffer 填满，再从里面拷给调用方。`std.Io.Reader` 的
+    // `readSliceShort` / `readVec` 包装层会先把缓冲里的字节交给调用方，缓冲空了
+    // 才再叫我们，所以 10 KB 的 MP3 数据只付一次 `ReadFile`，而不是 ~160 次。
+    // 缓冲仍只有 64 KiB：这条路径不换缓冲大小，只把"读多少"从请求长度改成满缓冲。
+    if (data[0].len != 0 and data[0].len < buffer_size) {
+        if (r.seek == r.end) {
+            const n = try self.readSome(r.buffer[0..]);
+            r.seek = 0;
+            r.end = n;
+        }
+        const take = @min(data[0].len, r.end - r.seek);
+        @memcpy(data[0][0..take], r.buffer[r.seek..][0..take]);
+        r.seek += take;
+        return take;
+    }
+
+    // 大请求：直接读进调用方缓冲，返回字节数（0 字节也表示 EOF 由下一次调用报）。
     if (data[0].len != 0) return self.readSome(data[0]);
 
     // 空 data[0]：先把已消费的前缀压掉，再填 Reader.buffer，返回 0。
@@ -244,6 +261,35 @@ test "512 KiB 文件：读次数 > 1、平均每次远小于文件（没有整�
         "otto-lite: file-reader 512k file={d}B reads={d} avg_read={d}B peak_buf={d}B\n",
         .{ total, stats.reads, avg, buffer_size },
     );
+}
+
+test "小请求（MP3 的 64 字节源缓冲）：由 64 KiB 垫付，读文件次数不跟请求次数走" {
+    const total = 200_000;
+    const bytes = try testing.allocator.alloc(u8, total);
+    defer testing.allocator.free(bytes);
+    for (bytes, 0..) |*byte, i| byte.* = @truncate(i * 7 + 3);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeTemp(&tmp, "small-reads.bin", bytes);
+    defer testing.allocator.free(path);
+
+    var fr: FileReader = undefined;
+    try fr.init(testing.allocator, path);
+    defer fr.deinit();
+
+    // 4096 字节、每次只要 64 字节：旧实现是 64 次 ReadFile（MP3 上就是 4 万次），
+    // 现在只该有 1 次——一次把 64 KiB 缓冲填满，其余的从缓冲里发。
+    var out: [4096]u8 = undefined;
+    var done: usize = 0;
+    while (done < out.len) {
+        const n = try fr.reader.readSliceShort(out[done..][0..64]);
+        if (n == 0) break;
+        done += n;
+    }
+    try testing.expectEqual(out.len, done);
+    try testing.expectEqualSlices(u8, bytes[0..out.len], &out);
+    try testing.expectEqual(@as(usize, 1), fr.stats().reads);
 }
 
 test "空文件：peekByte / readVec 都报 EndOfStream，不返回假的 0 字节成功" {

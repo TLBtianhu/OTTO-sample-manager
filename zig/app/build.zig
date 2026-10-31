@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
 
     const app_imports: []const std.Build.Module.Import = &.{
         .{ .name = "nanoui", .module = nanoui_dep.module("nanoui") },
-        // FLAC 解码（providers/native_audio.zig）；import 名与库的 build.zig 一致。
+        // FLAC / MP3 解码（providers/native_audio.zig）；import 名与库的 build.zig 一致。
         .{ .name = "zig_audio", .module = zig_audio_dep.module("zig_audio") },
         .{ .name = "otto_core", .module = core_dep.module("otto_core") },
         .{ .name = "otto_watch", .module = ports_dep.module("otto_watch") },
