@@ -38,6 +38,8 @@ const preview_providers = @import("providers/root.zig");
 const row_thumb = @import("row_thumb.zig");
 const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
+const settings_store = @import("settings_store.zig");
+const settings_ui = @import("settings_ui.zig");
 const thumbs_mod = @import("thumbs.zig");
 const thumbs_report = @import("thumbs_report.zig");
 const trace = @import("trace.zig");
@@ -76,6 +78,8 @@ const State = struct {
     import: import_ui.Import,
     /// 「检查更新」：入口 → 工作线程取 feed → 一行提示（`update_ui.zig`）；默认不联网。
     update: update_ui.Update,
+    /// 设置面板（置顶 / 更新源 / 缓存预算，见 `settings_ui.zig`）。
+    settings: settings_ui.Panel,
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
     transport: transport_mod.Transport,
     window: ?*nanoui.Window = null,
@@ -150,6 +154,7 @@ const State = struct {
         if (!busy) {
             if (header_action.check_clicked) s.update.begin();
             if (header_action.status_clicked) s.update.printUrl();
+            if (header_action.settings_clicked) s.settings.openPanel(c);
         }
 
         // 列表容器：在空白处按下再松开 = 清空选择。行是它的后代：点行时
@@ -187,6 +192,8 @@ const State = struct {
         s.preview.draw(c);
 
         s.reporter.report(s.thumbs, s.rows_with_image);
+        // 设置面板是最后一层：遮罩 + 卡片覆盖列表，点击优先级由树序保证。
+        s.settings.draw(c, s.thumbs, &s.update, window_util.nativeHandle(s.window));
     }
 
     /// 一行的绘制 + 交互。`row` 是过滤结果里的行号（显示用），`index` 是样本
@@ -345,29 +352,6 @@ const State = struct {
         std.debug.print(
             "otto-lite: enter row={d} sample={d} name={s} playing={}\n",
             .{ (s.search.rowOfSample(sample) orelse 0) + 1, sample, s.samples[sample].file_name, playing },
-        );
-    }
-
-    /// `--select=0,1`：截图/自检用的预置选择，不是给最终用户的入口。
-    fn seedSelection(s: *State, text: []const u8) void {
-        var buffer: [64]usize = undefined;
-        const count = selection_mod.parseIndexList(text, &buffer) catch |err| {
-            std.debug.print("otto-lite: --select 解析失败（{s}）：{s}\n", .{ @errorName(err), text });
-            return;
-        };
-        s.selection.clear();
-        for (buffer[0..count]) |index| {
-            if (index >= s.samples.len) {
-                std.debug.print("otto-lite: --select 忽略越界行 {d}（共 {d} 行）\n", .{ index, s.samples.len });
-                continue;
-            }
-            s.selection.add(index);
-            s.selection.anchor = index;
-            s.selection.cursor = index;
-        }
-        std.debug.print(
-            "otto-lite: --select 预置 {d} 行（selected={d}）\n",
-            .{ count, s.selection.count() },
         );
     }
 
@@ -534,9 +518,14 @@ pub fn main(init: std.process.Init) !void {
         live.deinit();
         init.gpa.destroy(live);
     }
+    // 设置：dev 写 exe 旁边的 `.otto-settings.json`（不碰用户目录），
+    // portable / installed 写数据目录；读不到 / 坏了都用默认值（见 settings_store）。
+    const settings_path = settings_store.resolvePath(allocator, init.io) catch null;
+    const settings = settings_store.load(init.gpa, init.io, settings_path);
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
-    // 运行形态决定：dev 没有 dataDir → null（不写盘）。
-    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation, .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null, .disk_cache_budget = options.disk_cache_budget_bytes });
+    // 运行形态决定：dev 没有 dataDir → null（不写盘）。预算来自设置；显式
+    // `--cache-budget-kib` 仍优先于设置里的 L3 值。
+    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation, .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null, .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(), .budget_bytes = settings.l2BudgetBytes() });
     defer thumbs.deinit();
     // 预览条也用 `init.gpa`：工作线程要用它分配位图/文本。注册表只有一张
     // （`providers/root.zig`），`--preview` 自检与 UI 看到的是同一份顺序。
@@ -547,6 +536,11 @@ pub fn main(init: std.process.Init) !void {
     // present 便宜一个数量级）；`--d3d` 回到旧的 D3D 路径（要 vsync 时用）。
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });
     trace.mark("setup.app");
+    // 验收探针：快照默认不开真实窗口，但置顶断言需要真 HWND；仍然 hidden。
+    if (options.settings_probe) {
+        app.gui = true;
+        app.flags.hidden = true;
+    }
     // 探针窗口必须隐藏：不弹窗、不抢焦点、不进任务栏。
     if (probe.active) app.flags.hidden = true;
     probe.mark("app", .{});
@@ -559,17 +553,19 @@ pub fn main(init: std.process.Init) !void {
         .preview = panel,
         .search = search_ui.Search.init(init.gpa),
         .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
-        .update = try update_ui.Update.init(init.gpa, init.io, options.update_url),
+        .update = try update_ui.Update.init(init.gpa, init.io, options.update_url orelse settings.update_url),
+        .settings = try settings_ui.Panel.init(init.gpa, init.io, settings, settings_path),
         .transport = transport_mod.Transport.init(init.gpa),
     };
     trace.mark("setup.state");
     defer state.import.deinit();
     defer state.update.deinit();
+    defer state.settings.deinit();
     defer state.selection.deinit(init.gpa);
     defer state.search.deinit();
     defer state.transport.deinit();
     state.selection.resize(init.gpa, state.samples.len) catch {};
-    if (options.select) |text| state.seedSelection(text);
+    if (options.select) |text| selection_mod.seedSelection(&state.selection, state.samples.len, text);
     var title_buffer: [96]u8 = undefined;
     const title = version_mod.windowTitle(&title_buffer, state.samples.len);
     // `--bench-first-frame` 是离屏探针：不建真实 HWND，也不 show。
@@ -580,10 +576,14 @@ pub fn main(init: std.process.Init) !void {
         .title = title,
         .width = 380,
         .height = 700,
+        // 设置验收的脚本要真 HWND，但仍然绝不激活。
+        .no_activate = options.settings_probe,
         .content = .{ .view = .init(&state, State.view) },
     });
     trace.mark("setup.window");
     probe.mark("window", .{ .window = state.window, .thumbs = thumbs });
+    // 置顶在启动时应用一次；保存了 true 的用户重启后窗口直接回到置顶层。
+    if (state.settings.alwaysOnTop()) state.settings.applyTopmost(window_util.nativeHandle(state.window));
     if (options.bench_first_frame) {
         try bench_mod.firstFrame(init, app, started);
         // 一次性探针：打印完就退出，不 join 缩略图/预览工作线程。它们可能正在

@@ -232,6 +232,33 @@ pub fn parseIndexList(text: []const u8, out: []usize) error{Invalid}!usize {
 // 测试：纯逻辑，不需要窗口、磁盘或 nanoui
 // ---------------------------------------------------------------------------
 
+/// `--select=0,2,5`：按行号预置选择（截图 / 自检用，不是普通用户入口）。
+/// 越界行忽略并打一行；锚点与当前行停在最后一个有效行上。
+///
+/// 从 `main.zig` 挪过来：`main` 要守住 600 行，而"行号列表 → 选择集合"本来就是
+/// 选择模型的事，放在这里也能被单元测试直接驱动。
+pub fn seedSelection(selection: *Selection, sample_count: usize, text: []const u8) void {
+    var buffer: [64]usize = undefined;
+    const count = parseIndexList(text, &buffer) catch |err| {
+        std.debug.print("otto-lite: --select 解析失败（{s}）：{s}\n", .{ @errorName(err), text });
+        return;
+    };
+    selection.clear();
+    for (buffer[0..count]) |index| {
+        if (index >= sample_count) {
+            std.debug.print("otto-lite: --select 忽略越界行 {d}（共 {d} 行）\n", .{ index, sample_count });
+            continue;
+        }
+        selection.add(index);
+        selection.anchor = index;
+        selection.cursor = index;
+    }
+    std.debug.print(
+        "otto-lite: --select 预置 {d} 行（selected={d}）\n",
+        .{ count, selection.count() },
+    );
+}
+
 const testing = std.testing;
 
 fn expectBits(sel: *const Selection, expected: []const bool) !void {

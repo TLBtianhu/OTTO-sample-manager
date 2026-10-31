@@ -103,6 +103,24 @@ pub const Update = struct {
         self.* = undefined;
     }
 
+    /// 设置面板换了更新源。正在检查时不动：工作线程正拿着旧串取 feed，
+    /// 这时释放它会变成 use-after-free；新地址下次启动生效（面板会打印原因）。
+    pub fn setUrl(self: *Update, url: ?[]const u8) void {
+        if (self.phase == .checking) {
+            std.debug.print("otto-lite: update 正在检查，新更新源下次启动生效\n", .{});
+            return;
+        }
+        const copy: ?[]u8 = if (url) |value| self.allocator.dupe(u8, value) catch return else null;
+        if (self.url) |old| self.allocator.free(old);
+        self.url = copy;
+        // 旧的「未配置 / 检查失败」与新的地址无关，回到 idle；已拿到的新版本
+        // 结果保留——那是上一轮的事实，不代表地址换了就失效。
+        if (self.phase == .unconfigured or self.phase == .failed) {
+            self.phase = .idle;
+            self.message_len = 0;
+        }
+    }
+
     /// 点击「检查更新」：只有这里会起线程（= 只有用户动作才会联网）。
     pub fn begin(self: *Update) void {
         if (self.phase == .checking) return;

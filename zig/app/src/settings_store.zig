@@ -1,0 +1,343 @@
+//! 应用设置的持久化：一个小的 JSON 文件。
+//!
+//! ## 位置（只在这两个地方之一）
+//!
+//!   * dev 形态：`<exe 目录>\.otto-settings.json`——**不写用户目录**。`zig build`
+//!     的产物在 `zig-out\bin`，所以开发时设置跟着构建目录走，删掉 `zig-out`
+//!     就回到默认值；不会在 `%APPDATA%` 里留一份和仓库不同步的副本。
+//!   * portable / installed：`<dataDir>\settings.json`（与库文件同一个数据目录；
+//!     dataDir 拿不到时退回内存态，绝不猜路径）。
+//!
+//! ## 格式
+//!
+//! ```json
+//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256}
+//! ```
+//!
+//! 缺字段用默认值，未知字段忽略，坏 JSON / 读不到 / 类型不对**一律**回到默认值：
+//! 设置文件坏了只该丢设置，不该让应用起不来（没有弹窗）。
+//!
+//! ## 写
+//!
+//! 走 `ports/library_file.writeAtomic`：同目录 `.tmp` → `File.sync` →
+//! `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`。目标目录
+//! 不存在时先建（portable 第一次启动时 data 目录可能还没被库文件创建）。
+//!
+//! 本文件只做"值 ↔ 字节 ↔ 文件"，不认识 UI；面板在 `settings_ui.zig`。
+
+const std = @import("std");
+const library_file = @import("otto_library_file");
+const mode_mod = @import("mode.zig");
+
+/// 设置文件的上限。四个字段的 JSON 不到 300 字节；64 KiB 只用来拒绝
+/// "把别的文件改名成 settings.json"这种明显不对的输入，不是产品策略。
+pub const max_file_bytes: usize = 64 * 1024;
+
+/// 更新源的最大字节数。和 `update_ui.Report.url` 的缓冲同一个量级。
+pub const max_update_url: usize = 1024;
+
+/// 预算字段的上限（MiB）。core 的缓存上限是 1 GiB；这里把设置也夹到同一档，
+/// 避免 `u32 * MiB` 在 32 位目标上绕出新花样。
+pub const max_budget_mib: u32 = 1024;
+
+pub const default_l2_mib: u32 = 64;
+pub const default_l3_mib: u32 = 256;
+
+/// dev 形态的文件名（在 exe 旁边，不是 cwd）。
+pub const dev_file_name = ".otto-settings.json";
+/// 数据目录里的文件名。
+pub const file_name = "settings.json";
+
+pub const Settings = struct {
+    /// 更新源字符串的分配器（只有 `update_url` 用它）。
+    allocator: std.mem.Allocator,
+    /// 窗口置顶。启动时应用一次；面板里的开关改完立即生效、关闭时持久化。
+    always_on_top: bool = false,
+    /// 更新 feed 地址；null = 未配置（点击「检查更新」只提示，不联网）。
+    update_url: ?[]u8 = null,
+    /// L2（缩略图内存缓存）预算，MiB。
+    l2_budget_mib: u32 = default_l2_mib,
+    /// L3（缩略图磁盘缓存）预算，MiB。
+    l3_budget_mib: u32 = default_l3_mib,
+
+    pub fn init(allocator: std.mem.Allocator) Settings {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Settings) void {
+        if (self.update_url) |value| self.allocator.free(value);
+        self.* = undefined;
+    }
+
+    pub fn l2BudgetBytes(self: *const Settings) usize {
+        return @as(usize, @min(self.l2_budget_mib, max_budget_mib)) * 1024 * 1024;
+    }
+
+    pub fn l3BudgetBytes(self: *const Settings) u64 {
+        return @as(u64, @min(self.l3_budget_mib, max_budget_mib)) * 1024 * 1024;
+    }
+
+    /// 换更新源：去掉首尾空白，空串 = 未配置（null）。
+    /// 超长是显式错误——截断一个 URL 比"没改"更糟。
+    pub fn setUpdateUrl(self: *Settings, text: []const u8) error{ OutOfMemory, UrlTooLong }!void {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (trimmed.len > max_update_url) return error.UrlTooLong;
+        const copy: ?[]u8 = if (trimmed.len == 0) null else try self.allocator.dupe(u8, trimmed);
+        if (self.update_url) |old| self.allocator.free(old);
+        self.update_url = copy;
+    }
+
+    /// 一行可贴进日志的摘要。
+    pub fn describe(self: *const Settings, buffer: []u8) []const u8 {
+        return std.fmt.bufPrint(
+            buffer,
+            "always_on_top={} update_url={s} l2_budget_mib={d} l3_budget_mib={d}",
+            .{
+                self.always_on_top,
+                self.update_url orelse "(未配置)",
+                self.l2_budget_mib,
+                self.l3_budget_mib,
+            },
+        ) catch "?";
+    }
+
+    /// 序列化成一行紧凑 JSON。调用方释放。
+    pub fn toJson(self: *const Settings, allocator: std.mem.Allocator) ![]u8 {
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .always_on_top = self.always_on_top,
+            .update_url = self.update_url,
+            .l2_budget_mib = self.l2_budget_mib,
+            .l3_budget_mib = self.l3_budget_mib,
+        }, .{});
+    }
+
+    /// 原子写。目标目录不存在时先建；路径为空（内存态）返回 `error.NoPath`。
+    pub fn save(self: *const Settings, io: std.Io, path: ?[]const u8) !void {
+        const resolved = path orelse return error.NoPath;
+        const bytes = try self.toJson(self.allocator);
+        defer self.allocator.free(bytes);
+        if (std.fs.path.dirname(resolved)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
+        try library_file.writeAtomic(self.allocator, io, resolved, bytes);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// 路径
+// ---------------------------------------------------------------------------
+
+/// 纯路径：dev → exe 旁边的 `.otto-settings.json`；其它形态 → 数据目录下的
+/// `settings.json`。dataDir 拿不到（installed 没有 %APPDATA%）返回 null。
+pub fn pathFor(
+    allocator: std.mem.Allocator,
+    mode: mode_mod.Mode,
+    exe_path: []const u8,
+    appdata: ?[]const u8,
+) !?[]u8 {
+    if (mode == .dev) return try devPathFor(allocator, exe_path);
+    const data_dir = (try mode_mod.dataDirFor(allocator, mode, exe_path, appdata)) orelse return null;
+    defer allocator.free(data_dir);
+    return try std.fs.path.join(allocator, &.{ data_dir, file_name });
+}
+
+/// dev 形态的纯路径：exe 所在目录 + `.otto-settings.json`。
+pub fn devPathFor(allocator: std.mem.Allocator, exe_path: []const u8) ![]u8 {
+    const dir = std.fs.path.dirname(exe_path) orelse ".";
+    return std.fs.path.join(allocator, &.{ dir, dev_file_name });
+}
+
+/// 本进程的设置路径。判定与 `%APPDATA%` 都走 `mode.zig` 的同一条路径——
+/// 这里不重新发明"什么算 portable"。
+pub fn resolvePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+    const exe_path = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe_path);
+    const mode = try mode_mod.detect(allocator, io, exe_path);
+    if (mode == .dev) return try devPathFor(allocator, exe_path);
+    const data_dir = (try mode_mod.dataDir(allocator, io, mode, exe_path)) orelse return null;
+    defer allocator.free(data_dir);
+    return try std.fs.path.join(allocator, &.{ data_dir, file_name });
+}
+
+// ---------------------------------------------------------------------------
+// 读 / 解码
+// ---------------------------------------------------------------------------
+
+/// 解码一段 JSON。**永不失败**：坏 JSON、类型不对、内存不够都回到默认值。
+pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
+    const Wire = struct {
+        always_on_top: bool = false,
+        update_url: ?[]const u8 = null,
+        l2_budget_mib: u32 = default_l2_mib,
+        l3_budget_mib: u32 = default_l3_mib,
+    };
+
+    var parsed = std.json.parseFromSlice(Wire, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        std.debug.print("otto-lite: settings 解析失败（{s}），用默认值\n", .{@errorName(err)});
+        return Settings.init(allocator);
+    };
+    defer parsed.deinit();
+
+    var settings = Settings.init(allocator);
+    settings.always_on_top = parsed.value.always_on_top;
+    // 缺字段时 Wire 的默认值已经生效；这里再夹一次范围，防止手改出来的天文数字。
+    settings.l2_budget_mib = @min(parsed.value.l2_budget_mib, max_budget_mib);
+    settings.l3_budget_mib = @min(parsed.value.l3_budget_mib, max_budget_mib);
+    if (parsed.value.update_url) |text| {
+        settings.setUpdateUrl(text) catch |err| switch (err) {
+            error.UrlTooLong => std.debug.print(
+                "otto-lite: settings update_url 超过 {d} 字节，忽略\n",
+                .{max_update_url},
+            ),
+            error.OutOfMemory => {},
+        };
+    }
+    return settings;
+}
+
+/// 读设置文件并打印一行摘要。**永不失败**：文件不存在 / 损坏 / 读不了都用默认值。
+pub fn load(allocator: std.mem.Allocator, io: std.Io, path: ?[]const u8) Settings {
+    const resolved = path orelse {
+        std.debug.print("otto-lite: settings 无数据目录，本次用内存态默认值\n", .{});
+        return Settings.init(allocator);
+    };
+    const bytes = library_file.readAll(allocator, io, resolved, max_file_bytes) catch |err| {
+        std.debug.print(
+            "otto-lite: settings path={s} 读不到（{s}），用默认值\n",
+            .{ resolved, @errorName(err) },
+        );
+        return Settings.init(allocator);
+    };
+    defer allocator.free(bytes);
+
+    const settings = decode(allocator, bytes);
+    var buffer: [256]u8 = undefined;
+    std.debug.print("otto-lite: settings path={s} {s}\n", .{ resolved, settings.describe(&buffer) });
+    return settings;
+}
+
+// ---------------------------------------------------------------------------
+// 测试：真临时目录 + 真原子写（坏文件只回默认值，不向上抛错）
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+fn tempPath(tmp: *testing.TmpDir, name: []const u8) ![]u8 {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(testing.io, &buffer);
+    return std.fs.path.join(testing.allocator, &.{ buffer[0..length], name });
+}
+
+test "round-trip：四个字段经原子写读回来一模一样（含 URL 转义）" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tempPath(&tmp, "settings.json");
+    defer testing.allocator.free(path);
+
+    var original = Settings.init(testing.allocator);
+    defer original.deinit();
+    original.always_on_top = true;
+    original.l2_budget_mib = 96;
+    original.l3_budget_mib = 512;
+    try original.setUpdateUrl("https://example.com/feed.json?channel=dev&lang=zh");
+
+    try original.save(testing.io, path);
+    try tmp.dir.access(testing.io, "settings.json", .{});
+
+    var loaded = load(testing.allocator, testing.io, path);
+    defer loaded.deinit();
+    try testing.expect(loaded.always_on_top);
+    try testing.expectEqual(@as(u32, 96), loaded.l2_budget_mib);
+    try testing.expectEqual(@as(u32, 512), loaded.l3_budget_mib);
+    try testing.expectEqualStrings("https://example.com/feed.json?channel=dev&lang=zh", loaded.update_url.?);
+
+    // 重复写同一个目标：旧文件被替换，不是追加。
+    original.always_on_top = false;
+    try original.save(testing.io, path);
+    var again = load(testing.allocator, testing.io, path);
+    defer again.deinit();
+    try testing.expect(!again.always_on_top);
+}
+
+test "缺字段用默认值；空 URL 读回来是 null" {
+    const text =
+        \\{"always_on_top":true}
+    ;
+    var settings = decode(testing.allocator, text);
+    defer settings.deinit();
+    try testing.expect(settings.always_on_top);
+    try testing.expect(settings.update_url == null);
+    try testing.expectEqual(default_l2_mib, settings.l2_budget_mib);
+    try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
+
+    const empty_url =
+        \\{"update_url":""}
+    ;
+    var clear = decode(testing.allocator, empty_url);
+    defer clear.deinit();
+    try testing.expect(clear.update_url == null);
+}
+
+test "坏 JSON / 类型不对：回到默认值，不报错" {
+    const cases = [_][]const u8{
+        "{",
+        "not json at all",
+        "",
+        \\{"always_on_top":"yes","l2_budget_mib":"64"}
+        ,
+        \\{"l2_budget_mib":-1}
+        ,
+    };
+    for (cases) |text| {
+        var settings = decode(testing.allocator, text);
+        defer settings.deinit();
+        try testing.expect(!settings.always_on_top);
+        try testing.expect(settings.update_url == null);
+        try testing.expectEqual(default_l2_mib, settings.l2_budget_mib);
+        try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
+    }
+}
+
+test "未知字段忽略；手改的超大预算夹到上限" {
+    const text =
+        \\{"always_on_top":true,"future_field":{"nested":[1,2,3]},"l2_budget_mib":999999,"l3_budget_mib":999999}
+    ;
+    var settings = decode(testing.allocator, text);
+    defer settings.deinit();
+    try testing.expect(settings.always_on_top);
+    try testing.expectEqual(max_budget_mib, settings.l2_budget_mib);
+    try testing.expectEqual(max_budget_mib, settings.l3_budget_mib);
+}
+
+test "读不到文件：默认值，不向上抛错" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tempPath(&tmp, "missing.json");
+    defer testing.allocator.free(path);
+
+    var settings = load(testing.allocator, testing.io, path);
+    defer settings.deinit();
+    try testing.expectEqual(default_l2_mib, settings.l2_budget_mib);
+    try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
+}
+
+test "路径：dev 在 exe 旁边（不写用户目录），便携版在 data 目录" {
+    const dev = (try pathFor(testing.allocator, .dev, "C:\\build\\zig-out\\bin\\otto-lite.exe", "C:\\Users\\me\\AppData\\Roaming")).?;
+    defer testing.allocator.free(dev);
+    try testing.expectEqualStrings("C:\\build\\zig-out\\bin\\.otto-settings.json", dev);
+
+    const portable = (try pathFor(testing.allocator, .portable, "D:\\tools\\otto\\otto-lite.exe", null)).?;
+    defer testing.allocator.free(portable);
+    try testing.expectEqualStrings("D:\\tools\\otto\\data\\settings.json", portable);
+
+    const installed = (try pathFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", "C:\\Users\\me\\AppData\\Roaming")).?;
+    defer testing.allocator.free(installed);
+    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\settings.json", installed);
+}
+
+test "dev 路径没有目录部分时落在当前目录，不崩" {
+    const path = try devPathFor(testing.allocator, "otto-lite.exe");
+    defer testing.allocator.free(path);
+    try testing.expect(std.mem.endsWith(u8, path, dev_file_name));
+    try testing.expect(!std.fs.path.isAbsolute(path));
+}

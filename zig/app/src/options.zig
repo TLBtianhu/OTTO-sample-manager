@@ -52,6 +52,12 @@ pub const Options = struct {
     /// L3 缩略图磁盘缓存的预算（字节）。默认 256 MiB；`--cache-budget-kib=<n>`
     /// 按 KiB 调小，用于验证淘汰（正常用户不需要碰它）。
     disk_cache_budget_bytes: u64 = 256 * 1024 * 1024,
+    /// 用户显式给了 `--cache-budget-kib` 吗？设置面板里的 L3 预算只在**没给**
+    /// 命令行时生效——显式参数永远优先，和 `--update-url` 覆盖设置里的更新源同理。
+    cache_budget_set: bool = false,
+    /// `--settings-probe`：`--nanoui-snapshot` 时也建真实 HWND（仍然隐藏、不激活），
+    /// 让无头脚本能断言 `WS_EX_TOPMOST`。普通用户不需要。
+    settings_probe: bool = false,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,
     /// `--bench <library>`：宪章六项性能基准，打印一张表后退出（不开窗）。
@@ -190,8 +196,12 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             index += 1;
             if (index == args.len) return error.MissingValue;
             options.disk_cache_budget_bytes = try kibToBytes(args[index]);
+            options.cache_budget_set = true;
         } else if (std.mem.startsWith(u8, arg, "--cache-budget-kib=")) {
             options.disk_cache_budget_bytes = try kibToBytes(arg["--cache-budget-kib=".len..]);
+            options.cache_budget_set = true;
+        } else if (std.mem.eql(u8, arg, "--settings-probe")) {
+            options.settings_probe = true;
         } else if (std.mem.eql(u8, arg, "--thumb-bench")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -486,15 +496,27 @@ test "--no-isolation 是开关；--thumb-bench 两种写法都收" {
 test "--cache-budget-kib：两种写法、KiB → 字节、默认 256 MiB、非数字报 InvalidValue" {
     const joined = try parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=100" });
     try testing.expectEqual(@as(u64, 100 * 1024), joined.disk_cache_budget_bytes);
+    try testing.expect(joined.cache_budget_set);
 
     const spaced = try parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib", "256" });
     try testing.expectEqual(@as(u64, 256 * 1024), spaced.disk_cache_budget_bytes);
+    try testing.expect(spaced.cache_budget_set);
 
     const plain = try parse(&[_][]const u8{"otto-lite"});
     try testing.expectEqual(@as(u64, 256 * 1024 * 1024), plain.disk_cache_budget_bytes);
+    try testing.expect(!plain.cache_budget_set);
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib" }));
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=x" }));
+}
+
+test "--settings-probe 是开关，不吞下一个参数" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(!plain.settings_probe);
+
+    const probe = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--settings-probe" });
+    try testing.expect(probe.settings_probe);
+    try testing.expectEqualStrings("lib.json", probe.library_path.?);
 }
 
 test "更新检查：--check-update / --update-url 两种写法都收，默认两个都是 null（不联网）" {

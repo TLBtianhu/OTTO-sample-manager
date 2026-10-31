@@ -59,6 +59,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_diskcache", .module = ports_dep.module("otto_diskcache") },
         // 文件夹选择口岸：IFileOpenDialog（UI 的「导入文件夹」按钮）。
         .{ .name = "otto_folder_picker", .module = ports_dep.module("otto_folder_picker") },
+        // 窗口置顶口岸：SetWindowPos(HWND_TOPMOST) + WS_EX_TOPMOST 查询（设置面板）。
+        .{ .name = "otto_win_window", .module = ports_dep.module("otto_win_window") },
         // 导入流水线的两个口岸：L0 扫描（真 Win32 属性/身份）与 L1 头部探测。
         .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
         .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },

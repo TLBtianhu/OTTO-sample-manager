@@ -200,7 +200,12 @@ pub const DiskCache = struct {
     }
 
     /// 运行时调整预算（只影响下一次 `prune`；不主动扫描）。
+    ///
+    /// 拿 `lock` 再写：工作线程的 `put` 在锁内读 `budget_bytes` 决定是否裁剪，
+    /// 设置面板在 UI 线程改预算时不能和它撞上。
     pub fn setBudget(self: *DiskCache, budget_bytes: u64) void {
+        self.lock.acquire();
+        defer self.lock.release();
         self.budget_bytes = budget_bytes;
     }
 

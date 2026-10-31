@@ -43,6 +43,11 @@ pub const L3 = struct {
         return self.cache.prune();
     }
 
+    /// 运行时换预算（设置面板）。下一次 `prune` / 超预算的 `put` 按新值裁剪。
+    pub fn setBudget(self: *L3, budget_bytes: u64) void {
+        self.cache.setBudget(budget_bytes);
+    }
+
     pub fn stats(self: *const L3) Stats {
         return self.cache.stats();
     }

@@ -316,6 +316,35 @@ pub const Thumbs = struct {
         self.failed_keys.clearRetainingCapacity();
     }
 
+    /// 设置面板改预算：L2 立即按新预算淘汰（`Cache.setBudget` 自己会淘汰），
+    /// L3 换预算后立刻裁剪一次盘上条目。两把锁分别保护各自的结构；L3 的裁剪
+    /// 在锁外做，不把 UI 线程卡在 L2 的临界区里。
+    ///
+    /// 打印一行**实际生效**的预算：验收脚本按这一行判断热生效，不靠 UI 状态。
+    pub fn setBudgets(self: *Thumbs, l2_bytes: usize, l3_bytes: u64) void {
+        self.lock.acquire();
+        self.cache.setBudget(l2_bytes);
+        self.lock.release();
+
+        const mib: u64 = 1024 * 1024;
+        std.debug.print(
+            "otto-lite: cache budget l2={d}MiB l3={d}MiB\n",
+            .{ @as(u64, l2_bytes) / mib, l3_bytes / mib },
+        );
+
+        if (self.disk) |*disk| {
+            disk.setBudget(l3_bytes);
+            if (disk.prune()) |report| {
+                std.debug.print(
+                    "otto-lite: L3 budget applied scanned={d} evicted={d} bytes={d}->{d} budget={d}B\n",
+                    .{ report.scanned, report.evicted, report.bytes_before, report.bytes_after, report.budget_bytes },
+                );
+            } else |err| {
+                std.debug.print("otto-lite: L3 预算裁剪失败（{s}），下次写入时再裁\n", .{@errorName(err)});
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 内部：缓存命中 / 失败记忆 / 入队
     // -----------------------------------------------------------------------
