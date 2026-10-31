@@ -1,7 +1,7 @@
 //! zig-audio → `audio/session.Decoded` 的**唯一**解码路径。
 //!
-//! WAV / FLAC / MP3 / AIFF 现在都由 vendor 的 zig-audio 解（`vendored v0.8`），
-//! `providers/audio.zig`（wasapi-pcm）与 `providers/native_audio.zig` 只差在
+//! WAV / FLAC / MP3 / AIFF / Ogg Vorbis 现在都由 vendor 的 zig-audio 解（`vendored
+//! v0.10`），`providers/audio.zig`（wasapi-pcm）与 `providers/native_audio.zig` 只差在
 //! `supports` 的扩展名表与图标能力——解码循环、声道规则、256/512 MiB 上限、
 //! 流式 Reader 必须只有这一份。上一轮的 WAV/FLAC 下混分叉已经证明：两份实现
 //! 迟早会在"多声道怎么混、空流算不算成功、时长怎么取整"上漂移。
@@ -18,6 +18,12 @@
 //! 按实际样本数算 frames / duration（不信容器声明）
 //! audio/session.build                        ← 峰值/波形/Player 与 MF 共用
 //! ```
+//!
+//! `Info.total_frames` 是**开流时**的声明值：WAV/FLAC/AIFF 打开就有，MP3 通常为
+//! null，Ogg Vorbis 也要读到流尾才由库填上。所以缓冲策略不能假设"开头就知道
+//! 长度"——`reservePcm` 的估算分支就是为这几种准备的；最终 `frames` 永远按实际
+//! 解出的样本数算（日志里 `container_frames` 与 `eof_frames` 各是开流时 / EOF 时
+//! 的声明值，Vorbis 正好是 `null` → 真值）。
 //!
 //! ## 为什么按内容识别、而不是按扩展名
 //!
@@ -45,7 +51,8 @@
 //! 压缩文件不再整份进内存：`FileReader` 把已打开的 Win32 句柄接成 `std.Io.Reader`，
 //! 解码器按需拉取，适配器常驻缓冲固定 64 KiB。整段 **PCM** 仍进内存（播放器/波形
 //! 都要整段），上限 512 MiB；超了是 `error.TooLarge`，不赌分配器。没有
-//! `total_frames` 的 MP3 用压缩大小 × 12 估初值（上限 64 MiB），只影响 realloc
+//! `total_frames` 的文件（MP3，以及 **Ogg Vorbis**——它的帧数在最后一页的 granule
+//! 里，`open` 时还不知道）用压缩大小 × 12 估初值（上限 64 MiB），只影响 realloc
 //! 次数，正确性由增量检查与最终上限兜住。
 //!
 //! ## 错误 → 四态（与 `preview.zig` 的规则逐字对应）
@@ -166,12 +173,13 @@ pub fn decode(
 
     // 流式证据：compressed 是压缩文件大小（与峰值无关），peak_buf 是适配器唯一的
     // 常驻缓冲；reads/avg_read 证明是分块读而不是一次预读。
-    // `container_frames` 走 `{?d}`：null 是"容器没写长度"，不是错误。
+    // `container_frames` / `eof_frames` 走 `{?d}`：null 是"容器没写长度"，不是错误。
+    // 两者不同正是 Vorbis：开流时 null，读完最后一页后库才把 granule 填进 `info`。
     const stats = file_reader.stats();
     if (options.stats_out) |out| out.* = stats;
     const avg_read = if (stats.reads == 0) 0 else stats.bytes / stats.reads;
     std.debug.print(
-        "otto-lite: zig-audio decode file={s} container={s} compressed={d} pcm={d} peak_buf={d} reads={d} avg_read={d} rate={d} ch={d} src_ch={d} bits=16 frames={d} duration={d}ms source_bits={d} container_frames={?d}\n",
+        "otto-lite: zig-audio decode file={s} container={s} compressed={d} pcm={d} peak_buf={d} reads={d} avg_read={d} rate={d} ch={d} src_ch={d} bits=16 frames={d} duration={d}ms source_bits={d} container_frames={?d} eof_frames={?d}\n",
         .{
             path,
             @tagName(info.format),
@@ -187,6 +195,7 @@ pub fn decode(
             frames * 1000 / info.sample_rate,
             info.bits_per_sample,
             info.total_frames,
+            decoder.info.total_frames,
         },
     );
 

@@ -19,9 +19,10 @@
 //!
 //! 解码按**注册表同样的顺序**分流，但**装配与会话类型只有一种**：
 //!   * `.wav` → `providers/audio.zig`（wasapi-pcm：zig-audio 解码 + WASAPI）；
-//!   * `.flac` / `.mp3` / `.aiff` / `.aif` → `providers/native_audio.zig`
+//!   * `.flac` / `.mp3` / `.aiff` / `.aif` / `.ogg` / `.oga` → `providers/native_audio.zig`
 //!     （vendor 的 zig-audio，纯 Zig 解码；`.wav` 也在该 provider 的声明里，
-//!     但这里先问 wasapi-pcm，与预览表顺序一致）；
+//!     但这里先问 wasapi-pcm，与预览表顺序一致）；`.ogg` 里是 Opus 时解码给出
+//!     `Unsupported`，本自检按失败退出（它不是可播的 Vorbis）；
 //!   * `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media Foundation，
 //!     16-bit PCM）；
 //! 三条路都落到 `audio/session.zig` 的 `build`，所以播放/seek/停止的断言是同一套
@@ -164,6 +165,8 @@ fn runNative(
         "mp3"
     else if (std.ascii.eqlIgnoreCase(ext, ".aiff") or std.ascii.eqlIgnoreCase(ext, ".aif"))
         "aiff"
+    else if (std.ascii.eqlIgnoreCase(ext, ".ogg") or std.ascii.eqlIgnoreCase(ext, ".oga"))
+        "vorbis"
     else if (std.ascii.eqlIgnoreCase(ext, ".wav"))
         "wav"
     else

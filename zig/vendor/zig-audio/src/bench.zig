@@ -54,6 +54,14 @@ const legacy_seconds: f64 = 20.0;
 const legacy_sample_rate: u32 = 44_100;
 const legacy_target_speedup: f64 = 100.0;
 
+/// 3 s of Ogg/Vorbis, 44.1 kHz stereo, quality 4 (the same file the vector
+/// tests use). One row, looped to 20 s: it pays for the FFT-based IMDCT, the
+/// residue VQ passes and the floor curve on both channels.
+const vorbis_fixture = @embedFile("fixtures/vorbis-stereo-44k-q4.ogg");
+const vorbis_seconds: f64 = 20.0;
+const vorbis_target_speedup: f64 = 100.0;
+const vorbis_total_frames: u64 = 132_300;
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -62,6 +70,7 @@ pub fn main() !void {
     try benchFlac(allocator, io, "FLAC LPC", flac_lpc_fixture);
     try benchMp3(allocator, io);
     try benchMp3Stereo(allocator, io);
+    try benchVorbis(allocator, io);
     try benchLegacy(allocator, io);
 }
 
@@ -173,8 +182,46 @@ fn benchMp3Stereo(allocator: std.mem.Allocator, io: std.Io) !void {
     );
 }
 
-fn benchFlac(
-    allocator: std.mem.Allocator,
+fn benchVorbis(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 44_100 < vorbis_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(vorbis_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.channels != 2) return error.UnexpectedChannelCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            if (n % 2 != 0) return error.UnexpectedSampleCount;
+            decoded_frames += n / 2;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+        // The length is the stream's last granule, so it is only known once the
+        // last page has been read.
+        if (dec.info.total_frames != vorbis_total_frames) return error.UnexpectedFrameCount;
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report(
+        "Ogg Vorbis q4 stereo",
+        elapsed_ns,
+        @floatFromInt(decoded_frames),
+        44_100,
+        2,
+        vorbis_target_speedup,
+        files,
+    );
+}
+
+fn benchFlac(    allocator: std.mem.Allocator,
     io: std.Io,
     label: []const u8,
     fixture: []const u8,

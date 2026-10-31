@@ -14,6 +14,14 @@ test {
     _ = @import("adpcm_test.zig");
     _ = @import("aiff_test.zig");
     _ = @import("legacy_vectors_test.zig");
+    _ = @import("ogg_test.zig");
+    _ = @import("vorbis_test.zig");
+    _ = @import("vorbis_huffman_test.zig");
+    _ = @import("vorbis_floor_test.zig");
+    _ = @import("vorbis_residue_test.zig");
+    _ = @import("vorbis_dsp_test.zig");
+    _ = @import("vorbis_decode_test.zig");
+    _ = @import("ogg_vectors_test.zig");
     _ = @import("ffmpeg_test.zig");
     _ = @import("fuzz.zig");
 }

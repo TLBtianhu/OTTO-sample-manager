@@ -4,7 +4,8 @@
 //! 每一项负责的是"产出哪一种载荷"，不是"一种文件类型"：
 //!
 //!   1. `wasapi-pcm`      WAV 试听（zig-audio 解码 + WASAPI；带粗采样图标）；
-//!   2. `native-audio`    WAV / FLAC / MP3 / AIFF 试听（vendor 的 zig-audio，纯 Zig）；
+//!   2. `native-audio`    WAV / FLAC / MP3 / AIFF / Ogg Vorbis 试听（vendor 的
+//!                        zig-audio，纯 Zig；`.ogg` 里是 Opus 时谢绝，见下）；
 //!   3. `mf-audio`        MP3 / M4A / AAC / WMA 试听（Media Foundation）；
 //!   4. `image-wic`       PNG / JPEG / BMP / GIF / TIFF（自己写的 WIC 解码，不经过 Shell）；
 //!   5. `mf-video`        MP4 / M4V / MOV / WMV 首帧（Media Foundation，产出 image）；
@@ -26,12 +27,14 @@
 //!   * 音频在最前：能播就播。某些机器给 `.wav` 登记了影子 handler 并返回静态图，
 //!     排在后面会让"真的能试听"被一张波形截图抢走；`.mp3` 在 Windows 上更是常常
 //!     有 Shell 静态图。`wasapi-pcm` 先接 `.wav`（它还有粗采样图标），`native-audio`
-//!     紧跟其后：WAV 之外的 FLAC / MP3 / AIFF 由我们 vendor 的纯 Zig 解码器解，
-//!     不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解这几种，
-//!     但多一层 COM/系统依赖，能用自家解码器时先用自家的。`native-audio` 也声明
-//!     `.wav`：当扩展名说谎（`.wav` 里是 FLAC）时，`wasapi-pcm` 按内容谢绝为
+//!     紧跟其后：WAV 之外的 FLAC / MP3 / AIFF / Ogg Vorbis 由我们 vendor 的纯 Zig
+//!     解码器解，不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解
+//!     这几种，但多一层 COM/系统依赖，能用自家解码器时先用自家的。`native-audio`
+//!     也声明 `.wav`：当扩展名说谎（`.wav` 里是 FLAC）时，`wasapi-pcm` 按内容谢绝为
 //!     `unsupported`，注册表会继续问它——这不是给 WAV 特权，而是让"按内容作答"
-//!     的 provider 有机会接住。两条音频 provider 谢绝（没有端点 / 解码失败）时，
+//!     的 provider 有机会接住。`.ogg` 声明的是容器，编码由库按首包判断：Opus 得到
+//!     一次 `unsupported` 谢绝，注册表照常问下一个，不会被当成"文件坏了"。
+//!     两条音频 provider 谢绝（没有端点 / 解码失败）时，
 //!     注册表仍会继续问 thumb 兜底——这正是 decline 规则存在的理由；
 //!   * 图片在视频与 Shell 之前：PNG/JPEG/BMP/GIF/TIFF 由 `image-wic` 自己解，不查
 //!     注册表、不加载第三方 DLL。只有 PSD/AI/BLEND 这类**没有系统解码器**的格式才

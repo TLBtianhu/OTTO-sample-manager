@@ -2,11 +2,13 @@
 //!
 //! WAV (PCM, IEEE float, G.711 µ-law/A-law, IMA and Microsoft ADPCM), AIFF
 //! (big-endian PCM), FLAC (CONSTANT, VERBATIM, FIXED(0..4), LPC(1..32)) and
-//! mono/stereo MPEG-1 Layer III decoders. The FLAC side covers Rice partitions,
-//! independent channels and the left/side, right/side and mid/side
-//! assignments; the MP3 side covers long and window-switched
-//! (start/short/stop) granules, mid/side and intensity stereo. See README for
-//! the support matrix.
+//! mono/stereo MPEG-1 Layer III decoders, plus a complete Ogg Vorbis decoder.
+//! The FLAC side covers Rice partitions, independent channels and the
+//! left/side, right/side and mid/side assignments; the MP3 side covers long and
+//! window-switched (start/short/stop) granules, mid/side and intensity stereo;
+//! the Ogg side covers the container, the three Vorbis headers, floor 1, residue
+//! formats 0/1/2, inverse coupling, the IMDCT and the lap. Floor 0 and Opus are
+//! not supported and are named as such. See README for the support matrix.
 //!
 //! The API deliberately has one output path: interleaved i16. Source PCM
 //! (8/16/24/32) and float32 are converted inside the decoder, so a player
@@ -18,6 +20,9 @@ const wav = @import("wav.zig");
 const aiff = @import("aiff.zig");
 const flac = @import("flac.zig");
 const mp3 = @import("mp3.zig");
+const ogg = @import("ogg.zig");
+const vorbis = @import("vorbis.zig");
+const vorbis_decoder = @import("vorbis_decoder.zig");
 
 pub const Format = types.Format;
 pub const Info = types.Info;
@@ -46,10 +51,15 @@ const FileSource = struct {
 ///
 /// `header` is the beginning of the stream, not a full file: 4 bytes are
 /// enough to recognize FLAC's `fLaC` magic, 12 bytes are needed for RIFF/WAVE
-/// and `FORM`/`AIFF`. Anything shorter returns null. RF64 and RIFX return null
-/// on purpose: they are WAV-like containers this version does not decode, and
-/// `probe` never promises a format that `open` cannot open. AIFC returns null
-/// for the same reason, even though `open` names it `Unsupported`.
+/// and `FORM`/`AIFF`. Ogg is a two-level identification: the first page's
+/// payload decides between Vorbis and Opus, so `OggS` needs at least 28 bytes
+/// and the usual single-segment BOS page needs 36 bytes. With less than that
+/// the answer is null rather than a guess, because reporting Opus as
+/// `.ogg_vorbis` would be a lie. Anything shorter than a recognizable signature
+/// returns null. RF64 and RIFX return null on purpose: they are WAV-like
+/// containers this version does not decode, and `probe` never promises a format
+/// that `open` cannot open. AIFC returns null for the same reason, even though
+/// `open` names it `Unsupported`.
 pub fn probe(header: []const u8) ?Format {
     if (header.len >= 4 and std.mem.eql(u8, header[0..4], "fLaC")) return .flac;
     if (header.len >= 12 and std.mem.eql(u8, header[0..4], "RIFF") and
@@ -61,6 +71,15 @@ pub fn probe(header: []const u8) ?Format {
         std.mem.eql(u8, header[8..12], "AIFF"))
     {
         return .aiff;
+    }
+    // Ogg: the container magic alone does not name a codec. Vorbis is claimed
+    // only when its identification packet is visible; Opus returns null here
+    // (no `Format` exists for it) and `open` names it `Unsupported`.
+    if (header.len >= 4 and std.mem.eql(u8, header[0..4], "OggS")) {
+        return switch (ogg.identify(header)) {
+            .vorbis => .ogg_vorbis,
+            else => null,
+        };
     }
     // MP3: an ID3v2 tag or an MPEG audio sync word. Any layer/version is
     // recognized here so `open` can report Unsupported instead of NotAudio.
@@ -74,6 +93,11 @@ pub fn probe(header: []const u8) ?Format {
 /// Consumes the 12-byte signature and scans RIFF chunks up to the start of the
 /// `data` payload. The reader is borrowed: the caller owns it and must keep it
 /// alive longer than the returned `Decoder`.
+///
+/// For Ogg this version parses the container and all three Vorbis headers and
+/// returns a streaming decoder; `total_frames` is the stream's last granule, so
+/// it stays `null` until `read` reaches the end. Opus and unknown Ogg logical
+/// streams return `error.Unsupported` without producing a decoder.
 pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder {
     var header: [12]u8 = undefined;
     const got = reader.readSliceShort(&header) catch |err| switch (err) {
@@ -119,6 +143,18 @@ pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder 
             .info = dec.info,
             .allocator = allocator,
             .impl = .{ .mp3 = dec },
+        };
+    }
+
+    if (std.mem.eql(u8, header[0..4], "OggS")) {
+        // Ogg Vorbis: the container names the codec in its first packet, so an
+        // Ogg page that does not carry `\x01vorbis` is Opus or something else
+        // and is named Unsupported rather than NotAudio.
+        const dec = try vorbis_decoder.Decoder.open(allocator, reader, &header);
+        return .{
+            .info = dec.info,
+            .allocator = allocator,
+            .impl = .{ .ogg_vorbis = dec },
         };
     }
 
@@ -191,6 +227,7 @@ pub const Decoder = struct {
         aiff: aiff.Decoder,
         flac: flac.Decoder,
         mp3: mp3.Decoder,
+        ogg_vorbis: vorbis_decoder.Decoder,
     },
     /// Non-null only for `openBytes` / `openFile*`: reader state owned by this
     /// decoder. Plain `open` borrows the caller's reader and leaves it null.
@@ -219,6 +256,13 @@ pub const Decoder = struct {
             .aiff => |*dec| return dec.read(out),
             .flac => |*dec| return dec.read(out),
             .mp3 => |*dec| return dec.read(out),
+            .ogg_vorbis => |*dec| {
+                const written = try dec.read(out);
+                // Vorbis length lives in the stream's last granule position, so
+                // it becomes known only when the last page has been read.
+                self.info.total_frames = dec.info.total_frames;
+                return written;
+            },
         }
     }
 
@@ -231,6 +275,7 @@ pub const Decoder = struct {
             .aiff => |*dec| dec.deinit(),
             .flac => |*dec| dec.deinit(),
             .mp3 => |*dec| dec.deinit(),
+            .ogg_vorbis => |*dec| dec.deinit(),
         }
         if (self.source) |source| switch (source) {
             .bytes => |reader| self.allocator.destroy(reader),

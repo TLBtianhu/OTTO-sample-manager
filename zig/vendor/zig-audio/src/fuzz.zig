@@ -1,6 +1,6 @@
-//! Mutation fuzzer: start from valid WAV, FLAC, MP3, AIFF and legacy-WAV
-//! (G.711 / ADPCM) templates, flip/truncate bytes, and drive the public
-//! parser/decoder through every reachable error path.
+//! Mutation fuzzer: start from valid WAV, FLAC, MP3, AIFF, legacy-WAV
+//! (G.711 / ADPCM) and Ogg/Vorbis templates, flip/truncate bytes, and drive the
+//! public parser/decoder through every reachable error path.
 //!
 //! The same `run` function is used by `zig build fuzz` (10,000 rounds) and by a
 //! normal test (1,000 rounds), so CI always exercises it.
@@ -9,6 +9,7 @@ const std = @import("std");
 const root = @import("root.zig");
 const testutil = @import("testutil.zig");
 const flac_build = @import("flac_build.zig");
+const vorbis_build = @import("vorbis_build.zig");
 
 pub const default_rounds: usize = 10_000;
 pub const default_seed: u64 = 0x5EED_2A11_D0C5_1234;
@@ -62,10 +63,15 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
     const aiff24_base = try buildAiffTemplate(allocator, 24);
     defer allocator.free(aiff24_base);
 
+    // A complete Ogg/Vorbis file: pages, CRC, all three headers, EOS. Mutating
+    // it reaches the page table, the setup bitstream and the granule scan.
+    const ogg_base = try vorbis_build.minimalFile(allocator);
+    defer allocator.free(ogg_base);
+
     const templates = [_][]const u8{
         wav_base,    flac_base,   mp3_base, mp3_stereo_base,
         mulaw_base,  alaw_base,   ima_base, ms_base,
-        aiff16_base, aiff24_base,
+        aiff16_base, aiff24_base, ogg_base,
     };
 
     var longest: usize = 0;
@@ -80,12 +86,13 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         // Round-robin over the templates: WAV, FLAC, MP3 (mono and joint
-        // stereo), G.711, both ADPCM codecs and both AIFF depths. The MP3
-        // stereo frame keeps the stereo side-info and mid/side paths fuzzed.
+        // stereo), G.711, both ADPCM codecs, both AIFF depths and Ogg/Vorbis.
         const base = templates[round % templates.len];
         const len = mutate(random, base, buf);
 
-        if (root.probe(buf[0..@min(len, 12)]) != null) stats.probed += 1;
+        // 36 bytes let `probe` see an Ogg page's first packet magic, which is
+        // where the container/codec distinction lives.
+        if (root.probe(buf[0..@min(len, 36)]) != null) stats.probed += 1;
 
         var reader = std.Io.Reader.fixed(buf[0..len]);
         var dec = root.open(allocator, &reader) catch |err| {
