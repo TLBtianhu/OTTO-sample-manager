@@ -125,6 +125,7 @@ const State = struct {
             const action = s.search.frame(c, s.samples, &s.selection, import_button);
             if (action.filter_changed) s.noteSelection();
             if (action.activate) s.activateCursor(c);
+            if (action.toggle_play) c.changed = s.preview.togglePlay(s.previewRow()) or c.changed;
             // 模态选择框在 UI 线程上跑；取消不进状态机（见 `import_ui.begin`）。
             if (action.trailing_clicked) s.import.begin(window_util.nativeHandle(s.window));
         } else {

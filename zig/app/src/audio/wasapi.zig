@@ -336,7 +336,9 @@ pub const Render = struct {
         if (win.failed(hr)) return fail(hr);
     }
 
-    /// 停止并回到 0 位置。失败只记诊断：调用方正在停播/退出，不能再抛。
+    /// 停止并丢弃端点缓冲（Stop + Reset）。seek 也复用它清掉旧位置的数据：
+    /// `GetBuffer` 只能拿到空闲部分，排队未播的旧帧只有 Reset 能清。
+    /// 失败只记诊断：调用方正在停播/退出，不能再抛。
     pub fn stop(self: Render) void {
         const stop_hr = self.client_vtbl.Stop(self.client);
         if (win.failed(stop_hr)) noteFailure(stop_hr);

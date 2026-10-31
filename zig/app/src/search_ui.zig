@@ -11,6 +11,9 @@
 //! 键盘归属：Ctrl+F 把焦点交给搜索框；↑↓/Home/End 无论在不在搜索框里都先被这里
 //! 截走（截走就清 `input.key`，文本框不会再把 ↑↓ 当成移动插入点），这样"输入
 //! img 之后直接按 ↓"是通的——不要求用户先把焦点从搜索框挪开。
+//!
+//! 空格是唯一必须看焦点的键：搜索框聚焦时它只是字符（不拦截，照常进
+//! `TextBuffer`）；列表聚焦时才变成"播放/暂停"（`Outcome.toggle_play`）。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -28,6 +31,8 @@ pub const Outcome = struct {
     filter_changed: bool = false,
     /// Enter：预览当前行（音频由调用方触发播放）。
     activate: bool = false,
+    /// 空格（列表聚焦时）：当前行是音频就切换播放/停止；不是音频由调用方空操作。
+    toggle_play: bool = false,
     /// 搜索框右侧的固定宽按钮被点了（「导入文件夹」）。按钮的语义不在本文件。
     trailing_clicked: bool = false,
 };
@@ -136,7 +141,7 @@ pub const Search = struct {
         // 上一帧的行号带偏。第一次建立返回 null（不算变化）。
         if (self.rebuild(samples)) |change| self.onRebuild(c, selection, &outcome, change);
 
-        outcome.activate = self.handleKeys(c, samples, selection);
+        self.handleKeys(c, samples, selection, &outcome);
 
         // 本帧输入的字符在 draw 里才进 TextBuffer：再比一次，过滤当帧生效，
         // 表头与列表都不会慢一拍。
@@ -190,24 +195,41 @@ pub const Search = struct {
     }
 
     /// 键盘：Ctrl+F 聚焦、Esc 清搜索/清选择、↑↓/Home/End 移动光标行（并选中）、
-    /// Enter 预览当前行。返回 true 表示按了 Enter。
+    /// Enter 预览当前行、空格切换播放。
+    ///
+    /// 空格必须区分焦点：搜索框聚焦时**不拦截**，让 `input.chars` 照常进
+    /// `TextBuffer`（真实窗口里空格就是 WM_CHAR，不是 key/shortcut）；列表聚焦时
+    /// 才把它变成 `outcome.toggle_play`。`--nanoui-script` 的 `type:` 步骤会 trim
+    /// 空格、无法表达"只按一个空格"，所以无头脚本用 `chord:space` 走 shortcut 路径；
+    /// Windows 上真实空格永远不会以 shortcut 出现，两条路互不影响。
     fn handleKeys(
         self: *Search,
         c: *ui.Context,
         samples: []const core.model.Sample,
         selection: *selection_mod.Selection,
-    ) bool {
+        outcome: *Outcome,
+    ) void {
         // Ctrl+F：把键盘交给搜索框；下一帧 textField 会抢焦点。
         if (c.shortcut(.{ .key = 'f', .ctrl = true })) {
             self.buffer.focus();
             c.changed = true;
-            return false;
+            return;
         }
-        switch (c.input.key orelse return false) {
+        if (!self.focused) {
+            if (c.shortcut(.{ .key = ' ' })) {
+                outcome.toggle_play = true;
+                return;
+            }
+            if (std.mem.eql(u8, c.input.chars, " ")) {
+                c.input.chars = "";
+                outcome.toggle_play = true;
+                return;
+            }
+        }
+        switch (c.input.key orelse return) {
             .escape => {
                 c.input.key = null;
                 self.escape(c, selection);
-                return false;
             },
             .up, .down, .home, .end => {
                 const step: filter.Move = switch (c.input.key.?) {
@@ -215,18 +237,17 @@ pub const Search = struct {
                     .down => .down,
                     .home => .home,
                     .end => .end,
-                    else => return false,
+                    else => return,
                 };
                 // 截走：文本框不该把 ↑↓ 当成移动插入点。
                 c.input.key = null;
                 self.moveCursor(c, samples, selection, step);
-                return false;
             },
             .enter => {
                 c.input.key = null;
-                return true;
+                outcome.activate = true;
             },
-            else => return false,
+            else => {},
         }
     }
 

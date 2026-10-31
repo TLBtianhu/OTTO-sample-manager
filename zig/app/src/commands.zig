@@ -83,7 +83,7 @@ pub fn run(
     if (options.preview_path) |path| return try demo_preview.run(init, init.gpa, path);
 
     // 音频试听自检：真解码、真播放、真 sleep；没有端点时以 0 退出。
-    if (options.play_test_path) |path| return try demo_play.run(init, init.gpa, path);
+    if (options.play_test_path) |path| return try demo_play.run(init, init.gpa, path, options.seek_at_ms);
 
     // 过滤自检：不开窗，载入库 → 用 UI 同一条匹配规则过滤 → 打印命中数。
     if (options.filter) |needle| {
