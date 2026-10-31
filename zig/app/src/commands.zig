@@ -86,9 +86,10 @@ pub fn run(
     if (options.play_test_path) |path| return try demo_play.run(init, init.gpa, path, options.seek_at_ms);
 
     // 过滤自检：不开窗，载入库 → 用 UI 同一条匹配规则过滤 → 打印命中数。
-    if (options.filter) |needle| {
+    // `--filter-ext` 单独给也走这里（等价于空搜索 + 后缀筛选），两者同时给是 AND。
+    if (options.filter != null or options.filter_ext != null) {
         const path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
-        return try demo_filter.run(init, allocator, path, needle);
+        return try demo_filter.run(init, allocator, path, options.filter orelse "", options.filter_ext);
     }
 
     // JSON → OTTOLIB 一次性转换（M3 第一块；导入 UI 与写回下一轮再做）。

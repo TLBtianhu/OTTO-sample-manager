@@ -37,6 +37,9 @@ pub const Options = struct {
     /// `--filter <text>` / `--filter=<text>`：不开窗的过滤自检。
     /// 空串是一个**有效值**（`--filter=` = 不过滤，应命中全部）。
     filter: ?[]const u8 = null,
+    /// `--filter-ext=<list>`：按后缀过滤（逗号分隔、大小写/前导点不敏感）；与
+    /// `--filter` 同时给出时取交集。空串 = 不按后缀筛。
+    filter_ext: ?[]const u8 = null,
     /// `--convert <in.json> <out.otto>`：载入旧 JSON → 写新二进制快照。
     convert: ?Convert = null,
     /// `--library-info <file>`：按 magic 判断格式并打印条数 / 字节数。
@@ -164,12 +167,14 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.select = args[index];
         } else if (std.mem.startsWith(u8, arg, "--select=")) {
             options.select = arg["--select=".len..];
-        } else if (std.mem.eql(u8, arg, "--filter")) {
+        } else if (std.mem.eql(u8, arg, "--filter") or std.mem.eql(u8, arg, "--filter-ext")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
-            options.filter = args[index];
+            if (std.mem.eql(u8, arg, "--filter")) options.filter = args[index] else options.filter_ext = args[index];
         } else if (std.mem.startsWith(u8, arg, "--filter=")) {
             options.filter = arg["--filter=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--filter-ext=")) {
+            options.filter_ext = arg["--filter-ext=".len..];
         } else if (std.mem.eql(u8, arg, "--convert")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -337,7 +342,7 @@ pub fn printUsage() void {
     std.debug.print(
         "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
             "      otto-lite --version\n" ++
-            "      otto-lite [library.json|library.otto] --filter=<text>\n" ++
+            "      otto-lite [library.json|library.otto] --filter=<text> [--filter-ext=<list>]\n" ++
             "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
             "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
             "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++

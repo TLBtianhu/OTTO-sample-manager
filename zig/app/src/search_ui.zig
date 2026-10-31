@@ -50,6 +50,12 @@ pub const Search = struct {
     /// 文本框。字节由 nanoui 的 `TextBuffer` 自己管，`deinit` 释放。
     buffer: ui.TextBuffer = .{},
     rows: filter.Rows,
+    /// 后缀多选（chip 行）；与文本框的查询是 AND。
+    exts: filter.ExtFilter,
+    /// 当前库的后缀计数（chip 上的数字），库变化时重算。
+    counts: filter.ExtCounts,
+    /// 上次重建映射时 `exts.revision` 的值。
+    applied_ext_rev: u32 = 0,
     /// 上次重建映射时的查询字节（复制一份）：`TextBuffer` 的文字会原地变，
     /// 只记指针会永远"相等"。
     applied: std.ArrayListUnmanaged(u8) = .empty,
@@ -63,12 +69,19 @@ pub const Search = struct {
     focused: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Search {
-        return .{ .allocator = allocator, .rows = filter.Rows.init(allocator) };
+        return .{
+            .allocator = allocator,
+            .rows = filter.Rows.init(allocator),
+            .exts = filter.ExtFilter.init(allocator),
+            .counts = filter.ExtCounts.init(allocator),
+        };
     }
 
     pub fn deinit(self: *Search) void {
         self.buffer.deinit();
         self.rows.deinit();
+        self.exts.deinit();
+        self.counts.deinit();
         self.applied.deinit(self.allocator);
         self.* = undefined;
     }
@@ -84,6 +97,12 @@ pub const Search = struct {
 
     pub fn rowOfSample(self: *const Search, sample_index: usize) ?usize {
         return self.rows.rowOfSample(sample_index);
+    }
+
+    /// 表头/空状态的筛选说明（`png` 或 `png、jpg`）；没有后缀筛选返回 null。
+    pub fn extSummary(self: *const Search, buffer: []u8) ?[]const u8 {
+        if (!self.exts.active()) return null;
+        return self.exts.summary(buffer);
     }
 
     /// 库变了：下一次 `frame` 重新过滤。不能只看样本数——改名不改数量。
@@ -171,7 +190,76 @@ pub const Search = struct {
         }
         bar.end();
         self.focused = result.focused;
+        // chip 行在搜索框下面：数字来自当前库，点击只改 `exts`，行映射由
+        // `frame` 在 draw 之后的那次 rebuild 接住（过滤变化会清选择）。
+        self.drawChips(c);
         return clicked;
+    }
+
+    /// 后缀 chip：`全部 12 · wav 3 · png 4 …`。多选；选中的 chip 用强调色填充，
+    /// 与未选中（surface + 描边）有明确区别。数字是**当前库**里的实际数量。
+    fn drawChips(self: *Search, c: *ui.Context) void {
+        if (self.counts.items.len == 0) return;
+        const bar = ui.div(c).row().wFull().itemsCenter().px(12).pb(6).gap(6);
+        defer bar.end();
+
+        if (chip(c, "全部", self.counts.total, !self.exts.active())) {
+            self.exts.clear();
+            c.changed = true;
+        }
+        for (self.counts.items) |item| {
+            if (!chip(c, item.label, item.count, self.exts.contains(item.label))) continue;
+            self.exts.toggle(item.label) catch |err| {
+                std.debug.print("otto-lite: 后缀筛选切换失败（{s}）\n", .{@errorName(err)});
+                continue;
+            };
+            c.changed = true;
+        }
+    }
+
+    /// 一个 chip。文本是**一整段**（`png 4`），`--nanoui-script=click:png 4`
+    /// 才能按文字点到它，截图里也读得出来数字。
+    fn chip(c: *ui.Context, label: []const u8, count: usize, selected: bool) bool {
+        const it = ui.pressable(c, .{
+            .direction = .row,
+            .height = .{ .px = 20 },
+            .padding = .xy(8, 0),
+            .radius = 10,
+            .align_items = .center,
+            .background = if (selected) c.theme.accent else c.theme.surface,
+            .border = if (selected) null else c.theme.border,
+            .control = true,
+        }, if (selected) c.theme.accent_hover else c.theme.surface_hover);
+        defer ui.end(c);
+        ui.textf(c, .{
+            .size = 11,
+            .weight = if (selected) .semibold else .regular,
+            .color = if (selected) c.theme.accent_text else c.theme.muted,
+        }, "{s} {d}", .{ label, count });
+        return it.clicked;
+    }
+
+    /// 过滤到 0 行时的说明。只在库非空、列表为空时由 `main` 调用；文案把
+    /// 「搜索」和「后缀筛选」都写出来，避免用户面对一片空白。
+    pub fn drawNoMatches(self: *const Search, c: *ui.Context) void {
+        const box = ui.div(c).wFull().grow().column().itemsCenter().justifyCenter().gap(8).px(24);
+        defer box.end();
+
+        ui.icon(c, "magnifyingglass", .{ .size = 28, .color = c.theme.muted });
+        var ext_buffer: [96]u8 = undefined;
+        const exts = self.extSummary(&ext_buffer);
+        const query = self.buffer.text();
+        if (exts) |filtered| {
+            ui.textf(c, .{ .size = 13, .weight = .semibold }, "没有符合条件的素材（当前筛选：{s}）", .{filtered});
+            if (query.len > 0) {
+                ui.textf(c, .{ .size = 12, .color = c.theme.muted }, "搜索“{s}”与后缀筛选同时生效", .{query});
+            } else {
+                ui.text(c, "点「全部」清除筛选", .{ .size = 12, .color = c.theme.muted });
+            }
+            return;
+        }
+        ui.textf(c, .{ .size = 13, .weight = .semibold }, "没有符合条件的素材（搜索：{s}）", .{query});
+        ui.text(c, "按 Esc 清空搜索", .{ .size = 12, .color = c.theme.muted });
     }
 
     fn onRebuild(
@@ -295,17 +383,23 @@ pub const Search = struct {
     /// 重建映射的原因。查询变了要清选择；只是库变了不能顺手清（选择按下标记）。
     const Rebuild = enum { query, library };
 
-    /// 查询/样本数变了就重建映射。返回 null = 第一次建立（不是"变化"）或
-    /// 分配失败（保留上一帧结果），否则说明为什么重建。
+    /// 查询 / 后缀选择 / 样本数变了就重建映射。返回 null = 第一次建立（不是
+    /// "变化"）或分配失败（保留上一帧结果），否则说明为什么重建。
     fn rebuild(self: *Search, samples: []const core.model.Sample) ?Rebuild {
         const needle = self.buffer.text();
         const query_changed = !std.mem.eql(u8, needle, self.applied.items);
+        const ext_changed = self.applied_ext_rev != self.exts.revision;
         const library_changed = self.stale or self.applied_samples != samples.len;
-        if (!query_changed and !library_changed) return null;
+        if (!query_changed and !ext_changed and !library_changed) return null;
+
+        // chip 的数字是当前库的账：库变了（含改名不改数量）就整表重算。
+        if (library_changed) self.counts.rebuild(samples) catch |err| {
+            std.debug.print("otto-lite: 后缀计数失败（{s}），保留上一帧 chip\n", .{@errorName(err)});
+        };
 
         // 先换行映射、再换查询副本：副本失败时下一帧还会重试（多重建一次，
         // 不会留下"查询看起来没变、映射还是旧的"的半状态）。
-        self.rows.rebuild(samples, needle) catch |err| {
+        self.rows.rebuildWithExt(samples, needle, if (self.exts.active()) &self.exts else null) catch |err| {
             std.debug.print("otto-lite: 搜索过滤失败（{s}），保留上一帧结果\n", .{@errorName(err)});
             return null;
         };
@@ -315,16 +409,19 @@ pub const Search = struct {
         };
         @memcpy(self.applied.items, needle);
         self.applied_samples = samples.len;
+        self.applied_ext_rev = self.exts.revision;
         self.stale = false;
 
         const first = !self.built;
         self.built = true;
+        var ext_buffer: [64]u8 = undefined;
+        const exts = self.extSummary(&ext_buffer);
         std.debug.print(
-            "otto-lite: filter=\"{s}\" matched={d}/{d}\n",
-            .{ needle, self.rows.len(), samples.len },
+            "otto-lite: filter=\"{s}\"{s}{s} matched={d}/{d}\n",
+            .{ needle, if (exts != null) " exts=" else "", exts orelse "", self.rows.len(), samples.len },
         );
         if (first) return null;
-        return if (query_changed) .query else .library;
+        return if (query_changed or ext_changed) .query else .library;
     }
 
     /// 库变了但查询没变：选中集合保留；只有光标样本被过滤掉了才回落。

@@ -12,12 +12,9 @@
 //! 列表下方是预览区（`preview_panel.zig`）：本文件不认识任何媒体类型（ROADMAP M1）。
 //!
 //! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
-//! 便携/安装版用 `<数据目录>\library.json`（导入过的库是那里的 `library.otto`）。
-//! 库文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态（`empty_state.zig`）。
-//!
+//! 便携/安装版用 `<数据目录>\library.json`（导入过的库是那里的 `library.otto`）；库文件不存在 = 空库。
 //! 搜索（`search_ui.zig`）：Ctrl+F 聚焦、Esc 清空；输入即过滤（文件名子串、ASCII
-//! 大小写不敏感），过滤变化时清空选择、光标尽量停在原样本。↑↓/Home/End/Enter 在
-//! `search_ui.zig`；拖出与 Ctrl+C 见 `transport.zig`（DoDragDrop 绝不进 `view`）。
+//! 大小写不敏感），过滤变化时清空选择、光标尽量停在原样本；拖出与 Ctrl+C 见 `transport.zig`。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -27,6 +24,7 @@ const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
 const drop_ui = @import("drop_ui.zig");
 const empty_state = @import("empty_state.zig");
+const filter = @import("filter.zig");
 const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
 const list_header = @import("list_header.zig");
@@ -113,8 +111,7 @@ const State = struct {
         ui.column(c, .{ .width = .fill, .height = .fill });
         defer ui.end(c);
 
-        // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧
-        // 就参与过滤。拖拽循环里只按现有状态重画（那几帧不处理输入）。
+        // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧就参与过滤；
         // 「导入文件夹」按钮和搜索框同一行、宽度固定（见 `search_ui.Trailing`）。
         const import_button: search_ui.Trailing = .{
             .label = import_ui.button_label,
@@ -135,10 +132,12 @@ const State = struct {
         var status_buffer: [128]u8 = undefined;
         var update_buffer: [160]u8 = undefined;
         var update_action_buffer: [32]u8 = undefined;
+        var ext_buffer: [128]u8 = undefined;
         const header_action = list_header.draw(c, .{
             .total = s.samples.len,
             .matched = s.search.len(),
             .selected = s.selection.count(),
+            .ext_filter = s.search.extSummary(&ext_buffer),
             .flash_left = s.flash_left,
             .flash_count = s.flash_count,
             .rows_with_image = s.reporter.printed_rows,
@@ -153,14 +152,11 @@ const State = struct {
             if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
             if (header_action.settings_clicked) s.settings.openPanel(c);
         }
-        // 列表容器：在空白处按下再松开 = 清空选择。行是它的后代：点行时
-        // 上一帧的 hot 落在行上，容器的 interact 不会 clicked（见 nanoui
-        // `context_hooks.interact` 的 top/active 规则）。
+        // 列表容器：空白处按下再松开 = 清空选择（行是它的后代，点行时容器不会 clicked）。
         const body = ui.div(c).sizeFull();
         const body_it = body.interaction();
 
-        // 列表只遍历行映射：第 row 行 → 第 index 个样本。选择/预览/拖拽仍然
-        // 只认样本下标，过滤不会造出第二套身份。
+        // 列表只遍历行映射：第 row 行 → 第 index 个样本（选择/预览/拖拽仍只认样本下标）。
         var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44 });
         while (rows.next()) |row| {
             const index = s.search.sampleAt(row) orelse continue;
@@ -168,6 +164,9 @@ const State = struct {
             if (!busy) s.rowInput(c, index, it);
         }
         rows.end();
+
+        // 库非空但过滤到 0 行：给一段明确文案（不是一片空白）。
+        if (!busy and s.samples.len > 0 and s.search.len() == 0) s.search.drawNoMatches(c);
 
         // 空库（首次启动）：列表区域换成空状态 + 居中的「导入文件夹」。
         const empty_clicked = empty_state.draw(c, s.samples.len, s.import.busy());
@@ -186,8 +185,7 @@ const State = struct {
         // 列表到此为止：预览条必须是它的兄弟，不能变成列表的子节点。
         body.end();
 
-        // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由
-        // `tick` 接手，这里只按 Outcome 的五个分支画。
+        // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由 `tick` 接手。
         s.preview.sync(s.previewRow());
         s.preview.draw(c);
 
@@ -200,8 +198,7 @@ const State = struct {
     /// 下标（选择/预览/拖拽用）。返回 pressable 的 Interaction 给 `rowInput`。
     fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core.model.Sample) ui.Interaction {
         const selected = s.selection.isSelected(index);
-        // 光标行：过滤后选择会被清空，但光标还要停在一个样本上（预览也跟着它）。
-        // 选中底色更重；只有光标时给一层很浅的底色 + 强调色行号。
+        // 光标行：过滤后选择会被清空，但光标还要停在一个样本上（预览也跟着它）；选中底色更重。
         const is_cursor = s.selection.cursor == index;
         const style: ui.Style = .{
             .direction = .row,
@@ -213,8 +210,7 @@ const State = struct {
             // 选中底色：主题强调色的低透明度版本；未选中交给 hover 动画。
             .background = if (selected) c.theme.accent.alpha(0.16) else if (is_cursor) c.theme.accent.alpha(0.07) else null,
         };
-        // 选中行悬停时把底色加深而不是换成灰色的 surface_hover——否则鼠标停在
-        // 刚点过的那一行上，选中底色会被 hover 盖掉，看起来像没选中。
+        // 选中行悬停时加深底色而不是换成 surface_hover——否则刚点过的行看起来像没选中。
         const hover_color = if (selected) c.theme.accent.alpha(0.26) else if (is_cursor) c.theme.accent.alpha(0.14) else c.theme.surface_hover;
         const it = ui.pressable(c, style, hover_color);
         defer ui.end(c);
@@ -222,7 +218,10 @@ const State = struct {
         if (row_thumb.draw(c, s.thumbs, sample)) s.rows_with_image += 1;
         // 行号是**过滤结果里的位置**（第 1 行是当前列表的第一行），不是样本下标。
         ui.textf(c, .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
-        ui.text(c, sample.file_name, .{ .size = 13 });
+        // 名字是唯一可截断的：后缀用次要色贴在名字后面，长名字先被省略号吃掉，后缀永远完整。
+        ui.text(c, sample.file_name, .{ .size = 13, .truncate = .ellipsis });
+        const ext = filter.trimExt(sample.file_ext);
+        if (ext.len > 0) ui.textf(c, .{ .size = 11, .color = c.theme.muted }, ".{s}", .{ext});
         ui.textf(c, .{ .size = 11 }, "{d:.2}s", .{sample.duration});
         return it;
     }
