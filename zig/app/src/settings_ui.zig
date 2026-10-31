@@ -1,23 +1,25 @@
-//! 设置面板：置顶 / 更新源 / 两级缓存预算。
+//! 设置面板：置顶 / 窗口不透明度 / 更新源 / 两级缓存预算。
 //!
 //! 分工与 `search_ui.zig` / `preview_panel.zig` 相同：
-//!   * 本文件拥有**面板的临时编辑状态**（三个 `TextBuffer`）与打开/关闭；
+//!   * 本文件拥有**面板的临时编辑状态**（三个 `TextBuffer` + 滑块值）；
 //!   * 值的真相在 `settings_store.Settings`（持久化）与 `Settings` 指向的运行时
 //!     对象（`Thumbs` 的预算、`Update` 的 URL）；
-//!   * "改完立即生效"在关闭时落地：置顶在开关被点的那一帧就调用 Win32，URL 交给
-//!     `Update.setUrl`，L2 / L3 预算交给 `Thumbs.setBudgets`；随后原子写设置文件。
+//!   * "改完立即生效"：置顶在开关被点的那一帧就调用 Win32；不透明度在滑块拖动
+//!     的每一帧调用 `SetLayeredWindowAttributes`；URL 交给 `Update.setUrl`，
+//!     L2 / L3 预算交给 `Thumbs.setBudgets`；随后原子写设置文件。
 //!
 //! ## 布局（380 点时）
 //!
 //! 面板是 `ui.card`，绝对定位覆盖在列表上（不参与列表布局，搜索框宽度不变）。
 //! 底层还有一层半透明遮罩：点遮罩关闭面板，也挡住它下面的列表点击。
-//! 控件从上到下：标题 + 「关闭」、「窗口置顶」开关、更新源、「缩略图内存预算
-//! (MiB)」、「磁盘缓存预算 (MiB)」。
+//! 控件从上到下：标题 + 「关闭」、「窗口置顶」开关、「窗口不透明度」+ 滑块 +
+//! 百分比、更新源、「缩略图内存预算 (MiB)」、「磁盘缓存预算 (MiB)」。
 //!
 //! ## 为什么关闭时才写盘
 //!
 //! 拖滚动条/打字时每个字符都写一次文件既慢又制造无意义的 `.tmp` 替换。值在关闭
-//! 时一次应用、一次原子写；置顶是例外——它必须从点击那一帧起就真的置顶。
+//! 时一次应用、一次原子写；置顶与不透明度是例外——它们必须从点击/拖动那一帧起
+//! 就真的改窗口。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -31,6 +33,12 @@ const panel_width: f32 = 332;
 const panel_x: f32 = 24;
 const panel_y: f32 = 64;
 
+pub const Options = struct {
+    /// 上屏走 D3D11 翻转交换链（`--d3d`）：分层窗口在这个模型下无效，设透明度时
+    /// 打一行警告（不静默，见 `applyOpacity`）。
+    d3d: bool = false,
+};
+
 pub const Panel = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -42,12 +50,23 @@ pub const Panel = struct {
     url_field: ui.TextBuffer = .{},
     l2_field: ui.TextBuffer = .{},
     l3_field: ui.TextBuffer = .{},
+    /// 滑块的当前值（0..100；`ui.slider` 只收浮点）。持久值在 `settings.opacity`
+    /// 的 0..255 上，两者用 `settings_store.alphaFromPercent` 换算。
+    opacity_percent: f32 = 100,
+    /// 上一次真正写进 Win32 的 alpha。用来让日志只在**值变了**时打一行：
+    /// 拖动滑块每帧都会调用 `applyOpacity`，不然日志会被刷屏。
+    applied_alpha: ?u8 = null,
+    /// `--d3d` 下的透明度警告只打一行（拖动时每次改值都警告同样是刷屏）。
+    d3d_warned: bool = false,
+    /// 上屏是否是 D3D 翻转交换链（`--d3d`）。
+    d3d: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         settings: settings_store.Settings,
         path: ?[]const u8,
+        opts: Options,
     ) !Panel {
         const owned_path: ?[]u8 = if (path) |value| try allocator.dupe(u8, value) else null;
         errdefer if (owned_path) |value| allocator.free(value);
@@ -56,6 +75,7 @@ pub const Panel = struct {
             .io = io,
             .settings = settings,
             .path = owned_path,
+            .d3d = opts.d3d,
         };
         panel.syncFields();
         return panel;
@@ -70,11 +90,7 @@ pub const Panel = struct {
         self.* = undefined;
     }
 
-    pub fn alwaysOnTop(self: *const Panel) bool {
-        return self.settings.always_on_top;
-    }
-
-    /// 打开面板：文本框回到**已保存**的值（上一次没关闭的编辑不保留）。
+    /// 打开面板：文本框与滑块回到**已保存**的值（上一次没关闭的编辑不保留）。
     pub fn openPanel(self: *Panel, c: *ui.Context) void {
         self.syncFields();
         self.open = true;
@@ -88,6 +104,15 @@ pub const Panel = struct {
         self.open = false;
         self.applyTopmost(hwnd);
         self.save();
+    }
+
+    /// 启动时应用一次窗口状态：置顶（只在保存了 true 时）+ 不透明度。
+    ///
+    /// 两件事都只碰**已存在**的 HWND：不显示窗口、不激活、不抢焦点
+    /// （`win_window.zig` 的调用位）。
+    pub fn applyWindowState(self: *Panel, hwnd: ?*anyopaque) void {
+        if (self.settings.always_on_top) self.applyTopmost(hwnd);
+        self.applyOpacity(hwnd);
     }
 
     /// 启动时应用一次保存的置顶状态；面板里的开关也走这里。
@@ -104,6 +129,51 @@ pub const Panel = struct {
         std.debug.print(
             "otto-lite: topmost={} WS_EX_TOPMOST={} hwnd=0x{x}\n",
             .{ state, win_window.isTopmost(hwnd), address },
+        );
+    }
+
+    /// 应用保存的不透明度：启动时一次，滑块拖动的每一帧也走这里（热生效）。
+    ///
+    /// `opacity=255` 时窗口不在分层路径上，`getOpacity` 读回 `null`（= 完全不
+    /// 透明，见 `win_window.zig` 的"255 的取舍"）；日志里 `layered=false` 就是
+    /// 这件事的证据。
+    pub fn applyOpacity(self: *Panel, hwnd: ?*anyopaque) void {
+        const alpha = self.settings.opacity;
+        if (self.d3d and alpha != 255 and !self.d3d_warned) {
+            self.d3d_warned = true;
+            // 机器可读的前缀（`opacity-d3d-warning`）给验收脚本 grep：这份脚本是
+            // ASCII-only 的 PowerShell，认不出中文。后面那半句是给人看的。
+            std.debug.print(
+                "otto-lite: opacity-d3d-warning alpha={d}：--d3d（DXGI 翻转模型）" ++
+                    "下层窗口透明度可能无效（SetLayeredWindowAttributes 对翻转交换链" ++
+                    "不起作用）；需要半透明请去掉 --d3d（默认 GDI 上屏）\n",
+                .{alpha},
+            );
+        }
+        win_window.setOpacity(hwnd, alpha) catch |err| {
+            std.debug.print(
+                "otto-lite: opacity={d} 未应用（{s}，无窗口时正常）\n",
+                .{ alpha, @errorName(err) },
+            );
+            return;
+        };
+        // 拖动滑块每帧都会到这里；只有值真的变了才打一行（否则日志被刷屏）。
+        if (self.applied_alpha == alpha) return;
+        self.applied_alpha = alpha;
+        const readback = win_window.getOpacity(hwnd) catch |err| blk: {
+            std.debug.print("otto-lite: opacity 读回失败（{s}）\n", .{@errorName(err)});
+            break :blk null;
+        };
+        const address: usize = if (hwnd) |handle| @intFromPtr(handle) else 0;
+        std.debug.print(
+            "otto-lite: opacity={d} layered={} getOpacity={?d} visible={} hwnd=0x{x}\n",
+            .{
+                alpha,
+                win_window.isLayered(hwnd),
+                readback,
+                win_window.isVisible(hwnd),
+                address,
+            },
         );
     }
 
@@ -138,6 +208,18 @@ pub const Panel = struct {
             self.applyTopmost(hwnd);
         }
 
+        // 不透明度：标签 + 百分比在同一行，滑块占满卡片内宽（380 点面板下
+        // 卡片内宽 300 点，滑块与上面的文本框同宽，不会撑破）。
+        const opacity_row = ui.div(c).row().wFull().itemsCenter().gap(8);
+        ui.text(c, "窗口不透明度", .{ .size = 11, .color = c.theme.muted });
+        ui.spacer(c);
+        ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "{d:.0}%", .{self.opacity_percent});
+        opacity_row.end();
+        // 拖动（按下）期间每帧都在改：不等关闭面板，这就是"热生效"。
+        if (ui.slider(c, &self.opacity_percent, .{ .min = 0, .max = 100, .width = .fill })) {
+            self.setOpacityFromSlider(hwnd);
+        }
+
         ui.text(c, "更新源", .{ .size = 11, .color = c.theme.muted });
         _ = ui.textField(c, &self.url_field, .{
             .placeholder = "空 = 未配置",
@@ -163,7 +245,7 @@ pub const Panel = struct {
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "关闭面板时自动保存；预算立即生效", .{ .size = 10, .color = c.theme.muted });
+        ui.text(c, "关闭面板时自动保存；置顶 / 不透明度 / 预算立即生效", .{ .size = 10, .color = c.theme.muted });
 
         ui.end(c); // card
         host.end();
@@ -184,6 +266,13 @@ pub const Panel = struct {
         var buffer: [16]u8 = undefined;
         self.l2_field.set(std.fmt.bufPrint(&buffer, "{d}", .{self.settings.l2_budget_mib}) catch "64");
         self.l3_field.set(std.fmt.bufPrint(&buffer, "{d}", .{self.settings.l3_budget_mib}) catch "256");
+        self.opacity_percent = settings_store.percentFromAlpha(self.settings.opacity);
+    }
+
+    /// 滑块动了：写进 `settings.opacity`，并立刻改窗口（不等关闭面板）。
+    fn setOpacityFromSlider(self: *Panel, hwnd: ?*anyopaque) void {
+        self.settings.opacity = settings_store.alphaFromPercent(self.opacity_percent);
+        self.applyOpacity(hwnd);
     }
 
     fn apply(self: *Panel, thumbs: *thumbs_mod.Thumbs, update: *update_ui.Update) void {

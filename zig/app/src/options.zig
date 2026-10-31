@@ -56,7 +56,7 @@ pub const Options = struct {
     /// 命令行时生效——显式参数永远优先，和 `--update-url` 覆盖设置里的更新源同理。
     cache_budget_set: bool = false,
     /// `--settings-probe`：`--nanoui-snapshot` 时也建真实 HWND（仍然隐藏、不激活），
-    /// 让无头脚本能断言 `WS_EX_TOPMOST`。普通用户不需要。
+    /// 让无头脚本能断言 `WS_EX_TOPMOST` 与不透明度。普通用户不需要。
     settings_probe: bool = false,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,
