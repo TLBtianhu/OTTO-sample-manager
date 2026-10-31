@@ -1,12 +1,12 @@
 //! 列表表头：`N 个素材 · M 命中 · K 选中`，外加复制提示、缩略图账、"事件丢失"
-//! 警告，以及右上角的「检查更新」入口与它那一行提示。从 `main.zig` 拆出来只为
-//! 守住单文件行数（与 `preview_audio.zig` 同一条理由），视图逻辑本身没有变化。
+//! 警告，以及右上角的「检查更新」入口与它那一行提示/「下载」「安装」按钮。从
+//! `main.zig` 拆出来只为守住单文件行数（与 `preview_audio.zig` 同一条理由）。
 //!
 //! 三个数字都是**当前过滤结果**上的账：M 是命中行数（空查询时 = N），K 是样本
 //! 下标上的选中数。搜索框在它上面，所以截图里能一眼核对"过滤真的生效了"。
 //!
-//! 更新检查的**语义**不在本文件：这里只画入口、画一行状态、把点击报给 `main`。
-//! 网络、线程、判定都在 `update_ui.zig` / `update_check.zig`。
+//! 更新检查/下载的**语义**不在本文件：这里只画入口、画一行状态、把点击报给
+//! `main`。网络、线程、判定、验签都在 `update_ui.zig` / `update_download.zig`。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -30,19 +30,20 @@ pub const Info = struct {
     import_status: ?[]const u8 = null,
     /// true = `import_status` 是错误，用主题的 danger 色，别用强调色。
     import_failed: bool = false,
-    /// 更新状态那一行（「有新版本 0.2.0」/「已是最新 (0.1.1)」/「检查失败：…」）。
-    /// null = 没检查过（默认状态，什么都不显示）。
+    /// 更新状态那一行（「有新版本 0.2.0」/「正在下载… 42%」/「已下载，可安装」/
+    /// 「检查失败：…」/「签名不匹配」）。null = 没检查过（默认状态，什么都不显示）。
     update_status: ?[]const u8 = null,
-    /// true = 状态那一行可点（有新版本时点了打印下载地址）。
-    update_clickable: bool = false,
+    /// 状态行右侧的按钮文字（available = 「下载」，verified = 「安装 0.3.0」）。
+    /// null = 没有按钮。
+    update_action_label: ?[]const u8 = null,
 };
 
 /// 本帧被点到的入口。语义在 `main.zig`：它才有 `update_ui.Update`。
 pub const Action = struct {
     /// 右上角「检查更新」被点了。
     check_clicked: bool = false,
-    /// 更新状态那一行被点了（这一版只打印 URL）。
-    status_clicked: bool = false,
+    /// 更新状态行右侧的「下载」/「安装 x.y.z」被点了。
+    update_clicked: bool = false,
     /// 右上角「设置」被点了。
     settings_clicked: bool = false,
 };
@@ -86,19 +87,20 @@ pub fn draw(c: *ui.Context, info: Info) Action {
     if (check_button.clicked) action.check_clicked = true;
     if (settings_button.clicked) action.settings_clicked = true;
 
-    // 第二行：更新结果。只有检查过（或被点击）才出现，默认什么都不显示。
-    // 文案走 `ui.textf`（c.print 复制进帧 arena）：`update_status` 指向调用方的
-    // 栈缓冲，而 paint 发生在 `view` 返回之后，直接 `ui.text` 会拿到悬垂指针。
+    // 第二行：更新结果 + 该做的事。只有检查过（或被点击）才出现，默认什么都不显示。
+    // 文案走 `ui.textf`（c.print 复制进帧 arena）：`update_status` / 按钮文字指向
+    // 调用方的栈缓冲，而 paint 发生在 `view` 返回之后，直接 `ui.text` 会拿到悬垂指针。
     if (info.update_status) |status| {
-        const color = if (info.update_clickable) c.theme.accent else c.theme.muted;
-        if (info.update_clickable) {
+        const row_status = ui.div(c).row().wFull().h(18).itemsCenter().gap(6);
+        const color = if (info.update_action_label != null) c.theme.accent else c.theme.muted;
+        ui.textf(c, .{ .size = 11, .color = color }, "{s}", .{status});
+        if (info.update_action_label) |label| {
             const it = smallPressable(c);
-            ui.textf(c, .{ .size = 11, .color = color }, "{s}", .{status});
+            ui.textf(c, .{ .size = 10, .color = c.theme.accent }, "{s}", .{label});
             ui.end(c);
-            if (it.clicked) action.status_clicked = true;
-        } else {
-            ui.textf(c, .{ .size = 11, .color = color }, "{s}", .{status});
+            if (it.clicked) action.update_clicked = true;
         }
+        row_status.end();
     }
 
     header.end();

@@ -27,15 +27,23 @@
 //! 句柄按 **LIFO** 关闭（request → connect → session），任何一步失败都由 `defer`
 //! 收尾，不泄漏、也不留半开连接。
 //!
+//! ## 两个出口：整读 `fetch` 与流式 `download`
+//!
+//! `fetch` 把 feed 整段读进内存（默认上限 256 KiB），给 JSON 解析用；
+//! `download` 把安装包**分块**写进调用方打开的 `.part` 文件（块大小 64 KiB），
+//! 上限由调用方给（app 给 64 MiB），不把安装包读进内存。两者共用同一条
+//! WinHTTP 读循环，所以超时、重定向、状态码与上限语义完全一致。
+//!
 //! ## 上限与错误
 //!
-//! `max_bytes`（默认 256 KiB）是硬上限：Content-Length 先查一次，读数时再数一次
-//! ——服务器可以不给长度，也可以撒谎。错误是具名的：
+//! `max_bytes` 是硬上限：Content-Length 先查一次，读数时再数一次——服务器可以
+//! 不给长度，也可以撒谎。错误是具名的：
 //!
 //!   * `BadUrl`      —— 空串、没有 host、端口不是数字、带 userinfo / 未知 scheme；
 //!   * `NetFailure`  —— DNS / 连接 / TLS / 非 2xx / 本地读失败（权限、设备错误）；
 //!   * `TooLarge`    —— 超过 `max_bytes`；
-//!   * `NotFound`    —— HTTP 404 或本地文件不存在。
+//!   * `NotFound`    —— HTTP 404 或本地文件不存在；
+//!   * `WriteFailed` —— 只有 `download`：写目标文件失败（磁盘满 / 权限）。
 //!
 //! 具体数字码放在 `lastFailure()`（Win32 / HRESULT）与 `lastHttpStatus()`（HTTP
 //! 状态码）里，只用于日志与排障，不参与判定。两个都是 **threadlocal**：工作线程
@@ -56,6 +64,21 @@ pub const supported = builtin.os.tag == .windows;
 /// feed 的默认上限：256 KiB。真实 feed 是几 KB，这个数字是"别为坏响应分配内存"。
 pub const default_max_bytes: usize = 256 * 1024;
 
+/// 流式下载的读/写块。栈上缓冲，不随文件变大。
+pub const download_chunk_bytes: usize = 64 * 1024;
+
+/// 下载时可选的进度计数（原子量：工作线程写、UI 线程读）。
+/// `total` 为 0 表示对方没给长度（HTTP 没有 Content-Length），此时只能显示已下载字节。
+pub const Progress = struct {
+    written: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    pub fn reset(self: *Progress) void {
+        self.written.store(0, .monotonic);
+        self.total.store(0, .monotonic);
+    }
+};
+
 /// 每个阶段的超时（毫秒）。四个阶段都给同一个值：一次检查最坏几秒出结果，
 /// 不会因为对方不响应把工作线程挂死。
 pub const timeout_ms: u32 = 5000;
@@ -65,9 +88,6 @@ pub const max_redirects: u32 = 5;
 
 /// WinHTTP 的 UA。服务端日志里能一眼看出这是哪次检查。
 pub const user_agent = "OTTO Lite update check";
-
-/// 读响应时的块大小。栈上缓冲，不随响应变大。
-const read_chunk_bytes: usize = 8 * 1024;
 
 pub const Error = error{
     OutOfMemory,
@@ -79,6 +99,8 @@ pub const Error = error{
     TooLarge,
     /// HTTP 404 / 本地文件不存在。
     NotFound,
+    /// 流式下载写目标文件失败（磁盘满 / 权限 / 目标句柄坏了）。
+    WriteFailed,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,6 +147,77 @@ pub fn fetch(
     }
     const path = localPathFrom(url) orelse return error.BadUrl;
     return fetchFile(allocator, io, path, max_bytes);
+}
+
+/// 把 `url` 的字节**流式**写进已经打开的 `file`，返回写入的字节数。
+///
+/// 和 `fetch` 的区别只有一个：不把整份内容读进内存。`http(s)` 与 `file://`
+/// 走同一条调用入口，`max_bytes` 仍然是硬上限（Content-Length 先查一次，读到
+/// 一半再数一次），超了返回 `TooLarge`；此时目标文件里可能已经有前半截——
+/// 调用方写的是 `.part`，失败时删掉即可。
+///
+/// 本函数不验签、不哈希：字节就是字节。摘要与 Ed25519 在 app 的
+/// `update_check.zig` / `update_download.zig`。
+pub fn download(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+    file: std.Io.File,
+    max_bytes: usize,
+    progress: ?*Progress,
+) Error!u64 {
+    if (url.len == 0) return error.BadUrl;
+    last_failure = 0;
+    last_http_status = 0;
+    if (progress) |counter| counter.reset();
+
+    if (std.ascii.startsWithIgnoreCase(url, "http://")) {
+        var sink = FileSink{ .io = io, .file = file };
+        return httpGet(allocator, url["http://".len..], false, max_bytes, &sink, progress);
+    }
+    if (std.ascii.startsWithIgnoreCase(url, "https://")) {
+        var sink = FileSink{ .io = io, .file = file };
+        return httpGet(allocator, url["https://".len..], true, max_bytes, &sink, progress);
+    }
+    const path = localPathFrom(url) orelse return error.BadUrl;
+    return downloadFile(io, path, file, max_bytes, progress);
+}
+
+/// 本地文件 → 目标文件的流式复制。先看 stat 提前止损，再边读边数。
+fn downloadFile(
+    io: std.Io,
+    path: []const u8,
+    file: std.Io.File,
+    max_bytes: usize,
+    progress: ?*Progress,
+) Error!u64 {
+    if (path.len == 0) return error.BadUrl;
+    const source = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.IsDir, error.NotDir => return error.NotFound,
+        error.NameTooLong, error.BadPathName => return error.BadUrl,
+        else => return error.NetFailure,
+    };
+    defer source.close(io);
+
+    const stat = source.stat(io) catch return error.NetFailure;
+    if (stat.size > max_bytes) return error.TooLarge;
+    if (progress) |counter| counter.total.store(stat.size, .monotonic);
+
+    var buffer: [download_chunk_bytes]u8 = undefined;
+    var total: u64 = 0;
+    while (true) {
+        const read = source.readStreaming(io, &.{buffer[0..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return error.NetFailure,
+        };
+        if (read == 0) break;
+        const next = std.math.add(u64, total, @as(u64, @intCast(read))) catch return error.TooLarge;
+        if (next > max_bytes) return error.TooLarge;
+        file.writeStreamingAll(io, buffer[0..read]) catch return error.WriteFailed;
+        total = next;
+        if (progress) |counter| counter.written.store(total, .monotonic);
+    }
+    return total;
 }
 
 /// `file://` 去掉 scheme 与开头的斜杠；普通路径原样返回；别的 scheme 返回 null。
@@ -340,12 +433,52 @@ fn wideZ(allocator: std.mem.Allocator, text: []const u8) Error![:0]WCHAR {
     };
 }
 
+/// 内存 sink：`fetch` 用（feed 很小，整读是对的）。
+const MemorySink = struct {
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+
+    fn write(self: *MemorySink, bytes: []const u8) Error!void {
+        self.out.appendSlice(self.allocator, bytes) catch return error.OutOfMemory;
+    }
+};
+
+/// 文件 sink：`download` 用。写失败一律 `WriteFailed`（磁盘满 / 权限 / 句柄坏）。
+const FileSink = struct {
+    io: std.Io,
+    file: std.Io.File,
+
+    fn write(self: *FileSink, bytes: []const u8) Error!void {
+        self.file.writeStreamingAll(self.io, bytes) catch return error.WriteFailed;
+    }
+};
+
 fn fetchHttp(
     allocator: std.mem.Allocator,
     rest: []const u8,
     secure: bool,
     max_bytes: usize,
 ) Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var sink = MemorySink{ .allocator = allocator, .out = &out };
+    _ = try httpGet(allocator, rest, secure, max_bytes, &sink, null);
+    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+}
+
+/// HTTP GET 的公共实现：`fetch` 与 `download` 只在 sink 上不同（内存 vs 文件），
+/// 连接、重定向、状态码、上限与读循环只有这一份。
+///
+/// `sink` 是带 `write([]const u8) Error!void` 的指针；Zig 的 anytype 让两条路径
+/// 共享同一段读循环，而不会把文件句柄的概念塞进 `fetch`。
+fn httpGet(
+    allocator: std.mem.Allocator,
+    rest: []const u8,
+    secure: bool,
+    max_bytes: usize,
+    sink: anytype,
+    progress: ?*Progress,
+) Error!u64 {
     if (!supported) return error.NetFailure;
     const target = parseTarget(rest, secure) orelse return error.BadUrl;
 
@@ -412,19 +545,22 @@ fn fetchHttp(
         null,
     ) != 0) {
         if (@as(usize, declared) > max_bytes) return error.TooLarge;
+        if (progress) |counter| counter.total.store(declared, .monotonic);
     }
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var buffer: [read_chunk_bytes]u8 = undefined;
+    var buffer: [download_chunk_bytes]u8 = undefined;
+    var total: u64 = 0;
     while (true) {
         var read: DWORD = 0;
         if (WinHttpReadData(request, &buffer, buffer.len, &read) == 0) return netFailure();
         if (read == 0) break;
-        if (out.items.len + @as(usize, read) > max_bytes) return error.TooLarge;
-        out.appendSlice(allocator, buffer[0..read]) catch return error.OutOfMemory;
+        const next = std.math.add(u64, total, @as(u64, @intCast(read))) catch return error.TooLarge;
+        if (next > max_bytes) return error.TooLarge;
+        try sink.write(buffer[0..read]);
+        total = next;
+        if (progress) |counter| counter.written.store(total, .monotonic);
     }
-    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+    return total;
 }
 
 /// WinHTTP 会话。AUTOMATIC_PROXY 会读系统代理设置（Win8.1+）；老系统上没有这个

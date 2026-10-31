@@ -86,6 +86,13 @@ pub const Options = struct {
     d3d: bool = false,
     /// `--check-update <url>`：无窗口检查一次 feed，打印结果并退出 0/1。
     check_update: ?[]const u8 = null,
+    /// `--update-download <url>`：无窗口下载 + 验签一次，打印摘要并退出 0/1。
+    /// **不执行安装包**（这一条命令永远不执行）。
+    update_download: ?[]const u8 = null,
+    /// `--no-exec`：验收开关。表头「安装」只打印路径、不 `ShellExecuteW`。
+    no_exec: bool = false,
+    /// `--update-current <x.y.z>`：验收/截图探针，只覆盖版本比较，不覆盖下载/验签。
+    update_current: ?[]const u8 = null,
     /// `--update-url <url>`：表头「检查更新」用的 feed 地址。
     /// 默认 null = 没有更新源，点击只提示"未配置"，**不联网**。
     update_url: ?[]const u8 = null,
@@ -258,6 +265,20 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.check_update = args[index];
         } else if (std.mem.startsWith(u8, arg, "--check-update=")) {
             options.check_update = arg["--check-update=".len..];
+        } else if (std.mem.eql(u8, arg, "--update-download")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.update_download = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--update-download=")) {
+            options.update_download = arg["--update-download=".len..];
+        } else if (std.mem.eql(u8, arg, "--no-exec")) {
+            options.no_exec = true;
+        } else if (std.mem.eql(u8, arg, "--update-current")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.update_current = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--update-current=")) {
+            options.update_current = arg["--update-current=".len..];
         } else if (std.mem.eql(u8, arg, "--update-url")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -304,7 +325,8 @@ pub fn printUsage() void {
             "      otto-lite --library-info <file>\n" ++
             "      otto-lite --import <folder> [--library <file>] --save <out.otto>\n" ++
             "      otto-lite --import-into <folder> [--save <file>]\n" ++
-            "      otto-lite --check-update <url> | <library> --update-url <url>\n",
+            "      otto-lite --check-update <url> | <library> --update-url <url>\n" ++
+            "      otto-lite --update-download <url>   （下载 + 验签，不执行安装包）\n",
         .{},
     );
 }
@@ -541,4 +563,29 @@ test "更新检查：--check-update / --update-url 两种写法都收，默认�
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--check-update" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--update-url" }));
+}
+
+test "下载：--update-download / --no-exec / --update-current 两种写法都收" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(plain.update_download == null);
+    try testing.expect(!plain.no_exec);
+    try testing.expect(plain.update_current == null);
+
+    const spaced = try parse(&[_][]const u8{
+        "otto-lite", "--update-download", "file:///C:/feed/latest.json", "--no-exec", "--update-current", "0.2.9",
+    });
+    try testing.expectEqualStrings("file:///C:/feed/latest.json", spaced.update_download.?);
+    try testing.expect(spaced.no_exec);
+    try testing.expectEqualStrings("0.2.9", spaced.update_current.?);
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{
+        "otto-lite", "lib.json", "--update-download=C:/feed/latest.json", "--update-current=0.3.0",
+    });
+    try testing.expectEqualStrings("C:/feed/latest.json", joined.update_download.?);
+    try testing.expectEqualStrings("0.3.0", joined.update_current.?);
+    try testing.expectEqualStrings("lib.json", joined.library_path.?);
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--update-download" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--update-current" }));
 }

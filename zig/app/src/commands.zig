@@ -23,7 +23,8 @@ const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
 const thumb_bench = @import("thumb_bench.zig");
 const transport_mod = @import("transport.zig");
-const update_ui = @import("update_ui.zig");
+const update_cli = @import("update_cli.zig");
+const update_download = @import("update_download.zig");
 const version_mod = @import("version.zig");
 
 pub fn run(
@@ -41,9 +42,13 @@ pub fn run(
         return 0;
     }
 
+    // 更新下载（M5 最后一段）：无窗口取 feed → 下载 → 验签 → 落盘，打印摘要。
+    // **永远不执行安装包**；「安装」只在 UI 里，且验收可用 `--no-exec` 跳过。
+    if (options.update_download) |url| return try update_download.run(init, allocator, url);
+
     // 更新检查（M5）：无窗口取一次 feed、打印结论、退出 0/1。默认不联网——
     // 只有用户显式敲出这条命令（或在表头点击）才会发请求。
-    if (options.check_update) |url| return try update_ui.runCheck(init, allocator, url);
+    if (options.check_update) |url| return try update_cli.runCheck(init, allocator, url, options.update_current);
 
     // 选择/拖拽快照/参数校验自检：不开窗，也不碰剪贴板。
     if (options.demo_transport) return try demo_transport.run(init, allocator);

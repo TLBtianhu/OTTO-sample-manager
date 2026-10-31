@@ -137,7 +137,8 @@ const State = struct {
         }
 
         var status_buffer: [128]u8 = undefined;
-        var update_buffer: [96]u8 = undefined;
+        var update_buffer: [160]u8 = undefined;
+        var update_action_buffer: [32]u8 = undefined;
         const header_action = list_header.draw(c, .{
             .total = s.samples.len,
             .matched = s.search.len(),
@@ -149,14 +150,13 @@ const State = struct {
             .import_status = s.import.status(&status_buffer),
             .import_failed = s.import.phase == .failed,
             .update_status = s.update.status(&update_buffer),
-            .update_clickable = s.update.clickable(),
+            .update_action_label = s.update.actionLabel(&update_action_buffer),
         });
         if (!busy) {
             if (header_action.check_clicked) s.update.begin();
-            if (header_action.status_clicked) s.update.printUrl();
+            if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
             if (header_action.settings_clicked) s.settings.openPanel(c);
         }
-
         // 列表容器：在空白处按下再松开 = 清空选择。行是它的后代：点行时
         // 上一帧的 hot 落在行上，容器的 interact 不会 clicked（见 nanoui
         // `context_hooks.interact` 的 top/active 规则）。
@@ -553,7 +553,7 @@ pub fn main(init: std.process.Init) !void {
         .preview = panel,
         .search = search_ui.Search.init(init.gpa),
         .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
-        .update = try update_ui.Update.init(init.gpa, init.io, options.update_url orelse settings.update_url),
+        .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse settings.update_url, options.no_exec, options.update_current),
         .settings = try settings_ui.Panel.init(init.gpa, init.io, settings, settings_path),
         .transport = transport_mod.Transport.init(init.gpa),
     };

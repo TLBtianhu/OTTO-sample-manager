@@ -393,14 +393,17 @@ line under the header:
 
 | state | header line |
 | --- | --- |
-| feed is newer | `有新版本 0.2.0` — accent, clickable; this slice only prints the URL |
+| feed is newer | `有新版本 0.2.0` + 「下载」 button |
+| downloading | `正在下载… 42%（688/1590 KiB）` or `正在下载… N 字节` when the server sends no length |
+| downloaded + verified | `已下载，可安装` + 「安装 0.3.0」 button |
 | same version | `已是最新 (0.1.1)` |
 | feed is older | `本地版本更新 (0.1.0)` — the local build is newer, so no downgrade is offered |
-| any failure | `检查失败：NetFailure` / `检查失败：InvalidJson` / … (named, never a dialog) |
+| any check failure | `检查失败：NetFailure` / `检查失败：InvalidJson` / … |
+| any download failure | `签名不匹配` / `大小不符…` / `下载地址不存在` / … (named, never a dialog) |
 
 **Nothing is fetched unless the user clicks.** There is no startup check, no timer and
-no retry, and the feed URL is empty by default (`--update-url`; the settings panel comes
-in a later slice). "A freshly unpacked OTTO has never made a network request" is a
+no retry, and the feed URL is empty by default (`--update-url` or the settings panel).
+"A freshly unpacked OTTO has never made a network request" is a
 property of the code path, not a promise to remember: `Update.init` only stores the URL,
 `tick` only polls a thread that may not exist, and `begin()` has exactly one caller —
 the click in `main.zig`'s view.
@@ -444,25 +447,64 @@ ship. `size` is the installer's byte count (to be checked at download time) and
 `ports/feed.zig` does the transfer: `http(s)` through WinHTTP (`WinHttpOpen` →
 `WinHttpConnect` → `WinHttpOpenRequest` → `WinHttpSendRequest` → `WinHttpReceiveResponse`
 → `WinHttpReadData`), 5 s per phase, redirects followed with
-`WINHTTP_OPTION_REDIRECT_POLICY = ALWAYS` and at most 5 hops, 256 KiB body limit and
-`TooLarge` / `NotFound` / `NetFailure` / `BadUrl` as the only errors. `file://` and
-plain paths go through the same entry point for offline tests.
+`WINHTTP_OPTION_REDIRECT_POLICY = ALWAYS` and at most 5 hops. It has two exits:
+`fetch` reads a whole feed into memory (256 KiB hard limit) and `download` streams
+64 KiB chunks into a caller-owned `.part` file (64 MiB hard limit), with the same
+`TooLarge` / `NotFound` / `NetFailure` / `BadUrl` names (plus `WriteFailed` for the
+file sink). `file://` and plain paths go through both for offline tests.
 
-### What "signature" verifies in this slice
+### Signature: envelope at check time, whole file after download
 
-There is no installer at check time, so a check verifies the **envelope only**: the
-two base64 layers, the 74-byte structure, the algorithm (`ED` = BLAKE2b-512 then
-Ed25519, `Ed` = plain), and that the **key id matches the built-in public key**
+A check has no installer, so it verifies the **envelope only**: the two base64
+layers, the 74-byte structure, the algorithm (`ED` = BLAKE2b-512 then Ed25519,
+`Ed` = plain), and that the **key id matches the built-in public key**
 (`zig/keys/otto-lite.key.pub`, read at configure time into
 `build_options.update_public_key` — one source, no copy). A key-id mismatch fails the
 check instead of showing "new version".
 
-`verifySignatureFile` (true Ed25519 verification over BLAKE2b-512 of the whole file)
-is implemented and pinned by a test against the real `otto-lite-0.1.1-setup.exe` +
-`.sig`, but nothing calls it yet: it needs the downloaded installer, which is the next
-slice. So "check passed" means *the feed claims a newer version and its signature was
-made by our key id* — **not** "the installer is trustworthy". Downloading and
-replacing the running app is deliberately out of scope here.
+Downloading is the next step (`--update-download <feed>` or the header button):
+
+1. fetch the feed again and parse it; reject a declared `size` over 64 MiB;
+2. check the envelope before spending bandwidth;
+3. stream the installer into `<updates>\otto-lite-<version>-setup.exe.part`
+   (`feed.download`, 64 KiB chunks, limit 64 MiB, `TooLarge` past that);
+4. `File.sync`, then read the `.part` back in 64 KiB chunks and feed both
+   BLAKE2b-512 (for minisign) and SHA-256 (for the report);
+5. `verifyPrehashedSignature(public_key, feed.signature, digest)` — the first real
+   call to the minisign verifier, over the whole file without loading it into RAM;
+6. compare the byte count to `feed.platform.size` (`SizeMismatch` otherwise);
+7. only then rename `.part` to the final name. Any failure deletes the `.part`;
+   a tampered package never appears under an installable name.
+
+After success the header reads `已下载，可安装` and offers `安装 0.3.0`. Clicking it
+calls `ShellExecuteW("open", path)` and **the app exits** so NSIS can replace the
+running exe. There is no `/S` silent install and no self-replacement. `--no-exec`
+(acceptance only) prints the path and asserts it exists, but never launches it.
+
+Boundaries of this slice: no Authenticode (we have no code-signing certificate; the
+minisign signature is the trust root), no incremental update, no resume/range
+requests, and only the minisign `ED` variant is streamed (`Ed` needs the whole
+message in memory; our artifacts are all `ED`).
+
+A tampered signature, a truncated file, a size mismatch and a `.part` left by an
+earlier crash are pinned by `update_download_test.zig` against the real
+`otto-lite-0.3.0-setup.exe` + `.sig` (the test skips when `dist/` is absent).
+
+```powershell
+# headless: download + verify, no window, never executes the installer
+zig-out/bin/otto-lite.exe --update-download file:///C:/feed/latest.json
+#   downloaded bytes=1629043 sha256=… verify=ok path=…\updates\otto-lite-0.3.0-setup.exe
+
+# UI snapshot: check -> download -> verified -> (no-exec) install click
+zig-out/bin/otto-lite.exe fixtures/library.json --update-url=file:///C:/feed/latest.json ^
+  --update-current=0.2.9 --no-exec ^
+  --nanoui-script="click:检查更新;live:1;click:下载;live:2;click:安装 0.3.0" ^
+  --nanoui-snapshot=update-verified.png
+```
+
+`--update-current` is an acceptance probe (like `--select` / `--settings-probe`):
+it overrides only the local version used for `decide`, so a historical fixture can
+drive the real `available → downloading → verified` path on a newer build.
 
 ## Packaging
 

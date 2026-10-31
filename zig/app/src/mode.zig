@@ -44,6 +44,9 @@ pub const dev_library_path = "fixtures/library.json";
 /// 数据目录里的库文件名。
 pub const library_file_name = "library.json";
 
+/// 下载好的安装包放在 `<数据目录>\updates\`（dev 形态是 `<exe 目录>\updates\`）。
+pub const updates_dir_name = "updates";
+
 // ---------------------------------------------------------------------------
 // 纯函数：判定与路径
 // ---------------------------------------------------------------------------
@@ -89,6 +92,43 @@ pub fn dataDirFor(
             return try std.fs.path.join(allocator, &.{ base, installed_dir_name });
         },
     }
+}
+
+/// 纯路径：形态 → 下载目录。
+///
+/// dev 不写用户目录，所以安装包放在 **exe 旁边**的 `updates\`（与
+/// `settings_store` 的 dev 文件同一处）；portable / installed 放在数据目录下。
+/// 任务书要求的就是这两条，没有第三种猜测。
+pub fn updatesDirFor(
+    allocator: std.mem.Allocator,
+    mode: Mode,
+    exe_path: []const u8,
+    appdata: ?[]const u8,
+) !?[]u8 {
+    if (mode == .dev) {
+        const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
+        return try std.fs.path.join(allocator, &.{ exe_dir, updates_dir_name });
+    }
+    const data_dir = dataDirFor(allocator, mode, exe_path, appdata) catch |err| switch (err) {
+        // 下载目录拿不到和库路径拿不到是两回事：这里返回 null，由调用方报
+        // `UpdatesDirUnavailable`；OOM 仍然是错误。
+        error.AppDataDirUnavailable => return null,
+        else => return err,
+    };
+    const resolved = data_dir orelse return null;
+    defer allocator.free(resolved);
+    return try std.fs.path.join(allocator, &.{ resolved, updates_dir_name });
+}
+
+/// 本进程的下载目录：和 `defaultLibraryPath` 一样从进程自身的 exe 路径判定形态。
+/// installed 拿不到 `%APPDATA%` 时返回 null——由调用方报具名错误，不猜路径。
+pub fn updatesDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+    const exe_path = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe_path);
+    const mode = try detect(allocator, io, exe_path);
+    const appdata = try appData(allocator);
+    defer if (appdata) |value| allocator.free(value);
+    return updatesDirFor(allocator, mode, exe_path, appdata);
 }
 
 /// 纯路径：形态 → 默认库文件。
@@ -264,6 +304,38 @@ test "数据目录：dev 不写用户目录，portable 在 exe 旁边，installe
     const installed = (try dataDirFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", "C:\\Users\\me\\AppData\\Roaming")).?;
     defer testing.allocator.free(installed);
     try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO", installed);
+}
+
+test "下载目录：dev 在 exe 旁边，portable / installed 在数据目录下" {
+    const dev = (try updatesDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", null)).?;
+    defer testing.allocator.free(dev);
+    try testing.expectEqualStrings("C:\\src\\zig-out\\bin\\updates", dev);
+
+    const portable = (try updatesDirFor(
+        testing.allocator,
+        .portable,
+        "D:\\tools\\otto\\otto-lite.exe",
+        null,
+    )).?;
+    defer testing.allocator.free(portable);
+    try testing.expectEqualStrings("D:\\tools\\otto\\data\\updates", portable);
+
+    const installed = (try updatesDirFor(
+        testing.allocator,
+        .installed,
+        "C:\\Program Files\\OTTO Lite\\otto-lite.exe",
+        "C:\\Users\\me\\AppData\\Roaming",
+    )).?;
+    defer testing.allocator.free(installed);
+    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\updates", installed);
+
+    // installed 拿不到 %APPDATA%：null，不猜路径。
+    try testing.expect((try updatesDirFor(
+        testing.allocator,
+        .installed,
+        "C:\\Program Files\\OTTO Lite\\otto-lite.exe",
+        null,
+    )) == null);
 }
 
 test "installed 拿不到 %APPDATA% 是显式错误，不落到当前目录" {

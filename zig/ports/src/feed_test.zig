@@ -142,6 +142,74 @@ test "连不上：NetFailure，且数字码留在 lastFailure（只碰本机回�
     try std.testing.expectEqual(@as(u32, 0), feed.lastHttpStatus());
 }
 
+test "流式下载：本地文件 → 目标文件；进度计数与文件内容一致" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+
+    const body = "installer bytes, not JSON";
+    const path = try fixture.write("setup.exe", body);
+    defer allocator.free(path);
+    const url = try fileUrl(path);
+    defer allocator.free(url);
+
+    const out = try fixture.tmp.dir.createFile(io, "downloaded.exe", .{ .truncate = true });
+    var progress: feed.Progress = .{};
+    const written = try feed.download(allocator, io, url, out, feed.download_chunk_bytes, &progress);
+    out.close(io);
+
+    try std.testing.expectEqual(@as(u64, body.len), written);
+    try std.testing.expectEqual(@as(u64, body.len), progress.total.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, body.len), progress.written.load(.monotonic));
+
+    const copied = try fixture.tmp.dir.readFileAlloc(
+        io,
+        "downloaded.exe",
+        allocator,
+        .limited(1024),
+    );
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings(body, copied);
+}
+
+test "流式下载：上限是硬的；等于上限可以，多一个字节 TooLarge" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+
+    const body = "0123456789";
+    const path = try fixture.write("setup.exe", body);
+    defer allocator.free(path);
+
+    const exact = try fixture.tmp.dir.createFile(io, "exact.exe", .{ .truncate = true });
+    _ = try feed.download(allocator, io, path, exact, body.len, null);
+    exact.close(io);
+
+    const too_small = try fixture.tmp.dir.createFile(io, "too-small.exe", .{ .truncate = true });
+    defer too_small.close(io);
+    try std.testing.expectError(
+        error.TooLarge,
+        feed.download(allocator, io, path, too_small, body.len - 1, null),
+    );
+}
+
+test "流式下载：缺失文件 NotFound；坏 URL BadUrl；回环拒绝 NetFailure" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+
+    const out = try fixture.tmp.dir.createFile(io, "out.bin", .{ .truncate = true });
+    defer out.close(io);
+
+    const missing = try std.fs.path.join(allocator, &.{ fixture.rootPath(), "no-such.exe" });
+    defer allocator.free(missing);
+    try std.testing.expectError(error.NotFound, feed.download(allocator, io, missing, out, 1024, null));
+    try std.testing.expectError(error.BadUrl, feed.download(allocator, io, "ftp://example.com/x.exe", out, 1024, null));
+
+    try std.testing.expectError(
+        error.NetFailure,
+        feed.download(allocator, io, "http://127.0.0.1:9/x.exe", out, 1024, null),
+    );
+    try std.testing.expect(feed.lastFailure() != 0);
+}
+
 test "解析：authority / 端口 / 路径 / 片段都不进请求" {
     const plain = feed.parseTarget("example.com/a/b.json?x=1#frag", true).?;
     try std.testing.expectEqualStrings("example.com", plain.host);
