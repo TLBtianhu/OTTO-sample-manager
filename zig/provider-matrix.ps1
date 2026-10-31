@@ -1,5 +1,5 @@
 # One row per sample: which preview provider answers, in two rounds (default and
-# `--no-shell-preview`), plus the exit code. This is the gate for the 0.9.0
+# `--no-shell-preview`), plus the exit code. This is the gate for the
 # "every format is self-sufficient" registry (zig/app/src/providers/root.zig).
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\provider-matrix.ps1
@@ -26,23 +26,25 @@
 #      provider=none / outcome=none reason=unsupported. "No preview" must stay
 #      visible instead of being swallowed by a fallback.
 #
-# Expected table (0.9.0):
+# Expected table (0.16.0 + legacy):
 #
-#   素材             默认        no-shell
-#   img00.png        image-wic   image-wic      (core row: PNG never needs Shell)
-#   img00.bmp        image-wic   image-wic
-#   viper.mp3        native-audio native-audio  (vendored zig-audio MP3, pure Zig)
-#   rabbit320.mp4    mf-video    mf-video
-#   tone_440.wav     wasapi-pcm  wasapi-pcm
-#   tone_660.flac    native-audio native-audio  (vendored zig-audio, pure Zig)
-#   mystery.xyz      none        none
+#   素材               默认          no-shell
+#   img00.png          image-wic     image-wic      (core row: PNG never needs Shell)
+#   img00.bmp          image-wic     image-wic
+#   viper.mp3          native-audio  native-audio   (vendored zig-audio MP3, pure Zig)
+#   rabbit320.mp4      mf-video      mf-video
+#   tone_440.wav       wasapi-pcm    wasapi-pcm
+#   tone_660.flac      native-audio  native-audio   (vendored zig-audio, pure Zig)
+#   legacy-adpcm.wav   wasapi-pcm    wasapi-pcm     (MS ADPCM WAV, zig-audio v0.8)
+#   legacy.aiff        native-audio  native-audio   (AIFF PCM16, zig-audio v0.8)
+#   mystery.xyz        none          none
 #
-# The two audio rows need an audio endpoint: `wasapi-pcm` (WAV) and
-# `native-audio` (FLAC / MP3) initialise the shared-mode device inside `open`,
-# and a box with no endpoint makes them decline (then shell-thumbnail may answer,
-# or nothing). bench.ps1 calls that SKIP; here it is a FAIL by design -- the point
-# of the gate is that audio preview works on this machine, not that it would work
-# on one where it cannot.
+# The audio rows need an audio endpoint: `wasapi-pcm` (WAV/ADPCM) and
+# `native-audio` (FLAC / MP3 / AIFF) initialise the shared-mode device inside
+# `open`, and a box with no endpoint makes them decline (then shell-thumbnail may
+# answer, or nothing). bench.ps1 calls that SKIP; here it is a FAIL by design -- the
+# point of the gate is that audio preview works on this machine, not that it would
+# work on one where it cannot.
 #
 # open_ms is printed for every round but has **no threshold**: a cold decoder or a
 # busy audio endpoint legitimately varies by hundreds of ms (viper.mp3 through
@@ -51,7 +53,7 @@
 # regression shows up as a visible jump in the table instead of hiding behind a
 # boolean.
 #
-# Why this exists next to the 270 app tests: those tests prove each provider works
+# Why this exists next to the app tests: those tests prove each provider works
 # in isolation with fixtures; this script proves the *registry* still answers with
 # the right provider for a real file on disk, in a real process, with the Shell
 # fallback removed. A provider that starts declining, a Shell thumbnail that
@@ -101,6 +103,10 @@ $script:cases = @(
   [pscustomobject]@{ Name = 'rabbit320.mp4'; Default = 'mf-video';   NoShell = 'mf-video';   Reason = '' },
   [pscustomobject]@{ Name = 'tone_440.wav';  Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },
   [pscustomobject]@{ Name = 'tone_660.flac'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
+  # Legacy formats decoded by zig-audio v0.8: MS ADPCM WAV stays with the WAV
+  # provider; AIFF is claimed by native-audio.
+  [pscustomobject]@{ Name = 'legacy-adpcm.wav'; Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },
+  [pscustomobject]@{ Name = 'legacy.aiff';   Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
   [pscustomobject]@{ Name = 'mystery.xyz';   Default = 'none';       NoShell = 'none';       Reason = 'unsupported' }
 )
 

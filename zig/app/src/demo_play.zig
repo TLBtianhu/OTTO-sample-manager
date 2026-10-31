@@ -17,10 +17,11 @@
 //! 5 秒的长文件不等自然结束，只确认位置从新位置继续前进（见
 //! `long_file_remaining_ms`）——真实播放 40 秒的 MP3 不该拖住验收脚本。
 //!
-//! 解码按扩展名分流，但**装配与会话类型只有一种**：
-//!   * `.wav` → `providers/audio.zig`（自写 RIFF/WAVE 解析）；
-//!   * `.flac` / `.mp3` → `providers/native_audio.zig`（vendor 的 zig-audio，
-//!     纯 Zig 解码；MP3 在 v0.7 起走这条，不再依赖 MF）；
+//! 解码按**注册表同样的顺序**分流，但**装配与会话类型只有一种**：
+//!   * `.wav` → `providers/audio.zig`（wasapi-pcm：zig-audio 解码 + WASAPI）；
+//!   * `.flac` / `.mp3` / `.aiff` / `.aif` → `providers/native_audio.zig`
+//!     （vendor 的 zig-audio，纯 Zig 解码；`.wav` 也在该 provider 的声明里，
+//!     但这里先问 wasapi-pcm，与预览表顺序一致）；
 //!   * `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media Foundation，
 //!     16-bit PCM）；
 //! 三条路都落到 `audio/session.zig` 的 `build`，所以播放/seek/停止的断言是同一套
@@ -59,15 +60,29 @@ pub fn run(
 ) !u8 {
     std.debug.print("play-test: path={s}\n", .{path});
 
-    // native-audio 先问：`.flac` / `.mp3` 都归纯 Zig 解码器，能用自家的就不用 MF。
-    // 顺序与 `providers/root.zig` 的注册表一致，预览与 --play-test 不会分流到两边。
-    if (native_audio.supportsExtension(core.model.fileExtFromPath(path))) {
+    // 顺序与 `providers/root.zig` 的注册表一致：wasapi-pcm 先问 `.wav`，
+    // 然后纯 Zig 的 native-audio（FLAC/MP3/AIFF/.wav 兜底），最后 MF。
+    const ext = core.model.fileExtFromPath(path);
+    if (audio_provider.supportsExtension(ext)) {
+        return runWav(init, allocator, path, seek_at_ms);
+    }
+    if (native_audio.supportsExtension(ext)) {
         return runNative(init, allocator, path, seek_at_ms);
     }
-    if (mf_audio.supportsExtension(core.model.fileExtFromPath(path))) {
+    if (mf_audio.supportsExtension(ext)) {
         return runMf(init, allocator, path, seek_at_ms);
     }
 
+    std.debug.print("play-test: FAIL 没有音频 provider 接手（{s}）\n", .{ext});
+    return 1;
+}
+
+fn runWav(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    seek_at_ms: ?u64,
+) !u8 {
     var decoded = audio_provider.load(allocator, path) catch |err| {
         std.debug.print(
             "play-test: FAIL 读取/解码失败（{s}）\n",
@@ -77,9 +92,9 @@ pub fn run(
     };
     defer decoded.deinit(allocator);
 
-    printFormat(@tagName(decoded.format), decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
+    printFormat("wav", decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
 
-    var session = audio_provider.sessionFromWav(allocator, &decoded) catch |err| return sessionFailed(err);
+    var session = audio_provider.sessionFromDecoded(allocator, &decoded) catch |err| return sessionFailed(err);
     defer session.deinit(allocator);
     return playSession(init, &session, seek_at_ms);
 }
@@ -137,7 +152,7 @@ fn runNative(
                 break :blk 1;
             },
             else => blk: {
-                std.debug.print("play-test: FAIL FLAC/MP3 解码失败（{s}）\n", .{@errorName(err)});
+                std.debug.print("play-test: FAIL 纯 Zig 音频解码失败（{s}）\n", .{@errorName(err)});
                 break :blk 1;
             },
         };
@@ -145,7 +160,14 @@ fn runNative(
     defer decoded.deinit(allocator);
 
     const ext = core.model.fileExtFromPath(path);
-    const label: []const u8 = if (std.ascii.eqlIgnoreCase(ext, ".mp3")) "mp3" else "flac";
+    const label: []const u8 = if (std.ascii.eqlIgnoreCase(ext, ".mp3"))
+        "mp3"
+    else if (std.ascii.eqlIgnoreCase(ext, ".aiff") or std.ascii.eqlIgnoreCase(ext, ".aif"))
+        "aiff"
+    else if (std.ascii.eqlIgnoreCase(ext, ".wav"))
+        "wav"
+    else
+        "flac";
     printFormat(label, decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
 
     var session = session_mod.build(allocator, &decoded) catch |err| return sessionFailed(err);

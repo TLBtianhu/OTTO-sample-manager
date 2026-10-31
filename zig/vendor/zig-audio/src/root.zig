@@ -1,10 +1,12 @@
 //! zig-audio: streaming audio decoding in pure Zig.
 //!
-//! WAV, FLAC (CONSTANT, VERBATIM, FIXED(0..4), LPC(1..32)) and mono/stereo
-//! MPEG-1 Layer III decoders. The FLAC side covers Rice partitions, independent
-//! channels and the left/side, right/side and mid/side assignments; the MP3
-//! side covers long and window-switched (start/short/stop) granules, mid/side
-//! and intensity stereo. See README for the support matrix.
+//! WAV (PCM, IEEE float, G.711 µ-law/A-law, IMA and Microsoft ADPCM), AIFF
+//! (big-endian PCM), FLAC (CONSTANT, VERBATIM, FIXED(0..4), LPC(1..32)) and
+//! mono/stereo MPEG-1 Layer III decoders. The FLAC side covers Rice partitions,
+//! independent channels and the left/side, right/side and mid/side
+//! assignments; the MP3 side covers long and window-switched
+//! (start/short/stop) granules, mid/side and intensity stereo. See README for
+//! the support matrix.
 //!
 //! The API deliberately has one output path: interleaved i16. Source PCM
 //! (8/16/24/32) and float32 are converted inside the decoder, so a player
@@ -13,6 +15,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const wav = @import("wav.zig");
+const aiff = @import("aiff.zig");
 const flac = @import("flac.zig");
 const mp3 = @import("mp3.zig");
 
@@ -42,16 +45,22 @@ const FileSource = struct {
 /// modifying `header`.
 ///
 /// `header` is the beginning of the stream, not a full file: 4 bytes are
-/// enough to recognize FLAC's `fLaC` magic, 12 bytes are needed for RIFF/WAVE.
-/// Anything shorter returns null. RF64 and RIFX return null on purpose: they
-/// are WAV-like containers this version does not decode, and `probe` never
-/// promises a format that `open` cannot open.
+/// enough to recognize FLAC's `fLaC` magic, 12 bytes are needed for RIFF/WAVE
+/// and `FORM`/`AIFF`. Anything shorter returns null. RF64 and RIFX return null
+/// on purpose: they are WAV-like containers this version does not decode, and
+/// `probe` never promises a format that `open` cannot open. AIFC returns null
+/// for the same reason, even though `open` names it `Unsupported`.
 pub fn probe(header: []const u8) ?Format {
     if (header.len >= 4 and std.mem.eql(u8, header[0..4], "fLaC")) return .flac;
     if (header.len >= 12 and std.mem.eql(u8, header[0..4], "RIFF") and
         std.mem.eql(u8, header[8..12], "WAVE"))
     {
         return .wav;
+    }
+    if (header.len >= 12 and std.mem.eql(u8, header[0..4], "FORM") and
+        std.mem.eql(u8, header[8..12], "AIFF"))
+    {
+        return .aiff;
     }
     // MP3: an ID3v2 tag or an MPEG audio sync word. Any layer/version is
     // recognized here so `open` can report Unsupported instead of NotAudio.
@@ -88,6 +97,17 @@ pub fn open(allocator: std.mem.Allocator, reader: *std.Io.Reader) Error!Decoder 
             .info = dec.info,
             .allocator = allocator,
             .impl = .{ .wav = dec },
+        };
+    }
+
+    if (std.mem.eql(u8, header[0..4], "FORM")) {
+        // AIFF and AIFC share the FORM signature; `aiff.open` returns
+        // Unsupported for AIFC and NotAudio for other FORM types (AVI, ...).
+        const dec = try aiff.open(allocator, reader, &header);
+        return .{
+            .info = dec.info,
+            .allocator = allocator,
+            .impl = .{ .aiff = dec },
         };
     }
 
@@ -168,6 +188,7 @@ pub const Decoder = struct {
     allocator: std.mem.Allocator,
     impl: union(enum) {
         wav: wav.Decoder,
+        aiff: aiff.Decoder,
         flac: flac.Decoder,
         mp3: mp3.Decoder,
     },
@@ -181,11 +202,12 @@ pub const Decoder = struct {
     /// Samples are frame-major: frame `f`, channel `c` is
     /// `out[f * info.channels + c]`, with source channel order preserved.
     /// Conversion is fixed for every source format: 8-bit unsigned WAV PCM uses
-    /// `(byte - 128) << 8`, FLAC 8-bit is signed (`sample << 8`), 16-bit is
-    /// copied, and wider sources shift right so the top 16 bits survive
-    /// (WAV 24-bit by 8, 32-bit by 16; FLAC by `bits - 16`). Float32 is clamped
-    /// to [-1, 1] and rounded to i16. Integer conversions match ffmpeg
-    /// `-f s16le` sample for sample.
+    /// `(byte - 128) << 8`, FLAC and AIFF 8-bit are signed (`sample << 8`),
+    /// 16-bit is copied, and wider sources shift right so the top 16 bits
+    /// survive (WAV/AIFF 24-bit by 8, 32-bit by 16; FLAC by `bits - 16`).
+    /// Float32 is clamped to [-1, 1] and rounded to i16. G.711 µ-law/A-law and
+    /// both ADPCM block codecs expand to 16-bit linear. Integer conversions
+    /// match ffmpeg `-f s16le` sample for sample.
     ///
     /// Returns 0 at end of stream. An empty `out` is a no-op that also returns
     /// 0, so callers must not use a zero-length read as an EOF probe. The tail
@@ -194,6 +216,7 @@ pub const Decoder = struct {
     pub fn read(self: *Decoder, out: []i16) Error!usize {
         switch (self.impl) {
             .wav => |*dec| return dec.read(out),
+            .aiff => |*dec| return dec.read(out),
             .flac => |*dec| return dec.read(out),
             .mp3 => |*dec| return dec.read(out),
         }
@@ -205,6 +228,7 @@ pub const Decoder = struct {
     pub fn deinit(self: *Decoder) void {
         switch (self.impl) {
             .wav => |*dec| dec.deinit(),
+            .aiff => |*dec| dec.deinit(),
             .flac => |*dec| dec.deinit(),
             .mp3 => |*dec| dec.deinit(),
         }

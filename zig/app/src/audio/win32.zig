@@ -1,7 +1,8 @@
 //! 音频层共用的手写 Win32 / COM 声明：只用到多少写多少，没有 @cImport、没有 C shim。
 //!
-//! 这里只放**类型与系统调用**，不放业务：WAV 解码在 `wav.zig`（纯 Zig，不认识
-//! Windows），WASAPI 在 `wasapi.zig`，播放线程与生命周期在 `player.zig`。
+//! 这里只放**类型与系统调用**，不放业务：音频解码在 vendor 的 zig-audio 与
+//! `audio/decode.zig`（纯 Zig，不认识 Windows），WASAPI 在 `wasapi.zig`，播放线程
+//! 与生命周期在 `player.zig`。
 //!
 //! 约定与 `ports/src/drag_win.zig` 一致：`HRESULT` 是 i32，成功码 >= 0；GUID 用
 //! extern struct 保证与 Win64 ABI 同布局；接口指针的第一格是 vtable 指针。

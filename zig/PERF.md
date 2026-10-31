@@ -176,7 +176,7 @@ otto-lite.exe <library> --bench-first-frame
 ### 4.6 音频起播（`bench_audio.zig`）
 
 - 在素材目录里找第一个能解码的 `.wav`，用 `providers/audio.zig` 的 `load`
-  （自己的 WAV 解码器）+ `sessionFromWav`（WASAPI 初始化 + 波形），**只做一次**；
+  （zig-audio 解码）+ `sessionFromDecoded`（WASAPI 初始化 + 波形），**只做一次**；
 - 然后 20 次：`play()` 前取时间戳 → 忙等 `positionMs() > 0`（最长 500 ms）→
   停表 → `stop()` → 睡 20 ms 再下一轮；
 - 报 p95。忙等而不是 `sleep(1ms)`，因为位置精度就是毫秒，1 ms 的睡眠会把 p95

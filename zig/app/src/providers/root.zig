@@ -3,8 +3,8 @@
 //!
 //! 每一项负责的是"产出哪一种载荷"，不是"一种文件类型"：
 //!
-//!   1. `wasapi-pcm`      WAV 试听（自写 RIFF 解析 + WASAPI）；
-//!   2. `native-audio`    FLAC / MP3 试听（vendor 的 zig-audio，纯 Zig 解码）；
+//!   1. `wasapi-pcm`      WAV 试听（zig-audio 解码 + WASAPI；带粗采样图标）；
+//!   2. `native-audio`    WAV / FLAC / MP3 / AIFF 试听（vendor 的 zig-audio，纯 Zig）；
 //!   3. `mf-audio`        MP3 / M4A / AAC / WMA 试听（Media Foundation）；
 //!   4. `image-wic`       PNG / JPEG / BMP / GIF / TIFF（自己写的 WIC 解码，不经过 Shell）；
 //!   5. `mf-video`        MP4 / M4V / MOV / WMV 首帧（Media Foundation，产出 image）；
@@ -15,8 +15,8 @@
 //! 会把 `none` 分支整个吃掉，让"没有预览组件"永远显示不出来。
 //!
 //! 顺序是**偏好**，不是"第一个 supports 就结束"：注册表会跳过 `supports == false`
-//! 的项；`open` 返回 `none.*` 只是一次谢绝，会继续问下一个（见 `preview.zig` 的
-//! decline 规则）。
+//! 的项；`open` 返回 `unsupported` / `no_handler` 是谢绝，继续问下一个；返回
+//! `failed` / `file_missing` 是认领后失败，到此为止（见 `preview.zig` 的四态规则）。
 //!
 //! ## 为什么是 `[wasapi-pcm, native-audio, mf-audio, image-wic, mf-video, shell-thumbnail]`
 //!
@@ -25,11 +25,14 @@
 //!
 //!   * 音频在最前：能播就播。某些机器给 `.wav` 登记了影子 handler 并返回静态图，
 //!     排在后面会让"真的能试听"被一张波形截图抢走；`.mp3` 在 Windows 上更是常常
-//!     有 Shell 静态图。`native-audio` 紧跟 WAV：FLAC / MP3 由我们 vendor 的纯 Zig
-//!     解码器解，不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解
-//!     这两种，但多一层 COM/系统依赖，能用自家解码器时先用自家的。两条音频 provider
-//!     谢绝（没有端点 / 解码失败）时，注册表仍会继续问 thumb 兜底——这正是 decline
-//!     规则存在的理由；
+//!     有 Shell 静态图。`wasapi-pcm` 先接 `.wav`（它还有粗采样图标），`native-audio`
+//!     紧跟其后：WAV 之外的 FLAC / MP3 / AIFF 由我们 vendor 的纯 Zig 解码器解，
+//!     不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解这几种，
+//!     但多一层 COM/系统依赖，能用自家解码器时先用自家的。`native-audio` 也声明
+//!     `.wav`：当扩展名说谎（`.wav` 里是 FLAC）时，`wasapi-pcm` 按内容谢绝为
+//!     `unsupported`，注册表会继续问它——这不是给 WAV 特权，而是让"按内容作答"
+//!     的 provider 有机会接住。两条音频 provider 谢绝（没有端点 / 解码失败）时，
+//!     注册表仍会继续问 thumb 兜底——这正是 decline 规则存在的理由；
 //!   * 图片在视频与 Shell 之前：PNG/JPEG/BMP/GIF/TIFF 由 `image-wic` 自己解，不查
 //!     注册表、不加载第三方 DLL。只有 PSD/AI/BLEND 这类**没有系统解码器**的格式才
 //!     轮到 Shell。视频首帧同理：抽帧由 `mf-video` 用 MF 自己解，不借 Shell 的
@@ -56,9 +59,9 @@
 //! `icon_capable == false` 的项。当前结果是
 //! `[wasapi-pcm, image-wic, mf-video, shell-thumbnail]`：WAV 用粗采样（不整段解码），
 //! `mf-audio` 因 MF 打开容器 + seek 实测超 15ms/张 预算而**不参与**（见报告），
-//! `native-audio` 因 FLAC 没有便宜的粗采样路径（要真实包络就得整段解码）同样不参与，
-//! 音频行显示占位。`--no-shell-preview` 时再少一项 Shell，行内小图同样**不再问
-//! Shell**，与预览的语义逐字一致。
+//! `native-audio` 因 FLAC/MP3/AIFF 没有便宜的粗采样路径（要真实包络就得整段解码）
+//! 同样不参与，音频行显示占位。`--no-shell-preview` 时再少一项 Shell，行内小图同样
+//! **不再问 Shell**，与预览的语义逐字一致。
 //!
 //! `registryForIcon` 返回**值**（`preview.Registry` 只有一枚切片指针，复制很便宜），
 //! 调用方存一份即可；两张静态表的生命周期与进程相同。顺序检查在 comptime 完成：
@@ -170,7 +173,7 @@ comptime {
         }
     }
     if (!has_audio) @compileError("WAV 音频 provider 必须在这张表里");
-    if (!has_native_audio) @compileError("FLAC 音频 provider 必须在这张表里");
+    if (!has_native_audio) @compileError("纯 Zig 音频 provider 必须在这张表里");
     if (!has_mf_audio) @compileError("MF 音频 provider 必须在这张表里");
     if (!has_image) @compileError("图片 provider 必须在这张表里");
     if (!has_mf_video) @compileError("MF 视频 provider 必须在这张表里");
@@ -221,9 +224,9 @@ comptime {
     // 图标表里的每一项都声明了能力；WAV 的窗口采样走粗采样，MF 音频实测超预算
     // 所以保持 false，由各 provider 自己保证"不整段解码"。
     if (!audio.provider.icon_capable) @compileError("WAV 粗采样已实现，wasapi-pcm 应参与图标表");
-    // FLAC / MP3 没有便宜的粗采样：真实包络必须整段解码，15ms 预算内做不到。保持 false，
-    // 让 `registryForIcon` 自然把它过滤掉——这正是"不为图标解码整段"的落点。
-    if (native_audio.provider.icon_capable) @compileError("FLAC/MP3 图标不能整段解码，native-audio 必须保持 icon_capable=false");
+    // FLAC / MP3 / AIFF 没有便宜的粗采样：真实包络必须整段解码，15ms 预算内做不到。
+    // 保持 false，让 `registryForIcon` 自然把它过滤掉——这正是"不为图标解码整段"的落点。
+    if (native_audio.provider.icon_capable) @compileError("FLAC/MP3/AIFF 图标不能整段解码，native-audio 必须保持 icon_capable=false");
 
     // 去掉 Shell 的 icon 表 = icon 表少一项，且少的必须正好是 Shell。
     if (icon_without_shell.len != icon_ordered.len - 1) {

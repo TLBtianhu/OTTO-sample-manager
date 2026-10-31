@@ -21,18 +21,19 @@
 //! 本 provider 是**同步**的，线程由 `preview_panel.Panel` / `thumbs.zig` 的工作线程
 //! 负责——和原来的约定一样：`open` 绝不在 UI 线程上跑。
 //!
-//! 结局映射（四态不许合并，见 CHARTER「一」）：
+//! 结局映射（四态不许合并，统一规则见 `preview.zig` 文件头）：
 //!
 //!   * 取图成功且形状合法              → `image`
 //!   * 能力门禁说没有 handler          → `supports = false`（根本轮不到 open）
-//!   * 口岸说 `NoHandler`              → `none.no_handler`
-//!   * 文件/路径不存在                 → `none.file_missing`
-//!   * COM / Shell / helper 超时/形状异常 → `none.failed`
-//!   * 路径非法 / 尺寸非法 / 非 Windows → `none.unsupported`
+//!   * 口岸说 `NoHandler`              → `none.no_handler`（谢绝，继续问下一个）
+//!   * 路径非法 / 尺寸非法 / 非 Windows → `none.unsupported`（谢绝）
+//!   * 文件/路径不存在                 → `none.file_missing`（认领后失败，到此为止）
+//!   * COM / Shell / helper 超时/形状异常 → `none.failed`（认领后失败，到此为止）
 //!
-//! `none.*` 是**谢绝**：注册表会继续问下一个 provider（见 `preview.zig` 的 decline
-//! 规则）。所以这里的 `NoHandler` 不会永久堵死后面的音频/抽帧 provider——`supports`
-//! 只能廉价声明"这台机器登记了 handler"，真正的能力只有 `open` 知道。
+//! `no_handler` / `unsupported` 是**谢绝**：注册表会继续问下一个 provider（见
+//! `preview.zig` 的 decline 规则）。所以这里的 `NoHandler` 不会永久堵死后面的
+//! 音频/抽帧 provider——`supports` 只能廉价声明"这台机器登记了 handler"，真正的
+//! 能力只有 `open` 知道。
 //!
 //! `supports` 用 `std.heap.smp_allocator`：`caps.forPath` 只在**第一次**问某个
 //! 扩展名时需要把路径转 UTF-16（之后按扩展名命中缓存）。smp allocator 无状态、

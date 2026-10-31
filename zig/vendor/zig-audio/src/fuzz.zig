@@ -1,6 +1,6 @@
-//! Mutation fuzzer: start from a valid WAV and a valid FLAC, flip/truncate
-//! bytes, and drive the public parser/decoder through every reachable error
-//! path.
+//! Mutation fuzzer: start from valid WAV, FLAC, MP3, AIFF and legacy-WAV
+//! (G.711 / ADPCM) templates, flip/truncate bytes, and drive the public
+//! parser/decoder through every reachable error path.
 //!
 //! The same `run` function is used by `zig build fuzz` (10,000 rounds) and by a
 //! normal test (1,000 rounds), so CI always exercises it.
@@ -44,10 +44,33 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
     const mp3_stereo_base = try buildMp3StereoTemplate(allocator);
     defer allocator.free(mp3_stereo_base);
 
-    const buf = try allocator.alloc(
-        u8,
-        @max(@max(wav_base.len, flac_base.len), @max(mp3_base.len, mp3_stereo_base.len)),
-    );
+    const mulaw_base = try buildG711Template(allocator, testutil.format_mulaw, 1);
+    defer allocator.free(mulaw_base);
+
+    const alaw_base = try buildG711Template(allocator, testutil.format_alaw, 2);
+    defer allocator.free(alaw_base);
+
+    const ima_base = try buildImaTemplate(allocator);
+    defer allocator.free(ima_base);
+
+    const ms_base = try buildMsTemplate(allocator);
+    defer allocator.free(ms_base);
+
+    const aiff16_base = try buildAiffTemplate(allocator, 16);
+    defer allocator.free(aiff16_base);
+
+    const aiff24_base = try buildAiffTemplate(allocator, 24);
+    defer allocator.free(aiff24_base);
+
+    const templates = [_][]const u8{
+        wav_base,    flac_base,   mp3_base, mp3_stereo_base,
+        mulaw_base,  alaw_base,   ima_base, ms_base,
+        aiff16_base, aiff24_base,
+    };
+
+    var longest: usize = 0;
+    for (templates) |template| longest = @max(longest, template.len);
+    const buf = try allocator.alloc(u8, longest);
     defer allocator.free(buf);
 
     var prng = std.Random.DefaultPrng.init(seed);
@@ -56,15 +79,10 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
 
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
-        // Split the rounds across WAV, FLAC and MP3; the MP3 rounds alternate
-        // between a mono and a joint-stereo frame so the stereo side-info,
-        // intensity and mid/side paths are fuzzed too.
-        const base = switch (round % 4) {
-            0 => wav_base,
-            1 => flac_base,
-            2 => mp3_base,
-            else => mp3_stereo_base,
-        };
+        // Round-robin over the templates: WAV, FLAC, MP3 (mono and joint
+        // stereo), G.711, both ADPCM codecs and both AIFF depths. The MP3
+        // stereo frame keeps the stereo side-info and mid/side paths fuzzed.
+        const base = templates[round % templates.len];
         const len = mutate(random, base, buf);
 
         if (root.probe(buf[0..@min(len, 12)]) != null) stats.probed += 1;
@@ -204,6 +222,74 @@ fn buildMp3StereoTemplate(allocator: std.mem.Allocator) ![]u8 {
         for (0..3) |k| bytes[at + 5 + k] = 0x11;
     }
     return bytes;
+}
+
+/// A valid G.711 WAV: 64 codes per channel. A-law is built as stereo so the
+/// interleaving path is mutated too.
+fn buildG711Template(allocator: std.mem.Allocator, tag: u16, channels: u16) ![]u8 {
+    const bytes = try allocator.alloc(u8, 64 * channels);
+    defer allocator.free(bytes);
+    for (bytes, 0..) |*byte, i| byte.* = @truncate(i * 37 + 11);
+    return testutil.buildG711(allocator, tag, channels, 8000, bytes);
+}
+
+/// Two 32-byte IMA blocks: a 4-byte header plus 28 nibble bytes each, so
+/// mutations cover the header, the step index and the nibble loop.
+fn buildImaTemplate(allocator: std.mem.Allocator) ![]u8 {
+    const block_align: u16 = 32;
+    const payload = try allocator.alloc(u8, block_align * 2);
+    defer allocator.free(payload);
+    for (0..2) |b| {
+        const at = b * block_align;
+        std.mem.writeInt(i16, payload[at..][0..2], if (b == 0) 1000 else -1000, .little);
+        payload[at + 2] = 5;
+        payload[at + 3] = 0;
+        for (payload[at + 4 ..][0 .. block_align - 4]) |*byte| byte.* = 0x5A;
+    }
+    return testutil.buildAdpcm(allocator, .{
+        .tag = testutil.format_ima_adpcm,
+        .channels = 1,
+        .sample_rate = 8000,
+        .block_align = block_align,
+        .bits = 4,
+        // 1 + ((32 - 4) / 4) * 8
+        .samples_per_block = 57,
+    }, payload);
+}
+
+/// Two 32-byte Microsoft ADPCM blocks with the standard seven-pair table.
+fn buildMsTemplate(allocator: std.mem.Allocator) ![]u8 {
+    const block_align: u16 = 32;
+    const payload = try allocator.alloc(u8, block_align * 2);
+    defer allocator.free(payload);
+    for (0..2) |b| {
+        const at = b * block_align;
+        payload[at] = 0; // predictor index
+        std.mem.writeInt(i16, payload[at + 1 ..][0..2], 16, .little);
+        std.mem.writeInt(i16, payload[at + 3 ..][0..2], if (b == 0) 1000 else -1000, .little);
+        std.mem.writeInt(i16, payload[at + 5 ..][0..2], 0, .little);
+        for (payload[at + 7 ..][0 .. block_align - 7]) |*byte| byte.* = 0x3C;
+    }
+    return testutil.buildAdpcm(allocator, .{
+        .tag = testutil.format_ms_adpcm,
+        .channels = 1,
+        .sample_rate = 8000,
+        .block_align = block_align,
+        .bits = 4,
+        // 2 + (32 - 7) * 2
+        .samples_per_block = 52,
+        .coefficients = &testutil.ms_coefficients,
+    }, payload);
+}
+
+/// A short AIFF with the given bit depth, so both COMM (80-bit rate, frames)
+/// and SSND framing are part of the mutation surface.
+fn buildAiffTemplate(allocator: std.mem.Allocator, bits: u16) ![]u8 {
+    const frames: u32 = 64;
+    const payload = try allocator.alloc(u8, frames * (bits / 8));
+    defer allocator.free(payload);
+    for (payload, 0..) |*byte, i| byte.* = @truncate(i * 29 + 7);
+    return testutil.buildAiff(allocator, 1, 44_100, bits, frames, payload);
 }
 
 /// Copy the valid template, then apply one mutation strategy. Returns the

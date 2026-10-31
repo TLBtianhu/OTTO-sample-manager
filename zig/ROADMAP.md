@@ -67,8 +67,9 @@ pub const Provider = struct {
 };
 ```
 
-注册表按顺序问，第一个 `supports` 为真的赢；**但 `none.*` 是"谢绝"，不是最终答案**——继续问下一个
-provider，只有成功分支才终止。全部谢绝时按 `failed` > `no_handler` > `unsupported` 取最具体的原因。
+注册表按顺序问，第一个 `supports` 为真的赢；**但 `unsupported` / `no_handler` 是"谢绝"，不是最终
+答案**——继续问下一个 provider。`failed` / `file_missing` 是认领后失败，直接作为最终答案终止查找。
+全部谢绝时按 `no_handler` > `unsupported` 取最具体的原因（四态规则见 `zig/app/src/preview.zig`）。
 
 这条不是细节：`supports()` 只能做廉价声明，真正的能力要到 `open()` 才知道（本机 `.wav` 在注册表里
 有影子 handler，实际取图却返回 no_handler）。用"谢绝后可继续"换掉"provider 必须排对顺序"的隐性纪律。

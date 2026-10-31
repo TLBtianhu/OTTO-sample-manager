@@ -5,7 +5,11 @@ const std = @import("std");
 const root = @import("root.zig");
 
 pub const format_pcm: u16 = 0x0001;
+pub const format_ms_adpcm: u16 = 0x0002;
 pub const format_float: u16 = 0x0003;
+pub const format_alaw: u16 = 0x0006;
+pub const format_mulaw: u16 = 0x0007;
+pub const format_ima_adpcm: u16 = 0x0011;
 pub const format_extensible: u16 = 0xFFFE;
 
 pub const guid_pcm = [16]u8{
@@ -181,6 +185,230 @@ pub fn buildExtensibleFloat(
     );
     try builder.addChunk("data", payload);
     return builder.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Legacy WAV encodings: G.711 (µ-law / A-law) and block ADPCM.
+// ---------------------------------------------------------------------------
+
+/// 16-byte `fmt ` for G.711: 8-bit samples, one byte per channel per frame.
+pub fn fmtG711(buffer: *[40]u8, tag: u16, channels: u16, sample_rate: u32) []const u8 {
+    return fmtPayload(buffer, tag, channels, sample_rate, 8);
+}
+
+pub fn buildG711(
+    allocator: std.mem.Allocator,
+    tag: u16,
+    channels: u16,
+    sample_rate: u32,
+    payload: []const u8,
+) ![]u8 {
+    var builder = try Builder.init(allocator);
+    defer builder.deinit();
+    var fmt_buffer: [40]u8 = undefined;
+    try builder.addChunk("fmt ", fmtG711(&fmt_buffer, tag, channels, sample_rate));
+    try builder.addChunk("data", payload);
+    return builder.finish();
+}
+
+pub const AdpcmHeader = struct {
+    tag: u16,
+    channels: u16,
+    sample_rate: u32,
+    block_align: u16,
+    /// Nibble width written to `fmt `; 4 for both codecs.
+    bits: u16,
+    samples_per_block: u16,
+    /// MS ADPCM only: coefficient pairs stored in the `fmt ` extension.
+    coefficients: []const [2]i16 = &.{},
+};
+
+/// Build a WAV whose `fmt ` carries the ADPCM extension: cbSize, samples per
+/// block, then for MS the coefficient table. IMA ignores the coefficient list.
+pub fn buildAdpcm(
+    allocator: std.mem.Allocator,
+    header: AdpcmHeader,
+    payload: []const u8,
+) ![]u8 {
+    var fmt_buffer: [128]u8 = undefined;
+    @memset(&fmt_buffer, 0);
+    const is_ms = header.tag == format_ms_adpcm;
+    const cb_size: u16 = if (is_ms) @intCast(4 + 4 * header.coefficients.len) else 2;
+    const fmt_len: usize = 18 + cb_size;
+
+    std.mem.writeInt(u16, fmt_buffer[0..2], header.tag, .little);
+    std.mem.writeInt(u16, fmt_buffer[2..4], header.channels, .little);
+    std.mem.writeInt(u32, fmt_buffer[4..8], header.sample_rate, .little);
+    const byte_rate = @as(u64, header.sample_rate) * header.channels * header.bits / 8;
+    std.mem.writeInt(u32, fmt_buffer[8..12], @intCast(@min(byte_rate, std.math.maxInt(u32))), .little);
+    std.mem.writeInt(u16, fmt_buffer[12..14], header.block_align, .little);
+    std.mem.writeInt(u16, fmt_buffer[14..16], header.bits, .little);
+    std.mem.writeInt(u16, fmt_buffer[16..18], cb_size, .little);
+    std.mem.writeInt(u16, fmt_buffer[18..20], header.samples_per_block, .little);
+    if (is_ms) {
+        std.mem.writeInt(u16, fmt_buffer[20..22], @intCast(header.coefficients.len), .little);
+        for (header.coefficients, 0..) |pair, i| {
+            std.mem.writeInt(i16, fmt_buffer[22 + 4 * i ..][0..2], pair[0], .little);
+            std.mem.writeInt(i16, fmt_buffer[22 + 4 * i + 2 ..][0..2], pair[1], .little);
+        }
+    }
+
+    var builder = try Builder.init(allocator);
+    defer builder.deinit();
+    try builder.addChunk("fmt ", fmt_buffer[0..fmt_len]);
+    try builder.addChunk("data", payload);
+    return builder.finish();
+}
+
+/// The seven coefficient pairs every Microsoft ADPCM encoder writes.
+pub const ms_coefficients = [7][2]i16{
+    .{ 256, 0 },
+    .{ 512, -256 },
+    .{ 0, 0 },
+    .{ 192, 64 },
+    .{ 240, 0 },
+    .{ 460, -208 },
+    .{ 392, -232 },
+};
+
+pub fn leI16Payload(allocator: std.mem.Allocator, samples: []const i16) ![]u8 {
+    const bytes = try allocator.alloc(u8, samples.len * 2);
+    for (samples, 0..) |sample, i| {
+        std.mem.writeInt(i16, bytes[i * 2 ..][0..2], sample, .little);
+    }
+    return bytes;
+}
+
+// ---------------------------------------------------------------------------
+// AIFF construction
+// ---------------------------------------------------------------------------
+
+/// Encode an integer sample rate as the 80-bit IEEE 754 extended value AIFF
+/// uses. The mantissa is left-aligned with an explicit integer bit, so 44100
+/// becomes exponent 0x400E and mantissa 0xAC44_0000_0000_0000.
+pub fn encodeExtended(rate: u32) [10]u8 {
+    var out: [10]u8 = @splat(0);
+    if (rate == 0) return out;
+    const msb: u5 = @intCast(31 - @clz(rate));
+    const exponent: u16 = 16383 + @as(u16, msb);
+    const shift: u6 = @intCast(63 - @as(u7, msb));
+    const mantissa: u64 = @as(u64, rate) << shift;
+    std.mem.writeInt(u16, out[0..2], exponent, .big);
+    std.mem.writeInt(u64, out[2..10], mantissa, .big);
+    return out;
+}
+
+/// 18-byte COMM payload: channels, frames, sample size, 80-bit rate.
+pub fn aiffCommPayload(
+    buffer: *[18]u8,
+    channels: u16,
+    frames: u32,
+    bits: u16,
+    sample_rate: u32,
+) []const u8 {
+    @memset(buffer, 0);
+    std.mem.writeInt(u16, buffer[0..2], channels, .big);
+    std.mem.writeInt(u32, buffer[2..6], frames, .big);
+    std.mem.writeInt(u16, buffer[6..8], bits, .big);
+    buffer[8..18].* = encodeExtended(sample_rate);
+    return buffer[0..18];
+}
+
+pub const AiffBuilder = struct {
+    allocator: std.mem.Allocator,
+    bytes: std.ArrayList(u8) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) !AiffBuilder {
+        var bytes: std.ArrayList(u8) = .empty;
+        errdefer bytes.deinit(allocator);
+        try bytes.appendSlice(allocator, "FORM");
+        try bytes.appendNTimes(allocator, 0, 4);
+        try bytes.appendSlice(allocator, "AIFF");
+        return .{ .allocator = allocator, .bytes = bytes };
+    }
+
+    pub fn deinit(self: *AiffBuilder) void {
+        self.bytes.deinit(self.allocator);
+    }
+
+    pub fn addChunk(self: *AiffBuilder, id: []const u8, payload: []const u8) !void {
+        try self.addChunkSized(id, @intCast(payload.len), payload);
+    }
+
+    pub fn addChunkSized(self: *AiffBuilder, id: []const u8, declared: u32, payload: []const u8) !void {
+        std.debug.assert(id.len == 4);
+        try self.bytes.appendSlice(self.allocator, id);
+        var size_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &size_bytes, declared, .big);
+        try self.bytes.appendSlice(self.allocator, &size_bytes);
+        try self.bytes.appendSlice(self.allocator, payload);
+        // Same rule as RIFF: unknown sizes are already padded by the writer.
+        if (declared & 1 != 0 and declared != 0xFFFF_FFFF) {
+            try self.bytes.append(self.allocator, 0);
+        }
+    }
+
+    pub fn finish(self: *AiffBuilder) ![]u8 {
+        const form_size: u32 = @intCast(self.bytes.items.len - 8);
+        std.mem.writeInt(u32, self.bytes.items[4..8], form_size, .big);
+        return self.bytes.toOwnedSlice(self.allocator);
+    }
+};
+
+pub fn buildAiff(
+    allocator: std.mem.Allocator,
+    channels: u16,
+    sample_rate: u32,
+    bits: u16,
+    frames: u32,
+    payload: []const u8,
+) ![]u8 {
+    var builder = try AiffBuilder.init(allocator);
+    defer builder.deinit();
+    var comm: [18]u8 = undefined;
+    try builder.addChunk("COMM", aiffCommPayload(&comm, channels, frames, bits, sample_rate));
+    try addSsnd(&builder, payload, 0);
+    return builder.finish();
+}
+
+/// Append an SSND chunk whose payload is the 8-byte offset/block-size header,
+/// an `offset`-byte padding region, then the samples.
+pub fn addSsnd(builder: *AiffBuilder, payload: []const u8, offset: u32) !void {
+    var ssnd: std.ArrayList(u8) = .empty;
+    defer ssnd.deinit(builder.allocator);
+    var header: [8]u8 = @splat(0);
+    std.mem.writeInt(u32, header[0..4], offset, .big);
+    try ssnd.appendSlice(builder.allocator, &header);
+    try ssnd.appendNTimes(builder.allocator, 0, offset);
+    try ssnd.appendSlice(builder.allocator, payload);
+    try builder.addChunk("SSND", ssnd.items);
+}
+
+pub fn beI16Payload(allocator: std.mem.Allocator, samples: []const i16) ![]u8 {
+    const bytes = try allocator.alloc(u8, samples.len * 2);
+    for (samples, 0..) |sample, i| {
+        std.mem.writeInt(i16, bytes[i * 2 ..][0..2], sample, .big);
+    }
+    return bytes;
+}
+
+pub fn beI24Payload(allocator: std.mem.Allocator, samples: []const i32) ![]u8 {
+    const bytes = try allocator.alloc(u8, samples.len * 3);
+    for (samples, 0..) |sample, i| {
+        const value: u32 = @bitCast(sample);
+        bytes[i * 3 + 0] = @truncate(value >> 16);
+        bytes[i * 3 + 1] = @truncate(value >> 8);
+        bytes[i * 3 + 2] = @truncate(value);
+    }
+    return bytes;
+}
+
+pub fn beI32Payload(allocator: std.mem.Allocator, samples: []const i32) ![]u8 {
+    const bytes = try allocator.alloc(u8, samples.len * 4);
+    for (samples, 0..) |sample, i| {
+        std.mem.writeInt(i32, bytes[i * 4 ..][0..4], sample, .big);
+    }
+    return bytes;
 }
 
 /// Build a short stereo 16-bit WAV used as the fuzz/bench template.

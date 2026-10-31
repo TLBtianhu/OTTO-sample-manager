@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const native_audio = @import("../providers/native_audio.zig");
-const wav = @import("wav.zig");
+const audio_provider = @import("../providers/audio.zig");
 
 const testing = std.testing;
 const io = testing.io;
@@ -109,11 +109,10 @@ test "5.1 文件级：LFE 丢弃、C/BL/BR 各归其位、WAV 与 FLAC 逐字节
         if (!try makeWav(wav_path, case.expr)) return error.SkipZigTest;
         if (!try makeFlacFromWav(flac_path, wav_path)) return error.SkipZigTest;
 
-        // wav.decode 接收的是**文件字节**（不是路径）；读与解码分开，和
-        // providers/audio.zig 的真实调用顺序一致。
-        const wav_bytes = try std.Io.Dir.cwd().readFileAlloc(io, wav_path, testing.allocator, .limited(16 * 1024 * 1024));
-        defer testing.allocator.free(wav_bytes);
-        var wav_decoded = try wav.decode(testing.allocator, wav_bytes);
+        // 两条都是**真实解码链**：WAV 走 wasapi-pcm 的 `load`（zig-audio，
+        // expected_format = .wav），FLAC 走 native-audio 的 `decode`。两条最终
+        // 都进 `audio/decode.zig` 的同一个下混矩阵，所以逐字节相等是可断言的事实。
+        var wav_decoded = try audio_provider.load(testing.allocator, wav_path);
         defer wav_decoded.deinit(testing.allocator);
         var flac_decoded = try native_audio.decode(testing.allocator, flac_path);
         defer flac_decoded.deinit(testing.allocator);

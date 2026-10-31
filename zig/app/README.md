@@ -87,9 +87,11 @@ write; it never creates a window or touches nanoui:
   identity (`GetFileInformationByHandle`). Per-file failures go into a list and
   do not abort the scan; results are sorted by path and deduplicated.
 - `ports/probe.zig` reads at most the first 64 KiB. WAV headers are parsed by
-  `ports/wav_header.zig`, the same code the player uses (`audio/wav.zig`), so
-  there is exactly one chunk scanner. Non-WAV files return `null` and are stored
-  with `pendingMetadata = true` — no invented durations.
+  `ports/wav_header.zig`, which also drives `audio/coarse.zig`'s icon sampling;
+  there is exactly one chunk scanner. Whole-file WAV decoding now goes through
+  zig-audio (`audio/decode.zig`), not through that header parser. Non-WAV files
+  return `null` and are stored with `pendingMetadata = true` — no invented
+  durations.
 - ids are `im_` + 16 hex chars of `Wyhash(path)`: stable across runs/machines and
   independent of scan order; collisions get a `_1` suffix.
 - duplicates: an existing `filePath` is `skipped_path`; an existing
@@ -167,26 +169,31 @@ src/sample_facts.zig     name / size / duration / path / extension — not a pro
 src/preview_panel.zig    worker thread + the five-branch strip (the only view)
 ```
 
-The providers, in registry order (order is preference; a `none.*` decline asks the
-next one):
+The providers, in registry order (order is preference; `unsupported` /
+`no_handler` asks the next one, `failed` / `file_missing` stops the search):
 
 | provider | formats | payload | decode path |
 | --- | --- | --- | --- |
-| `wasapi-pcm` | `.wav` | audio | own RIFF/WAVE parser + WASAPI |
-| `native-audio` | `.flac` `.mp3` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
+| `wasapi-pcm` | `.wav` (PCM/float/µ-law/A-law/IMA/MS ADPCM) | audio | vendored zig-audio + WASAPI; own coarse icon sampling |
+| `native-audio` | `.wav` `.flac` `.mp3` `.aiff` `.aif` | audio | vendored zig-audio (pure Zig, `zig/vendor/zig-audio`) |
 | `mf-audio` | `.m4a` `.aac` `.wma` | audio | Media Foundation |
 | `image-wic` | `.png` `.jpg` `.bmp` `.gif` `.tif` | image | own WIC decode |
 | `mf-video` | `.mp4` `.m4v` `.mov` `.wmv` | image (first frame) | Media Foundation |
 | `shell-thumbnail` | anything with a registered handler | image | Shell `IThumbnailProvider` (isolated helper) |
 
-### Multichannel downmix: one matrix for WAV and FLAC
+`native-audio` also claims `.wav` because zig-audio identifies the container by
+content: when a `.wav` actually holds FLAC, `wasapi-pcm` declines with
+`unsupported` and `native-audio` answers. `.aifc` is deliberately not claimed —
+compressed AIFC is `error.Unsupported` in the library.
+
+### Multichannel downmix: one matrix for every container
 
 Anything with more than 2 channels is mixed down to stereo by
-`src/audio/downmix.zig` — the only implementation. The WAV decoder calls
-`allocate` (output keeps the source format) and the FLAC provider calls
-`pcm16Into` block by block (output is PCM16); there is no second set of
-coefficients. Channels follow the standard WAVE/FLAC order
-`FL, FR, FC, LFE, BL, BR, ...`:
+`src/audio/downmix.zig` — the only implementation. Every decoder (WAV / FLAC /
+MP3 / AIFF) now hands `audio/decode.zig` interleaved i16, which calls
+`pcm16Into` block by block; the source-format-preserving `allocate` entry point
+is kept only for the equivalence tests. There is no second set of coefficients.
+Channels follow the standard WAVE/FLAC order `FL, FR, FC, LFE, BL, BR, ...`:
 
 ```
 L' = L + 0.7071·(C + BL [+ SL])        R' = R + 0.7071·(C + BR [+ SR])
@@ -211,16 +218,21 @@ an audibly wrong, one-sided bass boost. Mono and stereo are copied bit for bit;
 `BC` differently, but 5.1 — the only common multichannel FLAC — is identical);
 above 8 channels only the 7.1 positions are mapped and the rest are dropped.
 Every sample is clamped to the target range (no wraparound), with 8/16/24/32-bit
-PCM and float32 all converted through f64 and then back to the source format.
+PCM and float32 all converted through f64; the production i16 path is the one
+`pcm16Into` exercises, and the general path is checked against it in tests.
 
-`none.*` is a **decline**, not the final answer: a provider declares "I might
-handle this" cheaply in `supports`, and only `open` knows the truth. When `open`
-returns `none.*`, the registry asks the next provider; only a success branch
-(`image / audio / frames / text`) ends the search. If every provider declines,
-the most specific reason wins: `file_missing > failed > no_handler >
-unsupported` (no provider claiming the file at all is `unsupported`). That is
-how a shell handler which claims `.wav` but yields no bitmap stops hiding the
-honest answer.
+The four decline reasons are one table, and every provider follows it:
+
+```
+unsupported / no_handler = not my format, or an encoding I cannot decode → ask the next provider
+failed / file_missing    = I claimed it, but the file is broken / IO failed → stop here
+```
+
+So `unsupported` and `no_handler` keep the search going, while `failed` and
+`file_missing` are the final, most specific answer — they are not downgraded by
+a later `unsupported`. That is how a truncated ADPCM WAV answers `failed` while
+a `.wav` whose content is FLAC answers `unsupported` and then gets decoded by
+`native-audio`.
 
 `Provider.open` is synchronous and may enter a third-party shell handler, so the
 panel runs it on its own thread: one pending request, newest wins, results land
@@ -251,20 +263,22 @@ zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
 ### Provider matrix (the gate for "every format is self-sufficient")
 
 ```powershell
-# seven samples × two rounds; exits 1 if a provider name or an exit code changes
+# nine samples × two rounds; exits 1 if a provider name or an exit code changes
 powershell -NoProfile -ExecutionPolicy Bypass -File zig\provider-matrix.ps1
 ```
 
 `zig/provider-matrix.ps1` runs `--preview` on `img00.png`, `img00.bmp`,
-`viper.mp3`, `rabbit320.mp4`, `tone_440.wav`, `tone_660.flac` and `mystery.xyz` twice — default and
+`viper.mp3`, `rabbit320.mp4`, `tone_440.wav`, `tone_660.flac`,
+`legacy-adpcm.wav`, `legacy.aiff` and `mystery.xyz` twice — default and
 `--no-shell-preview` — and asserts which provider each round must name
-(`image-wic`, `image-wic`, `native-audio`, `mf-video`, `wasapi-pcm`, `native-audio`, `none` +
-`unsupported`), that the process exits 0, and that the no-shell round really
-printed `shell-preview=disabled` (otherwise the flag could be ignored and the
-column would prove nothing). `open_ms` is printed for every round with **no
-threshold** — a cold decoder or a busy audio endpoint jumps by hundreds of ms
-legitimately — so a
-performance regression is visible as a number instead of becoming a flaky test.
+(`image-wic`, `image-wic`, `native-audio`, `mf-video`, `wasapi-pcm`,
+`native-audio`, `wasapi-pcm`, `native-audio`, `none` + `unsupported`), that the
+process exits 0, and that the no-shell round really printed
+`shell-preview=disabled` (otherwise the flag could be ignored and the column
+would prove nothing). `open_ms` is printed for every round with **no threshold**
+— a cold decoder or a busy audio endpoint jumps by hundreds of ms legitimately —
+so a performance regression is visible as a number instead of becoming a flaky
+test.
 It is a `health.ps1` row in both full and `-Quick` mode, and
 `verify-distribution.ps1` runs the same `img00.png` preview in the portable form,
 so the self-contained decode is proven on the shipped copy, not only in the dev

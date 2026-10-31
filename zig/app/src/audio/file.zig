@@ -1,14 +1,13 @@
-//! 读整个文件：音频 provider 没有 `std.Io` 参数（`preview.Provider.open` 的契约
-//! 只有 allocator + Request），所以这里走手写 `CreateFileW`/`ReadFile`，不引入
+//! 音频文件的 Win32 读入口：预览 provider 没有 `std.Io` 参数（`preview.Provider.open`
+//! 的契约只有 allocator + Request），所以这里走手写 `CreateFileW`/`ReadFile`，不引入
 //! 第三个"文件口岸"，也不改预览契约。
 //!
-//! 只给音频用：路径 → UTF-16（`wtf8ToWtf16LeAllocZ`）→ 打开 → 一次读进调用方给的
-//! allocator。上限 `max_file_bytes` 防止把 4 GB 的 wav 整个搬进内存；超限是明确的
-//! `FileTooLarge`，由 provider 记成 `none.failed`（不是崩溃，也不是"没有预览组件"）。
-//!
-//! 另有一个 `Reader`（`openReader` + `readAt`）：给音频图标的粗采样与
-//! `audio/file_reader.zig` 的流式适配器用——打开一次、按偏移读，不搬整段文件。
-//! 它和 `readAll` 走同一套 CreateFileW / 错误映射。
+//! 两条路：
+//!   * `Reader`（`openReader` + `readAt`）：音频图标的粗采样与 `audio/file_reader.zig`
+//!     的 64 KiB 流式适配器用——打开一次、按偏移读，不搬整段文件。**这是现在所有
+//!     整段解码的入口**（zig-audio 的 WAV/FLAC/MP3/AIFF 都走它）。
+//!   * `readAll`：整份读进调用方 allocator 的通用入口（上限 `max_file_bytes`），
+//!     当前生产路径没有调用方；保留给需要完整字节的探针/测试。
 //!
 //! 错误映射：文件不存在与没有权限分开，provider 才能把前者落到
 //! `none.file_missing`、后者落到 `none.failed`。
@@ -16,9 +15,9 @@
 const std = @import("std");
 const win = @import("win32.zig");
 
-/// 单个音频文件的上限。WAV / MF 仍把压缩文件整份读进来；FLAC 走
-/// `audio/file_reader.zig` 的流式 Reader，不按文件大小分配。512 MiB 足够装下
-/// 约 25 分钟 44.1 kHz/16-bit 立体声的**解码后 PCM**（这才是常驻内存的大头）。
+/// 整段 PCM / 整文件读取的上限。512 MiB 足够装下约 25 分钟 44.1 kHz/16-bit
+/// 立体声的**解码后 PCM**（常驻内存的大头）；`readAll` 也用它挡住 4 GB 文件。
+/// 流式 Reader 不按文件大小分配，只保留 64 KiB。
 pub const max_file_bytes: u64 = 512 * 1024 * 1024;
 
 pub const Error = error{

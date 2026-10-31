@@ -316,10 +316,12 @@ test "data before fmt is rejected with Unsupported" {
 
 test "unsupported WAV encodings and bit depths are named" {
     const cases = [_]struct { tag: u16, bits: u16 }{
-        .{ .tag = 0x0002, .bits = 4 }, // ADPCM
-        .{ .tag = 0x0006, .bits = 8 }, // A-law
-        .{ .tag = 0x0007, .bits = 8 }, // mu-law
-        .{ .tag = 0x0055, .bits = 8 }, // MP3
+        .{ .tag = 0x0055, .bits = 8 }, // MP3-in-WAV
+        .{ .tag = 0x0031, .bits = 4 }, // GSM 6.10
+        .{ .tag = 0x0002, .bits = 8 }, // MS ADPCM, but not 4-bit nibbles
+        .{ .tag = 0x0011, .bits = 8 }, // IMA ADPCM, but not 4-bit nibbles
+        .{ .tag = 0x0006, .bits = 16 }, // A-law is 8-bit by definition
+        .{ .tag = 0x0007, .bits = 16 }, // mu-law is 8-bit by definition
         .{ .tag = testutil.format_pcm, .bits = 12 },
         .{ .tag = testutil.format_pcm, .bits = 20 },
         .{ .tag = testutil.format_float, .bits = 64 },

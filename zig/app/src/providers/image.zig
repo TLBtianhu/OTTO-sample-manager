@@ -6,16 +6,17 @@
 //! `open` 里 WIC 按**文件内容**选解码器，所以我们声明的七种格式在任意 Windows 上
 //! 都有同一套行为。
 //!
-//! 结局映射（四态不许合并，见 `preview.zig` / CHARTER「一」）：
+//! 结局映射（四态不许合并，统一规则见 `preview.zig` 文件头）：
 //!
 //!   * 解码成功                    → `image`（BGRA8、预乘 alpha、顶行在前）
-//!   * 文件不存在 / 路径没了        → `none.file_missing`
-//!   * 路径非法 / 非 Windows        → `none.unsupported`
-//!   * 坏图、权限、WIC 意外         → `none.failed`
+//!   * 文件不存在 / 路径没了        → `none.file_missing`（认领后失败，到此为止）
+//!   * 路径非法 / 非 Windows / WIC 不支持该编码 → `none.unsupported`（谢绝）
+//!   * 坏图、权限、WIC 意外         → `none.failed`（认领后失败，到此为止）
 //!
-//! `none.*` 是**谢绝**：注册表会继续问下一个 provider。所以这个 provider 只声明
-//! 七种栅格格式，PSD / AI / BLEND 之类天然落到 `shell-thumbnail`（或者两者都谢绝），
-//! 而不是让 Shell 抢在图片解码前面。
+//! `unsupported` 是**谢绝**：注册表会继续问下一个 provider。所以这个 provider 只
+//! 声明七种栅格格式，PSD / AI / BLEND 之类天然落到 `shell-thumbnail`（或者两者都
+//! 谢绝），而不是让 Shell 抢在图片解码前面。`failed` / `file_missing` 则是"文件真
+//! 坏了/没了"，不会让 Shell 再去画一张静态图。
 //!
 //! 缩放策略与 WIC 调用链在 `image_wic.zig` 的文件头：优先用 WIC 的
 //! `IWICBitmapScaler`（不自己写重采样），它不可用时退回原尺寸并在 stderr 说明；
