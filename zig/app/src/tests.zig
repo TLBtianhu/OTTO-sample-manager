@@ -73,6 +73,11 @@ test {
     // 多声道下混的文件级回归：真 FLAC/WAV（ffmpeg 现场生成，缺失时 Skip）。
     _ = @import("audio/downmix_files_test.zig");
     _ = @import("providers/root.zig");
+    // 纯 Zig 音频 provider 的两侧测试：FLAC（含 ffmpeg 逐字节 SHA）与 MP3
+    // （真 viper.mp3 的时长/样本数 + 与 ffmpeg 的逐样本对比）。拆文件是为了
+    // provider 正文只留解码路径。
+    _ = @import("providers/native_audio_test.zig");
+    _ = @import("providers/native_audio_mp3_test.zig");
     // WIC 解码器的真解码测试（素材不在时 Skip）；拆文件是为了守住 600 行。
     _ = @import("providers/image_wic_test.zig");
     // 更新检查的纯逻辑（M5）：feed 解析、版本判定、minisign 信封与真实签名向量。

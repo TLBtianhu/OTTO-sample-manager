@@ -4,7 +4,7 @@
 //! 每一项负责的是"产出哪一种载荷"，不是"一种文件类型"：
 //!
 //!   1. `wasapi-pcm`      WAV 试听（自写 RIFF 解析 + WASAPI）；
-//!   2. `native-audio`    FLAC 试听（vendor 的 zig-audio，纯 Zig 解码）；
+//!   2. `native-audio`    FLAC / MP3 试听（vendor 的 zig-audio，纯 Zig 解码）；
 //!   3. `mf-audio`        MP3 / M4A / AAC / WMA 试听（Media Foundation）；
 //!   4. `image-wic`       PNG / JPEG / BMP / GIF / TIFF（自己写的 WIC 解码，不经过 Shell）；
 //!   5. `mf-video`        MP4 / M4V / MOV / WMV 首帧（Media Foundation，产出 image）；
@@ -25,10 +25,10 @@
 //!
 //!   * 音频在最前：能播就播。某些机器给 `.wav` 登记了影子 handler 并返回静态图，
 //!     排在后面会让"真的能试听"被一张波形截图抢走；`.mp3` 在 Windows 上更是常常
-//!     有 Shell 静态图。`native-audio` 紧跟 WAV：FLAC 由我们 vendor 的纯 Zig 解码器
-//!     解，不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解 FLAC，
-//!     但多一层 COM/系统依赖，能用自家解码器时先用自家的。两条音频 provider 谢绝
-//!     （没有端点 / 解码失败）时，注册表仍会继续问 thumb 兜底——这正是 decline
+//!     有 Shell 静态图。`native-audio` 紧跟 WAV：FLAC / MP3 由我们 vendor 的纯 Zig
+//!     解码器解，不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解
+//!     这两种，但多一层 COM/系统依赖，能用自家解码器时先用自家的。两条音频 provider
+//!     谢绝（没有端点 / 解码失败）时，注册表仍会继续问 thumb 兜底——这正是 decline
 //!     规则存在的理由；
 //!   * 图片在视频与 Shell 之前：PNG/JPEG/BMP/GIF/TIFF 由 `image-wic` 自己解，不查
 //!     注册表、不加载第三方 DLL。只有 PSD/AI/BLEND 这类**没有系统解码器**的格式才
@@ -221,9 +221,9 @@ comptime {
     // 图标表里的每一项都声明了能力；WAV 的窗口采样走粗采样，MF 音频实测超预算
     // 所以保持 false，由各 provider 自己保证"不整段解码"。
     if (!audio.provider.icon_capable) @compileError("WAV 粗采样已实现，wasapi-pcm 应参与图标表");
-    // FLAC 没有便宜的粗采样：真实包络必须整段解码，15ms 预算内做不到。保持 false，
+    // FLAC / MP3 没有便宜的粗采样：真实包络必须整段解码，15ms 预算内做不到。保持 false，
     // 让 `registryForIcon` 自然把它过滤掉——这正是"不为图标解码整段"的落点。
-    if (native_audio.provider.icon_capable) @compileError("FLAC 图标不能整段解码，native-audio 必须保持 icon_capable=false");
+    if (native_audio.provider.icon_capable) @compileError("FLAC/MP3 图标不能整段解码，native-audio 必须保持 icon_capable=false");
 
     // 去掉 Shell 的 icon 表 = icon 表少一项，且少的必须正好是 Shell。
     if (icon_without_shell.len != icon_ordered.len - 1) {
@@ -312,7 +312,7 @@ test "--no-shell-preview 的 icon 表：png/bmp 仍有 image-wic，Shell 不在�
     }
 }
 
-test "图标级音频：WAV 参与（粗采样），FLAC / MF 音频因超预算不参与" {
+test "图标级音频：WAV 参与（粗采样），FLAC / MP3 / MF 音频因超预算不参与" {
     try testing.expect(audio.provider.icon_capable);
     try testing.expect(!native_audio.provider.icon_capable);
     try testing.expect(!mf_audio.provider.icon_capable);

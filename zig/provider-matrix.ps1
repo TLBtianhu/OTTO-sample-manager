@@ -1,4 +1,4 @@
-﻿# One row per sample: which preview provider answers, in two rounds (default and
+# One row per sample: which preview provider answers, in two rounds (default and
 # `--no-shell-preview`), plus the exit code. This is the gate for the 0.9.0
 # "every format is self-sufficient" registry (zig/app/src/providers/root.zig).
 #
@@ -12,8 +12,9 @@
 #      an honest answer, only "cannot even construct an answer" returns 1);
 #   2. `preview: provider=<name>` names the provider the table expects. That is
 #      the architecture claim: `img00.png` -> image-wic (our own WIC decode, not
-#      the Shell thumbnail), `viper.mp3` -> mf-audio, `tone_440.wav` ->
-#      wasapi-pcm, `tone_660.flac` -> native-audio (the vendored zig-audio
+#      the Shell thumbnail), `viper.mp3` -> native-audio (zig-audio's pure Zig
+#      MP3 decoder since vendored v0.7 -- it used to be mf-audio), `tone_440.wav`
+#      -> wasapi-pcm, `tone_660.flac` -> native-audio (the same vendored
 #      decoder), `rabbit320.mp4` -> mf-video;
 #   3. the second round really ran with the trimmed registry: it must print
 #      `preview: shell-preview=disabled`. Without this assertion a typo in the
@@ -30,26 +31,27 @@
 #   素材             默认        no-shell
 #   img00.png        image-wic   image-wic      (core row: PNG never needs Shell)
 #   img00.bmp        image-wic   image-wic
-#   viper.mp3        mf-audio    mf-audio
+#   viper.mp3        native-audio native-audio  (vendored zig-audio MP3, pure Zig)
 #   rabbit320.mp4    mf-video    mf-video
 #   tone_440.wav     wasapi-pcm  wasapi-pcm
 #   tone_660.flac    native-audio native-audio  (vendored zig-audio, pure Zig)
 #   mystery.xyz      none        none
 #
-# The three audio rows need an audio endpoint: `wasapi-pcm` / `native-audio` /
-# `mf-audio` initialise the shared-mode device inside `open`, and a box with no
-# endpoint makes them decline (then shell-thumbnail may answer, or nothing).
-# bench.ps1 calls that SKIP; here it is a FAIL by design -- the point of the gate
-# is that audio preview works on this machine, not that it would work on one
-# where it cannot.
+# The two audio rows need an audio endpoint: `wasapi-pcm` (WAV) and
+# `native-audio` (FLAC / MP3) initialise the shared-mode device inside `open`,
+# and a box with no endpoint makes them decline (then shell-thumbnail may answer,
+# or nothing). bench.ps1 calls that SKIP; here it is a FAIL by design -- the point
+# of the gate is that audio preview works on this machine, not that it would work
+# on one where it cannot.
 #
-# open_ms is printed for every round but has **no threshold**: a cold Media
-# Foundation or a busy audio endpoint legitimately varies by hundreds of ms
-# (viper.mp3: 838 ms on the first run, 235 ms once warmed up on this box). The
-# number is there so a regression shows up as a visible jump in the table instead
-# of hiding behind a boolean.
+# open_ms is printed for every round but has **no threshold**: a cold decoder or a
+# busy audio endpoint legitimately varies by hundreds of ms (viper.mp3 through
+# native-audio: 104-108 ms on this box in a release build; the first Media
+# Foundation run when it still owned MP3 was 838 ms). The number is there so a
+# regression shows up as a visible jump in the table instead of hiding behind a
+# boolean.
 #
-# Why this exists next to the 215 app tests: those tests prove each provider works
+# Why this exists next to the 270 app tests: those tests prove each provider works
 # in isolation with fixtures; this script proves the *registry* still answers with
 # the right provider for a real file on disk, in a real process, with the Shell
 # fallback removed. A provider that starts declining, a Shell thumbnail that
@@ -95,7 +97,7 @@ if ([string]::IsNullOrEmpty($Exe)) {
 $script:cases = @(
   [pscustomobject]@{ Name = 'img00.png';     Default = 'image-wic';  NoShell = 'image-wic';  Reason = '' },
   [pscustomobject]@{ Name = 'img00.bmp';     Default = 'image-wic';  NoShell = 'image-wic';  Reason = '' },
-  [pscustomobject]@{ Name = 'viper.mp3';     Default = 'mf-audio';   NoShell = 'mf-audio';   Reason = '' },
+  [pscustomobject]@{ Name = 'viper.mp3';     Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
   [pscustomobject]@{ Name = 'rabbit320.mp4'; Default = 'mf-video';   NoShell = 'mf-video';   Reason = '' },
   [pscustomobject]@{ Name = 'tone_440.wav';  Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },
   [pscustomobject]@{ Name = 'tone_660.flac'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
