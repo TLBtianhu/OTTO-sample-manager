@@ -72,6 +72,13 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     ui.textf(c, .{ .size = 11 }, "{s}", .{
         duration_text.format(shown.seconds, shown.estimated, &duration_buffer),
     });
+    // 视频行再写一格分辨率（`640×360`）。没有画面尺寸时这段不出现：音频行的
+    // 输出与没有本功能时逐字节一致。颜色用次要色，和时长区分开。
+    if (shown.width) |width| {
+        if (shown.height) |height| {
+            ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "{d}×{d}", .{ width, height });
+        }
+    }
     return it;
 }
 
@@ -80,7 +87,12 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
 pub fn previewDuration(s: *State, sample: ?*const core.model.Sample) sample_facts.Duration {
     const target = sample orelse return .{};
     const shown = s.duration_trust.display(target.*);
-    return .{ .seconds = shown.seconds, .estimated = shown.estimated };
+    return .{
+        .seconds = shown.seconds,
+        .estimated = shown.estimated,
+        .width = shown.width,
+        .height = shown.height,
+    };
 }
 
 /// 点击语义、拖拽阈值。Ctrl+点击在 nanoui 里不算 clicked（它被当成右键按下，

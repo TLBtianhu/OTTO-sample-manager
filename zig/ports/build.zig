@@ -304,6 +304,26 @@ pub fn build(b: *std.Build) void {
     run_probe_tests.step.dependOn(&run_scan_tests.step);
     test_step.dependOn(&run_probe_tests.step);
 
+    // 视频容器解析（M6）：mp4_info / mkv_info 是纯字节解析器，各自一个测试根。
+    // 它们不依赖 otto_wav_header，单独编译图，不把 probe 的模块图再拉一遍。
+    const mp4_info_test_module = b.createModule(.{
+        .root_source_file = b.path("src/mp4_info_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_mp4_info_tests = b.addRunArtifact(b.addTest(.{ .root_module = mp4_info_test_module }));
+    run_mp4_info_tests.step.dependOn(&run_probe_tests.step);
+    test_step.dependOn(&run_mp4_info_tests.step);
+
+    const mkv_info_test_module = b.createModule(.{
+        .root_source_file = b.path("src/mkv_info_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_mkv_info_tests = b.addRunArtifact(b.addTest(.{ .root_module = mkv_info_test_module }));
+    run_mkv_info_tests.step.dependOn(&run_mp4_info_tests.step);
+    test_step.dependOn(&run_mkv_info_tests.step);
+
     // WAV 头部解析：纯字节测试，单独一个编译图（不能和 otto_wav_header 模块
     // 同图，否则同一个文件会属于两个模块）。
     const wav_header_test_module = b.createModule(.{
@@ -312,7 +332,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const run_wav_header_tests = b.addRunArtifact(b.addTest(.{ .root_module = wav_header_test_module }));
-    run_wav_header_tests.step.dependOn(&run_probe_tests.step);
+    run_wav_header_tests.step.dependOn(&run_mkv_info_tests.step);
     test_step.dependOn(&run_wav_header_tests.step);
 
     // 文件夹选择：只跑纯逻辑（选项位 / 取消码 / 宽字符路径 / 环境变量开关）；

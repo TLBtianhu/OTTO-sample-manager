@@ -378,6 +378,63 @@ test "2000 行指向 20 个文件：只 probe 20 次，其余全命中缓存" {
     try testing.expectEqual(@as(u64, 2 * rows - files), trust.stats().hits);
 }
 
+test "视频行：库里有 0 时长 → probe 出时长与分辨率；库里有值也要分辨率" {
+    const path = "C:\\src\\otto-testkit\\samples\\rabbit320.mp4";
+    std.Io.Dir.cwd().access(test_io, path, .{}) catch return error.SkipZigTest;
+    const stat = try std.Io.Dir.cwd().statFile(test_io, path, .{});
+    const fingerprint = stat.mtime.toMilliseconds();
+
+    var trust = Trust.init(test_allocator, test_io);
+    defer trust.deinit();
+
+    // 旧库条目（0.19 之前导入的视频）：duration 是 0，显示层就地补。
+    const unknown = sampleFor(path, ".mp4", 0, stat.size, fingerprint);
+    try testing.expectEqual(@as(u64, 7_800), trust.resolve(unknown).?.duration_ms);
+
+    const shown = trust.display(unknown);
+    try testing.expectApproxEqAbs(@as(f64, 7.8), shown.seconds, 1e-9);
+    try testing.expect(!shown.estimated);
+    try testing.expectEqual(@as(?u32, 320), shown.width);
+    try testing.expectEqual(@as(?u32, 240), shown.height);
+    try testing.expectEqual(@as(u64, 1), trust.stats().probes);
+    // 第二帧再显示一次：命中缓存，不重新读盘。
+    try testing.expectEqual(@as(?u32, 320), trust.display(unknown).width);
+    try testing.expectEqual(@as(u64, 1), trust.stats().probes);
+
+    // 导入时已经存了时长（新库条目）：`resolve` 不 probe，但 `display` 仍需
+    // 分辨率——一条视频只读一次头，之后命中缓存。
+    const known = sampleFor(path, ".MP4", 7.8, stat.size, fingerprint);
+    try testing.expect(trust.resolve(known) == null);
+    const known_shown = trust.display(known);
+    try testing.expectApproxEqAbs(@as(f64, 7.8), known_shown.seconds, 1e-9);
+    try testing.expectEqual(@as(?u32, 240), known_shown.height);
+    try testing.expectEqual(@as(u64, 1), trust.stats().probes);
+
+    // 音频行保持 0.18 的行为：库里有值就不 probe、也没有分辨率。
+    const audio = sampleFor("C:\\lib\\known.wav", ".wav", 0.1, 0, 0);
+    const audio_shown = trust.display(audio);
+    try testing.expectApproxEqAbs(@as(f64, 0.1), audio_shown.seconds, 1e-9);
+    try testing.expectEqual(@as(?u32, null), audio_shown.width);
+    try testing.expectEqual(@as(u64, 1), trust.stats().probes);
+}
+
+test "视频后缀进支持面：坏 mp4 / 不存在的 mkv 都是 null，不是 0 秒" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(test_io, .{ .sub_path = "broken.mkv", .data = "not-an-ebml-file" });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try tempPath(&tmp, &path_buffer, "broken.mkv");
+
+    var trust = Trust.init(test_allocator, test_io);
+    defer trust.deinit();
+
+    try testing.expect(trust.resolve(sampleFor(path, ".webm", 0, 0, 0)) == null);
+    try testing.expectEqual(@as(u64, 1), trust.stats().probes);
+    const shown = trust.display(sampleFor(path, ".mkv", 0, 0, 0));
+    try testing.expectEqual(@as(f64, 0), shown.seconds);
+    try testing.expectEqual(@as(?u32, null), shown.width);
+}
+
 test "Answer.seconds：毫秒向下取整后换算成秒" {
     try testing.expectApproxEqAbs(@as(f64, 40.933), (Answer{ .duration_ms = 40_933, .estimated = true }).seconds(), 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.8), (Answer{ .duration_ms = 800, .estimated = false }).seconds(), 1e-9);
