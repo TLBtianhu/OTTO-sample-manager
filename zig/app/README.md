@@ -393,6 +393,24 @@ working directory or a path guess:
 `--version` prints the mode in parentheses and exits 0; it never opens the
 library or a window, so it works on a freshly unpacked portable copy.
 
+### Verifying all three forms in real processes
+
+```
+# from zig/app; from the repo root use zig\verify-distribution.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\verify-distribution.ps1
+```
+
+`zig/verify-distribution.ps1` builds the app and runs dev, portable and
+installed for real: `--version` must name the expected form; dev must write no
+user data and keep `fixtures/library.json` read-only; portable must put the
+imported library, settings, cache and update downloads under `<exe>\data`;
+installed must put all of them under `%APPDATA%\OTTO`. Each form is started
+twice so the second process has to read the first one's settings and library
+back. The installed run points the child's `APPDATA` at a throw-away directory
+(deleted at the end); the real `%APPDATA%\OTTO` is only snapshotted before and
+after. Any mismatch makes the script exit 1, and the last thing it prints is a
+three-row PASS/FAIL table.
+
 ## Settings panel (topmost, opacity, budgets)
 
 The header's 「设置」 entry opens a card over the list. Three kinds of state live
