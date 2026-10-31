@@ -424,3 +424,60 @@ test "缺少 --save：返回 1，不写任何文件" {
     });
     try testing.expectEqual(@as(u8, 1), outcome.code);
 }
+
+// ---------------------------------------------------------------------------
+// 首次启动：还没有库文件、连 `<dataDir>` 都还不存在
+// ---------------------------------------------------------------------------
+
+test "首次启动：底库与目标目录都不存在 → 建目录、导入落盘；再跑一次基于上次的库" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.tmp.dir.writeFile(io, .{ .sub_path = "one.png", .data = "\x89PNG\r\n\x1a\n" ++ "p1" });
+    try fixture.tmp.dir.writeFile(io, .{ .sub_path = "two.png", .data = "\x89PNG\r\n\x1a\n" ++ "p2" });
+
+    var output = try TempRoot.init();
+    defer output.deinit();
+    // 便携版第一次启动：`<exe 目录>\data` 这个目录本身还不存在。
+    var fresh_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const fresh_dir = try std.fmt.bufPrint(&fresh_buffer, "{s}\\fresh\\data", .{output.root()});
+    var library_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const library_path = try std.fmt.bufPrint(&library_buffer, "{s}\\library.json", .{fresh_dir});
+    var save_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const save_path = try std.fmt.bufPrint(&save_buffer, "{s}\\library.otto", .{fresh_dir});
+
+    // 1) 底库不存在 = 空库，不是错误；目标目录由落盘前建出来。
+    const report = try import_cli.importRun(allocator, io, fixture.absoluteRoot(), library_path, save_path);
+    try testing.expect(report.failure == null);
+    try testing.expectEqual(@as(usize, 2), report.added);
+    try testing.expectEqual(@as(usize, 2), (try library_io.inspectWith(io, allocator, save_path)).samples);
+
+    // 2) 删掉一个源文件。`library.json` 仍然不存在，`--import-into` 的底库必须换成
+    //    上一次写出的 `library.otto`——否则这次会把库覆盖成"只有 1 条"的新库。
+    //    （不直接调 `runInto`：它会往 stdout 打摘要，而 stdout 在 `--listen=-`
+    //    下是构建服务的协议通道，测试里写它会卡住 `zig build test`。）
+    try fixture.tmp.dir.deleteFile(io, "two.png");
+    const base = import_cli.runIntoBase(io, library_path, save_path);
+    try testing.expectEqualStrings(save_path, base);
+
+    const again = try import_cli.importRun(allocator, io, fixture.absoluteRoot(), base, save_path);
+    try testing.expect(again.failure == null);
+    try testing.expectEqual(@as(usize, 0), again.added);
+    try testing.expectEqual(@as(usize, 2), (try library_io.inspectWith(io, allocator, save_path)).samples);
+}
+
+test "runInto 的底库：既有库路径存在就优先它（老 JSON 不会被 .otto 顶掉）" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path_buffer);
+    const root = path_buffer[0..root_len];
+
+    var json_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const json_path = try std.fmt.bufPrint(&json_buffer, "{s}\\library.json", .{root});
+    var otto_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const otto_path = try std.fmt.bufPrint(&otto_buffer, "{s}\\library.otto", .{root});
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "library.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "library.otto", .data = "OTTOLIB\x00" });
+    try testing.expectEqualStrings(json_path, import_cli.runIntoBase(io, json_path, otto_path));
+}

@@ -82,7 +82,7 @@ pub fn run(init: std.process.Init, dir_path: []const u8) !u8 {
     var library = try buildLibrary(allocator, &scan);
     defer library.deinit();
 
-    var live = try live_mod.Live.init(allocator, io, &library, root);
+    var live = try live_mod.Live.init(allocator, io, &library, root, true);
     defer live.deinit();
 
     // 建 Live 之前的文件不该产生事件；这 100ms 只是把可能迟到的队列排空。

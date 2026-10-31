@@ -7,14 +7,13 @@
 //!   otto-lite --preview <file> | --play-test <file> | --copy-now <file>
 //!   otto-lite --import <folder> [--library <file>] --save <out.otto>
 //!   otto-lite --check-update <url>     （无窗口更新检查，见 `update_ui.zig`）
-//!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点。表头右上角的
-//!   「检查更新」默认不联网：只有点击才起线程（`update_ui.zig`）。
+//!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点；更新检查默认不联网。
 //!
-//! 列表下方是预览区（`preview_panel.zig`）：选中行变化时把样本交给注册表，按
-//! `Outcome` 的分支画图/文字/占位；本文件不认识任何媒体类型（ROADMAP M1）。
+//! 列表下方是预览区（`preview_panel.zig`）：本文件不认识任何媒体类型（ROADMAP M1）。
 //!
 //! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
-//! 便携版用 `<exe 目录>\data\library.json`，安装版用 `%APPDATA%\OTTO\library.json`。
+//! 便携/安装版用 `<数据目录>\library.json`（导入过的库是那里的 `library.otto`）。
+//! 库文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态（`empty_state.zig`）。
 //!
 //! 搜索（`search_ui.zig`）：Ctrl+F 聚焦、Esc 清空；输入即过滤（文件名子串、ASCII
 //! 大小写不敏感），过滤变化时清空选择、光标尽量停在原样本。↑↓/Home/End/Enter 在
@@ -26,6 +25,7 @@ const core = @import("otto_core");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
+const empty_state = @import("empty_state.zig");
 const import_ui = @import("import_ui.zig");
 const library_io = @import("library_io.zig");
 const list_header = @import("list_header.zig");
@@ -49,8 +49,7 @@ const version_mod = @import("version.zig");
 const window_util = @import("window_util.zig");
 const ui = nanoui.ui;
 
-/// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中。监听线程自己
-/// 阻塞在 ReadDirectoryChangesW 上，这里只是把队列搬进 Index。
+/// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中（监听线程自己阻塞在 ReadDirectoryChangesW 上）。
 const tick_ms: u64 = 150;
 
 // 每一行左侧缩略图的边长在 `row_thumb.zig`（32 点）；向系统请求 64px（2x 屏 1:1）。
@@ -172,6 +171,10 @@ const State = struct {
             if (!busy) s.rowInput(c, index, it);
         }
         rows.end();
+
+        // 空库（首次启动）：列表区域换成空状态 + 居中的「导入文件夹」。
+        const empty_clicked = empty_state.draw(c, s.samples.len, s.import.busy());
+        if (!busy and empty_clicked) s.import.begin(window_util.nativeHandle(s.window));
 
         if (!busy) {
             if (body_it.clicked) {
@@ -488,20 +491,20 @@ pub fn main(init: std.process.Init) !void {
         if (code != 0) std.process.exit(code);
         return;
     }
-    // `--mem-probe`：真实窗口形态的内存分解（隐藏窗口，见 `mem_probe.zig`）。
-    // 没开时 `begin` / `mark` 都只是一次 bool 判断，不读内存。
+    // `--mem-probe`：真实窗口形态的内存分解（隐藏窗口）；没开时 `begin`/`mark` 只是 bool 判断。
     var probe = mem_probe.Probe.begin(init, options);
 
-    // 位置参数优先；没有就按运行形态给默认库（见文件头）。
-    // 格式按文件头判断：`.otto` 走 OTTOLIB，其余走 electron-store JSON。
-    const library_path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
+    // 位置参数优先；没有就按运行形态给默认库（见文件头）。格式按 magic 判断。
+    const library_path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
     var library = try init.gpa.create(core.store.Library);
-    library.* = library_io.load(init, init.gpa, library_path) catch |err| {
-        // 损坏的库（BadMagic / UnknownVersion / Truncated / ChecksumMismatch）在
-        // 这里给一行具名错误，而不是把 Zig 调用栈甩给用户。
+    const opened = library_io.open(init, init.gpa, library_path) catch |err| {
+        // 存在但读不了 / 损坏：一行具名错误 + 退出 1（"不存在"已在 open 里变成空库）。
         std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ library_path, @errorName(err) });
         std.process.exit(1);
     };
+    // 文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态。
+    library.* = opened.library;
+    if (opened.empty) std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{library_path});
     trace.mark("setup.library");
     probe.mark("library", .{});
     defer {
@@ -509,10 +512,9 @@ pub fn main(init: std.process.Init) !void {
         init.gpa.destroy(library);
     }
     const root = try mode_mod.watchRoot(allocator, init.io, options.watch_dir, library_path);
-    // 监听打不开（目录被删 / 没权限）就是明确的启动错误：不静默退化成「列表不更新」。
     var live = try init.gpa.create(live_mod.Live);
     errdefer init.gpa.destroy(live);
-    live.* = try live_mod.Live.init(init.gpa, init.io, library, root);
+    live.* = try live_mod.Live.init(init.gpa, init.io, library, root, options.watch_dir != null);
     trace.mark("setup.live");
     defer {
         live.deinit();
@@ -586,13 +588,10 @@ pub fn main(init: std.process.Init) !void {
     state.settings.applyWindowState(window_util.nativeHandle(state.window));
     if (options.bench_first_frame) {
         try bench_mod.firstFrame(init, app, started);
-        // 一次性探针：打印完就退出，不 join 缩略图/预览工作线程。它们可能正在
-        // Shell 里做冷启动的第一次取图；收尾时间不能算进"首帧墙钟"，否则量到的
-        // 是"首帧 + 关窗"。
+        // 一次性探针：打印完就退出，不 join 工作线程（冷启动取图不能算进首帧墙钟）。
         std.process.exit(0);
     }
-    // snapshot 模式没有消息循环，定时器不会跑到；离屏出图只画初始视图。
-    // 想看到后台取到的图，加 `--nanoui-wait=<秒>`：事件循环会跑、tick 会重画。
+    // snapshot 模式没有消息循环（`--nanoui-wait=<秒>` 才会跑事件循环、tick 重画）。
     nanoui.App.after(tick_ms, &state, State.tick);
     // 探针：D3D、8/50/100 张缩略图、空闲 10 秒，打完表就退出（不 join 工作线程）。
     if (probe.active) probe.finish(state.window.?, thumbs);

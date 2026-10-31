@@ -87,7 +87,7 @@ pub fn run(
 
     // 过滤自检：不开窗，载入库 → 用 UI 同一条匹配规则过滤 → 打印命中数。
     if (options.filter) |needle| {
-        const path = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
+        const path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
         return try demo_filter.run(init, allocator, path, needle);
     }
 
@@ -100,7 +100,7 @@ pub fn run(
     // UI「导入文件夹」按钮的无头入口：同一个 `importRun`、同一套保存目标规则。
     // 放在 `--import` 之前：两个标志互斥，用的是同一个 `--save` 值。
     if (options.import_into) |folder| {
-        const base = options.library_path orelse try mode_mod.defaultLibraryPath(allocator, init.io);
+        const base = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
         return try import_cli.runInto(init.io, allocator, folder, base, options.save_path);
     }
 

@@ -81,7 +81,7 @@ test "溢出重扫：删 1 / 加 1 / 改 1，注释按身份保留；无变化�
     defer testing.allocator.free(samples);
     _ = try library.appendSamples(samples);
 
-    var live = try live_mod.Live.init(testing.allocator, testing.io, &library, root);
+    var live = try live_mod.Live.init(testing.allocator, testing.io, &library, root, true);
     defer live.deinit();
 
     // 建 Live 之前就存在的文件不会产生事件；这里只是把可能迟到的队列排空。
