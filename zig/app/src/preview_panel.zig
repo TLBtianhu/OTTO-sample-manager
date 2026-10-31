@@ -47,6 +47,9 @@ pub const default_height: f32 = 160;
 pub const Options = struct {
     max_px: u32 = preview.default_max_px,
     height: f32 = default_height,
+    /// 允许 Shell provider 把取图交给隔离 helper。`--no-isolation` 时为 false，
+    /// 和 `thumbs.zig` 的开关保持同一条语义。
+    allow_isolation: bool = true,
 };
 
 pub const InitError = preview_worker.InitError;
@@ -88,7 +91,13 @@ pub const Panel = struct {
     ) InitError!*Panel {
         const self = try allocator.create(Panel);
         errdefer allocator.destroy(self);
-        const worker = try preview_worker.Worker.init(allocator, io, registry, @max(1, options.max_px));
+        const worker = try preview_worker.Worker.init(
+            allocator,
+            io,
+            registry,
+            @max(1, options.max_px),
+            options.allow_isolation,
+        );
         errdefer worker.deinit();
 
         self.* = .{

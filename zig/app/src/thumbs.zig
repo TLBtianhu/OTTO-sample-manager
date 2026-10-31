@@ -1,25 +1,31 @@
-//! 列表左侧那格 32×32 点（2x 屏按 64px 取）：把 `zig/ports` 的「能不能取图」与
-//! 「Shell 取图」变成一个不阻塞 UI 的取图层。
+//! 列表左侧那格 32×32 点（2x 屏按 64px 取）：把**预览 provider 注册表**变成一条
+//! 不阻塞 UI 的取图管线（缓存 + 有界队列 + 工作线程）。
+//!
+//! 行内小图不是第二条解码链：工作线程调 `thumbs_icon.fetch`，它内部就是
+//! `providers.registryForIcon(no_shell).open(...)`——PNG/BMP 由 `image-wic` 解，
+//! 视频首帧由 `mf-video` 抽，PSD 之类才轮到 `shell-thumbnail`（默认走隔离 helper）。
+//! 这样同一个 PNG 的预览与行内小图走同一条 provider，不再"预览用 WIC、行内问 Shell"。
 //!
 //! 分工（CHARTER「一、可发现 / 可解码 / 可调度」）：
-//!   * `otto_caps` 回答**可发现**（这台机器登记了该扩展名的 IThumbnailProvider 吗），
-//!     只读注册表，不加载第三方 DLL；
-//!   * `otto_thumb` 回答**可解码**（真的把像素交出来），会加载第三方 handler；
-//!     M4 起这一步默认发生在 `otto-thumb-host.exe` 里，崩溃/卡死只带走 helper；
-//!   * 本文件回答**可调度**：门禁、缓存、后台线程、账号（requested / ready /
-//!     no_handler / cached / failed / dropped），UI 只问 `acquire`。
+//!   * provider 回答**可发现 + 可解码**：`supports` 是廉价声明，`open` 才真的取图。
+//!     Shell provider 的门禁仍然问 `otto_caps`（只读注册表，不加载第三方 DLL）；
+//!   * 本文件回答**可调度**：缓存、后台线程、账号（requested / ready / no_handler /
+//!     cached / failed / dropped），UI 只问 `acquire`。
 //!
 //! 四道关（按顺序，越早越便宜）：
 //!   1. **L2 内存缓存**：`core.cache.Cache`（kind = `.thumbnail`）命中就直接返回，零 IO；
-//!   2. **能力门禁**：`caps.forPath`。`has_handler == false` 立刻返回「无预览」，
-//!      **绝不**调 `thumb.get`——没有 handler 的文件在 Shell 里只会退回一个通用
-//!      文件图标，那既不是缩略图，还会白白加载一遍 Shell；
+//!   2. **失败 / 谢绝记忆**：同一文件不再重复取；没有预览的行不会每帧重新入队
+//!      （负缓存），磁盘事件 `clearFailures()` 后才重试；
 //!   3. **L3 磁盘缓存**（M4 第二块，`diskcache.zig`）：L2 没命中就进队列，由工作
-//!      线程先查 `<dataDir>/cache/thumbs`。命中就把像素回填 L2，**完全不碰 helper**；
+//!      线程先查 `<dataDir>/cache/thumbs`。命中就把像素回填 L2，**完全不碰 provider**；
 //!      读文件在工作线程上做，UI 线程一帧都不等；
-//!   4. **后台队列**：L3 也没有的、且真的登记了 handler 的，由唯一一条工作线程
-//!      同步调隔离层（默认 `thumb_host.get`）。第三方 handler 卡死时卡的是 helper
-//!      进程，超时由客户端杀掉，UI 线程与列表都不受影响。
+//!   4. **后台队列**：L3 也没有的，由唯一一条工作线程同步调 `registryForIcon().open`。
+//!      Shell 的第三方 handler 卡死时卡的是 helper 进程（3 秒超时杀），UI 线程与列表
+//!      都不受影响；`--no-isolation` 才是这条工作线程。
+//!
+//! `--no-shell-preview` 与预览用同一个开关：图标表里根本没有 Shell，PSD 显示占位，
+//! PNG/BMP 仍由 `image-wic` 出图。能力表（`caps`）只留在 Shell provider 的
+//! `supports` 里，本层不再有一份独立的门禁——两处语义不会漂移。
 //!
 //! L3 的键由 L2 的键串派生（四轮 Wyhash → 32 字节，见 `thumbs_codec.zig`）：
 //! 同一路径 + 同一 mtime + 同一请求边长跨进程稳定，所以第二次打开库仍然命中。
@@ -36,30 +42,37 @@
 //!   路径长到放不进 `max_key_bytes` 时退化成 `hash|<stableKey 哈希>|<mtime>|<边长>`，
 //!   键长固定、不会无界增长（Wyhash 64 位，和 core 的注释表同一套哈希）。
 //!
+//! **缓存层不知道 provider 是谁**：键只含样本身份 + mtime + 边长；换了 provider
+//! 实现（例如 PNG 从 Shell 改成 WIC）旧条目仍然按同一条键命中/失效，不需要迁移。
+//!
 //! 所有权 / 线程模型：
 //!   * 像素内存归 `Cache` 所有；UI 拿到的 `View.pixels` 是借用，只在 pin 期间有效。
 //!     每次 view 为可见行 `acquire` 时取一次 pin，下一帧开头 `beginFrame` 统一
 //!     unpin——这样「这一帧要画的东西」在 view → paint 之间不会被淘汰；
-//!   * 队列、缓存、失败记忆、inflight 都过同一把自旋锁（照 `ports/watch.zig` 的
+//!   * 队列、缓存、失败/谢绝记忆、inflight 都过同一把自旋锁（照 `ports/watch.zig` 的
 //!     先例：Zig 0.17 的 `std.Io.Mutex` 需要 Io 实例，而这里只需要几十条指令的
-//!     临界区）。`thumb.get` 在锁外执行；
+//!     临界区）。`provider.open` 在锁外执行；
 //!   * 工作线程用 `std.Io.Semaphore` 睡眠（不轮询、不空转），`deinit` 时 post 一次
 //!     唤醒并 join；
-//!   * 传进来的 allocator 必须线程安全：工作线程要用它分配像素、路径和缓存条目。
+//!   * 传进来的 allocator 必须线程安全：工作线程要用它分配像素、样本副本和缓存条目。
 //!
-//! 失败记忆：`thumb.get` 失败（文件没了 / Shell 出错）会记进一张有界表，避免每一帧
-//! 都去敲一遍 Shell；磁盘事件到来时调用 `clearFailures()` 让新文件有机会重试。
+//! 失败 / 谢绝记忆：provider 的 `none.failed` / `none.file_missing` 记失败表，
+//! `none.no_handler` / `none.unsupported` 记负缓存；两者都有界，磁盘事件到来时
+//! `clearFailures()` 一起清掉。行内小图的失败不会影响列表滚动或预览条：它们只
+//! 占一格占位图标，下一次磁盘事件还会重试。
 //!
-//! 本文件不依赖 UI（不 import nanoui），`--demo-thumbs` 可以脱离窗口直接驱动。
-//!
-//! 只依赖 Zig 0.17 标准库与几个口岸，没有 @cImport。
+//! 本文件不依赖 UI（不 import nanoui），`--demo-thumbs` 可以脱离窗口直接驱动；
+//! 只依赖 Zig 0.17 标准库、`preview` / `providers` 与几个口岸，没有 @cImport。
 
 const std = @import("std");
 const core = @import("otto_core");
-const caps = @import("otto_caps");
+const preview = @import("preview.zig");
+const providers = @import("providers/root.zig");
 const thumb = @import("otto_thumb");
 const thumb_host = @import("otto_thumb_host");
 const codec = @import("thumbs_codec.zig");
+const icon = @import("thumbs_icon.zig");
+const keys_mod = @import("thumbs_keys.zig");
 const l3 = @import("thumbs_disk.zig");
 
 const types = @import("thumbs_types.zig");
@@ -96,8 +109,16 @@ pub const Thumbs = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     size_px: u32,
-    /// 取图走隔离 helper（默认）还是进程内 `thumb.get`（`--no-isolation`）。
+    /// 取图走隔离 helper（默认）还是进程内（`--no-isolation`）。这个开关现在
+    /// 只作为 `preview.Request.allow_isolation` 传给 Shell provider；具体走哪个
+    /// 口岸由 provider 决定（见 `providers/thumb.zig`）。
     isolation: bool,
+    /// 行内小图是否允许问 Shell。`--no-shell-preview` 时为 false：图标注册表里
+    /// 根本没有 Shell，helper 也不需要存在。
+    shell_enabled: bool,
+    /// 行内小图的 provider 表（`providers.registryForIcon`）。按值保存：只有一枚
+    /// 指向静态数组的切片，复制很便宜，调用时也不需要再查开关。
+    icon_registry: preview.Registry,
     cache: core.cache.Cache,
     /// L3 磁盘缓存。只在工作线程上读写（启动时的 prune 例外，在起线程之前）。
     disk: ?l3.L3 = null,
@@ -109,8 +130,11 @@ pub const Thumbs = struct {
     len: usize = 0,
     /// 工作线程正在处理的请求（只为了去重与 `pending` 计数；数据归工作线程）。
     inflight: ?Job = null,
-    /// 失败记忆：键原文，条数上限 `failure_memory`。
+    /// 失败记忆：键原文，条数上限 `failure_memory`。文件没了 / provider 失败。
     failed_keys: std.ArrayListUnmanaged([]u8) = .empty,
+    /// 谢绝记忆：provider 全部说 no_handler/unsupported 的键。没有它，没有预览的
+    /// 行每一帧都会重新入队——负缓存让"同文件不重复取"对谢绝也成立。
+    declined_keys: std.ArrayListUnmanaged([]u8) = .empty,
     failure_memory: usize,
 
     /// 只由 UI 线程访问（`beginFrame` / `acquire`），不需要锁。
@@ -143,6 +167,8 @@ pub const Thumbs = struct {
             .io = io,
             .size_px = std.math.clamp(options.size_px, 1, thumb.max_size_px),
             .isolation = options.isolation,
+            .shell_enabled = !options.no_shell_preview,
+            .icon_registry = providers.registryForIcon(options.no_shell_preview),
             .cache = core.cache.Cache.init(allocator, options.budget_bytes),
             .slots = slots,
             .failure_memory = @max(1, options.failure_memory),
@@ -153,7 +179,10 @@ pub const Thumbs = struct {
         // 隔离是默认路径：helper exe 不在就是**启动错误**，不是「没有预览」。
         // 只查文件、不 spawn（懒启动）；也不静默退回进程内（那等于把第三方 handler
         // 又请回 OTTO 的进程里，而且用户不会知道）。
-        if (self.isolation) {
+        //
+        // `--no-shell-preview` 时图标表里根本没有 Shell，这条检查不能误伤它：
+        // 没有 Shell 就不需要 helper，PNG/BMP 仍由 image-wic 自给自足。
+        if (self.isolation and self.shell_enabled) {
             thumb_host.ensurePresent(allocator, .{}) catch |err| {
                 self.cache.deinit();
                 if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -185,8 +214,8 @@ pub const Thumbs = struct {
             }
         }
 
-        // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：工作线程只做缓存查询、helper
-        // 往返与一次 96×96 的拷贝，少掉的 15 MiB 是提交而不是保留。
+        // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：工作线程只做缓存查询、
+        // provider 取图与一次像素拷贝，少掉的 15 MiB 是提交而不是保留。
         self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, workerMain, .{self}) catch |err| {
             self.cache.deinit();
             if (self.disk) |*disk| disk.deinit();
@@ -203,20 +232,21 @@ pub const Thumbs = struct {
         if (self.thread) |thread| thread.join();
 
         // 工作线程已停：helper 没有在途请求了，可以收掉整个进程（隔离层的单例）。
-        if (self.isolation) thumb_host.deinit();
+        // `--no-isolation` / `--no-shell-preview` 下没有起过 helper，不必碰它。
+        if (self.isolation and self.shell_enabled) thumb_host.deinit();
 
         // 线程停了，队列 / inflight 只剩没人要的请求，逐个释放。
         self.lock.acquire();
         while (self.popLocked()) |job| {
             self.allocator.free(job.key);
-            self.allocator.free(job.path);
+            job.sample.deinit(self.allocator);
         }
         self.lock.release();
 
         for (self.pinned.items) |pin| self.allocator.free(pin.key);
         self.pinned.deinit(self.allocator);
-        for (self.failed_keys.items) |key| self.allocator.free(key);
-        self.failed_keys.deinit(self.allocator);
+        keys_mod.deinit(self.allocator, &self.failed_keys);
+        keys_mod.deinit(self.allocator, &self.declined_keys);
         self.cache.deinit();
         if (self.disk) |*disk| disk.deinit();
         self.allocator.free(self.slots);
@@ -237,8 +267,8 @@ pub const Thumbs = struct {
 
     /// 为一行要一张缩略图。命中返回借用视图（已 pin），否则返回待取 / 无预览 / 失败。
     ///
-    /// 这里的调用都在 UI 线程：缓存与去重过一次锁，能力门禁在锁外查注册表，
-    /// `thumb.get` 从不在这里发生。
+    /// 这里的调用都在 UI 线程：缓存、失败/谢绝记忆与去重过一次锁；**不查能力表、
+    /// 不碰 provider**——`registryForIcon(...).open` 一律在工作线程上执行。
     pub fn acquire(self: *Thumbs, sample: core.model.Sample) Lookup {
         var buffer: [max_key_bytes]u8 = undefined;
         const key = keyFor(sample, self.size_px, &buffer);
@@ -250,9 +280,13 @@ pub const Thumbs = struct {
             self.lock.release();
             return .{ .ready = view };
         }
-        if (self.knownFailureLocked(key)) {
+        if (keys_mod.contains(self.failed_keys.items, key)) {
             self.lock.release();
             return .failed;
+        }
+        if (keys_mod.contains(self.declined_keys.items, key)) {
+            self.lock.release();
+            return .no_handler;
         }
         if (self.isPendingLocked(key)) {
             self.lock.release();
@@ -260,22 +294,7 @@ pub const Thumbs = struct {
         }
         self.lock.release();
 
-        // 能力门禁：没有登记 handler 的文件，`thumb.get` 只会给一个通用图标，
-        // 那既不是缩略图、又会白加载一遍 Shell。这里直接给「无预览」。
-        const info = caps.forPath(self.allocator, sample.file_path) catch |err| switch (err) {
-            // 没有扩展名 / 扩展名非法：同样不可能有 handler。
-            error.InvalidExtension, error.Unsupported => {
-                _ = self.no_handler.fetchAdd(1, .monotonic);
-                return .no_handler;
-            },
-            else => return .failed,
-        };
-        if (!info.has_handler) {
-            _ = self.no_handler.fetchAdd(1, .monotonic);
-            return .no_handler;
-        }
-
-        return self.enqueue(key, sample.file_path, disk_key);
+        return self.enqueue(key, sample, disk_key);
     }
 
     /// 取图成功次数（完成一次 = 放进缓存并加一）。UI 的 tick 看它变没变来决定重画。
@@ -308,12 +327,12 @@ pub const Thumbs = struct {
         };
     }
 
-    /// 磁盘有变化（新增 / 改写 / 改名）时清空失败记忆：刚出现的文件值得再试一次。
+    /// 磁盘有变化（新增 / 改写 / 改名）时清空失败与谢绝记忆：刚出现的文件值得再试。
     pub fn clearFailures(self: *Thumbs) void {
         self.lock.acquire();
         defer self.lock.release();
-        for (self.failed_keys.items) |key| self.allocator.free(key);
-        self.failed_keys.clearRetainingCapacity();
+        keys_mod.clear(self.allocator, &self.failed_keys);
+        keys_mod.clear(self.allocator, &self.declined_keys);
     }
 
     /// 设置面板改预算：L2 立即按新预算淘汰（`Cache.setBudget` 自己会淘汰），
@@ -376,13 +395,6 @@ pub const Thumbs = struct {
         };
     }
 
-    fn knownFailureLocked(self: *const Thumbs, key: []const u8) bool {
-        for (self.failed_keys.items) |failed_key| {
-            if (std.mem.eql(u8, failed_key, key)) return true;
-        }
-        return false;
-    }
-
     fn isPendingLocked(self: *const Thumbs, key: []const u8) bool {
         if (self.inflight) |job| {
             if (std.mem.eql(u8, job.key, key)) return true;
@@ -396,16 +408,18 @@ pub const Thumbs = struct {
         return false;
     }
 
-    /// 复制键与路径后入队；满了先丢最旧（计 `dropped`）。
-    fn enqueue(self: *Thumbs, key: []const u8, path: []const u8, disk_key: ?l3.Key) Lookup {
+    /// 复制键与样本后入队；满了先丢最旧（计 `dropped`）。
+    fn enqueue(self: *Thumbs, key: []const u8, sample: core.model.Sample, disk_key: ?l3.Key) Lookup {
         const owned_key = self.allocator.dupe(u8, key) catch return .failed;
-        errdefer self.allocator.free(owned_key);
-        const owned_path = self.allocator.dupe(u8, path) catch return .failed;
+        const snapshot = icon.Snapshot.init(self.allocator, sample) catch {
+            self.allocator.free(owned_key);
+            return .failed;
+        };
 
         self.lock.acquire();
         self.pushLocked(.{
             .key = owned_key,
-            .path = owned_path,
+            .sample = snapshot,
             .size_px = self.size_px,
             .disk_key = disk_key,
         });
@@ -443,7 +457,7 @@ pub const Thumbs = struct {
         self.head = (self.head + 1) % self.slots.len;
         self.len -= 1;
         self.allocator.free(job.key);
-        self.allocator.free(job.path);
+        job.sample.deinit(self.allocator);
         _ = self.dropped.fetchAdd(1, .monotonic);
     }
 
@@ -467,26 +481,49 @@ pub const Thumbs = struct {
         return job;
     }
 
-    /// 真正碰 Shell 的地方：锁外执行；隔离时卡住的是 helper 进程（3 秒后被客户端杀掉），
-    /// `--no-isolation` 时才是这条工作线程。
+    /// 真正取图的地方：锁外执行。**provider 决定**去哪取（image-wic / mf-video /
+    /// Shell 的 helper 或进程内），本层只负责缓存、去重与失败/谢绝记忆。
     fn fetch(self: *Thumbs, job: Job) void {
-        // L3 先于 helper：第二次打开库时 8 张图全部从这里返回，一个进程都不起。
+        // L3 先于 provider：第二次打开库时 8 张图全部从这里返回，一个 helper 都不起。
         if (self.loadFromDisk(job)) return;
 
-        const result = self.fetchImage(job) catch {
+        const fetched = icon.fetch(
+            self.allocator,
+            self.icon_registry,
+            &job.sample.sample,
+            job.size_px,
+            self.isolation,
+        ) catch {
+            // 只有 OOM / 连 outcome 都构造不出来才会到这里。
             self.recordFailure(job);
             return;
         };
-        defer result.deinit(self.allocator);
 
-        const pixel_bytes = result.stride * @as(usize, result.height);
+        switch (fetched) {
+            .image => |image| {
+                var bitmap = image.bitmap;
+                defer bitmap.deinit(self.allocator);
+                self.storeImage(job, bitmap);
+            },
+            // 谢绝不是错误：no_handler/unsupported 进负缓存（UI 显示文档占位），
+            // failed/file_missing 进失败表（UI 显示警告三角）。
+            .none => |declined| switch (declined.reason) {
+                .no_handler, .unsupported => self.recordDeclined(job),
+                .failed, .file_missing => self.recordFailure(job),
+            },
+        }
+    }
+
+    /// 把一张位图按 L2 载荷格式入缓存，再补一笔 L3；失败只影响这一张。
+    fn storeImage(self: *Thumbs, job: Job, bitmap: preview.Bitmap) void {
+        const pixel_bytes = bitmap.stride * @as(usize, bitmap.height);
         const payload = self.allocator.alloc(u8, header_bytes + pixel_bytes) catch {
             self.recordFailure(job);
             return;
         };
         defer self.allocator.free(payload);
-        encodeHeader(payload, result.width, result.height, result.stride);
-        @memcpy(payload[header_bytes..], result.pixels[0..pixel_bytes]);
+        encodeHeader(payload, bitmap.width, bitmap.height, bitmap.stride);
+        @memcpy(payload[header_bytes..], bitmap.pixels[0..pixel_bytes]);
 
         self.lock.acquire();
         self.inflight = null;
@@ -494,8 +531,7 @@ pub const Thumbs = struct {
             self.lock.release();
             _ = self.failed.fetchAdd(1, .monotonic);
             // 缓存写不进去（OOM）不算「这个文件没有预览」：不记失败表，下次还会重试。
-            self.allocator.free(job.key);
-            self.allocator.free(job.path);
+            self.freeJob(job);
             return;
         };
         // put 成功：缓存复制了键与像素，job 自己的内存可以还了。
@@ -508,12 +544,11 @@ pub const Thumbs = struct {
             if (self.disk) |*disk| disk.put(disk_key, payload) catch {};
         }
 
-        self.allocator.free(job.key);
-        self.allocator.free(job.path);
+        self.freeJob(job);
     }
 
     /// L3 命中：把磁盘像素按 L2 载荷格式回填内存缓存，结束这个请求。
-    /// 命中（含回填失败）返回 true；miss / IO 错误返回 false，调用方继续走 helper。
+    /// 命中（含回填失败）返回 true；miss / IO 错误返回 false，调用方继续走 provider。
     fn loadFromDisk(self: *Thumbs, job: Job) bool {
         const disk = if (self.disk) |*value| value else return false;
         const disk_key = job.disk_key orelse return false;
@@ -525,44 +560,41 @@ pub const Thumbs = struct {
             self.lock.release();
             self.allocator.free(payload);
             _ = self.failed.fetchAdd(1, .monotonic);
-            self.allocator.free(job.key);
-            self.allocator.free(job.path);
+            self.freeJob(job);
             return true;
         };
         _ = self.ready.fetchAdd(1, .release);
         self.lock.release();
 
         self.allocator.free(payload);
-        self.allocator.free(job.key);
-        self.allocator.free(job.path);
+        self.freeJob(job);
         return true;
     }
 
-    /// 取一张图的唯一分叉点：隔离（默认）还是进程内（`--no-isolation`）。
-    /// 返回类型用隔离层的错误集（`thumb.Error` 的超集），进程内分支的错误自动并上去。
-    fn fetchImage(self: *Thumbs, job: Job) thumb_host.Error!thumb.Thumbnail {
-        if (self.isolation) return thumb_host.get(self.allocator, job.path, job.size_px);
-        return thumb.get(self.allocator, job.path, job.size_px);
-    }
-
-    /// 失败：清 inflight、记进失败表（键的所有权转移给表），路径还回去。
+    /// 失败：清 inflight、记进失败表（键的所有权转移给表），样本还回去。
     fn recordFailure(self: *Thumbs, job: Job) void {
         self.lock.acquire();
         self.inflight = null;
-        self.rememberFailureLocked(job.key);
+        keys_mod.remember(self.allocator, &self.failed_keys, self.failure_memory, job.key);
         _ = self.failed.fetchAdd(1, .monotonic);
         self.lock.release();
 
-        self.allocator.free(job.path);
+        job.sample.deinit(self.allocator);
     }
 
-    fn rememberFailureLocked(self: *Thumbs, key: []u8) void {
-        if (self.failed_keys.items.len >= self.failure_memory) {
-            const oldest = self.failed_keys.orderedRemove(0);
-            self.allocator.free(oldest);
-        }
-        self.failed_keys.append(self.allocator, key) catch {
-            self.allocator.free(key);
-        };
+    /// 全部 provider 谢绝：清 inflight、记进负缓存（键的所有权转移给表）。
+    fn recordDeclined(self: *Thumbs, job: Job) void {
+        self.lock.acquire();
+        self.inflight = null;
+        keys_mod.remember(self.allocator, &self.declined_keys, self.failure_memory, job.key);
+        _ = self.no_handler.fetchAdd(1, .monotonic);
+        self.lock.release();
+
+        job.sample.deinit(self.allocator);
+    }
+
+    fn freeJob(self: *Thumbs, job: Job) void {
+        self.allocator.free(job.key);
+        job.sample.deinit(self.allocator);
     }
 };

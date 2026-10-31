@@ -64,6 +64,8 @@ pub const Worker = struct {
     io: std.Io,
     registry: *const preview.Registry,
     max_px: u32,
+    /// 允许 Shell provider 把取图交给隔离 helper（`--no-isolation` 时为 false）。
+    allow_isolation: bool,
 
     // ---- 工作线程共享（过 lock）----
     lock: SpinLock = .{},
@@ -84,6 +86,7 @@ pub const Worker = struct {
         io: std.Io,
         registry: *const preview.Registry,
         max_px: u32,
+        allow_isolation: bool,
     ) InitError!*Worker {
         const self = try allocator.create(Worker);
         errdefer allocator.destroy(self);
@@ -93,6 +96,7 @@ pub const Worker = struct {
             .io = io,
             .registry = registry,
             .max_px = max_px,
+            .allow_isolation = allow_isolation,
         };
         // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：这个线程只做解码与文本布局，
         // 少掉的 15 MiB 是**提交**，`--mem-probe` 的 private 列能看到。
@@ -167,7 +171,11 @@ pub const Worker = struct {
 
         const answered = self.registry.openAnswered(
             self.allocator,
-            .{ .sample = &snapshot.sample, .max_px = self.max_px },
+            .{
+                .sample = &snapshot.sample,
+                .max_px = self.max_px,
+                .allow_isolation = self.allow_isolation,
+            },
         ) catch |err| {
             std.debug.print("otto-lite: 预览 provider 异常（{s}）\n", .{@errorName(err)});
             self.publish(snapshot.generation, null, .{ .none = .failed });

@@ -1,10 +1,11 @@
-//! `--demo-thumbs <dir>`：不开窗口的取图自检。
+//! `--demo-thumbs <dir>`：不开窗口的取图自检（走 provider 注册表）。
 //!
 //! 建三个文件，覆盖三种结局：
-//!   * `red.bmp`    —— 64×64、24 位真 BMP。系统有 image 缩略图 handler，Shell 能出图；
-//!   * `tone.wav`   —— 合法的最小 PCM WAV。音频的结局是这台机器上「有 handler 但可能
-//!     解不出像素」，用来覆盖 `thumb.get` 的失败分支；
-//!   * `mystery.xyz`—— 故意用没人注册的扩展名，验证能力门禁**根本没把请求放进队列**。
+//!   * `red.bmp`    —— 64×64、24 位真 BMP。`image-wic` 自己解，行内小图不再问 Shell；
+//!   * `tone.wav`   —— 合法的最小 PCM WAV。音频 provider 不参与行内小图
+//!     （`icon_capable = false`），所以它要么被 Shell 静态图接手，要么谢绝；
+//!   * `mystery.xyz`—— 故意用没人注册的扩展名，验证注册表全部谢绝后进负缓存、
+//!     不会每一帧重新入队。
 //!
 //! 同时往目录里写一份 `library.json`（三条样本、绝对路径），所以跑完可以直接用
 //! `otto-lite.exe <dir>\library.json --nanoui-snapshot=thumb.png --nanoui-wait=2`
@@ -13,14 +14,16 @@
 //! 判据（任何一条不成立 → 退出 1）：
 //!   1. 等 `pending == 0`，不允许有请求永远挂着；
 //!   2. BMP 必须 `ready` 且宽高 > 0、像素长度 = 跨度 × 高、alpha 已归一化成 255；
-//!   3. 有 handler 的样本必须都进过队列（`requested` == handler 数）；
-//!      没有 handler 的样本一次都不能进队列（`no_handler` == 两轮 × 无 handler 数）；
-//!   4. 第二轮必须全部命中缓存（`cached` == `ready`），且 `ready` == `readyCount()`；
+//!   3. 第一轮所有可见行都会入队一次（`requested` == 样本数），provider 的谢绝
+//!      发生在工作线程上；没有 provider 声明的样本最终至少记一次 `no_handler`
+//!      （负缓存让第二轮不再入队）；
+//!   4. 第二轮有图的行必须全部命中缓存（`cached` == `ready`），且
+//!      `ready` == `readyCount()`；没有图的行不得还 `pending`；
 //!   5. 队列容量 32 > 3，不许丢请求（`dropped == 0`）。
 
 const std = @import("std");
 const core = @import("otto_core");
-const caps = @import("otto_caps");
+const providers = @import("providers/root.zig");
 const thumbs_mod = @import("thumbs.zig");
 
 /// 自检建的文件：名字 + 用途。
@@ -37,7 +40,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, dir_path);
-    // 绝对根：库里写绝对路径，`thumb.get` / `caps.forPath` 都按路径字节比对。
+    // 绝对根：库里写绝对路径，provider 的 supports / open 都按路径字节比对。
     const root = try cwd.realPathFileAlloc(io, dir_path, allocator);
     defer allocator.free(root);
 
@@ -74,18 +77,24 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
     var thumbs = try thumbs_mod.Thumbs.init(allocator, io, .{ .isolation = isolation });
     defer thumbs.deinit();
 
-    // 期望：有 handler 的才该进队列；没有 handler 的必须被门禁挡下。
-    var handler_count: u32 = 0;
-    var gated_count: u32 = 0;
+    // 期望：每个可见行都会入队一次（provider 的 supports/open 在工作线程上跑）；
+    // 没有 provider 声明的样本最终至少要记一次 no_handler（然后进负缓存）。
+    const icon_registry = providers.registryForIcon(false);
+    var declared_count: u32 = 0;
+    var undeclared_count: u32 = 0;
     for (library.samples) |sample| {
-        const info = caps.forPath(allocator, sample.file_path) catch |err| {
-            std.debug.print("demo-thumbs: FAIL caps.forPath({s})：{s}\n", .{ sample.file_path, @errorName(err) });
-            return 1;
-        };
-        if (info.has_handler) handler_count += 1 else gated_count += 1;
+        if (icon_registry.find(&sample) != null) {
+            declared_count += 1;
+        } else {
+            undeclared_count += 1;
+        }
     }
+    std.debug.print(
+        "demo-thumbs: 样本 {d} 条，provider 声明接手 {d} 条，无人声明 {d} 条\n",
+        .{ library.samples.len, declared_count, undeclared_count },
+    );
 
-    // 第一轮：全部请求。此时缓存是空的，所以每一条有 handler 的都该入队。
+    // 第一轮：全部请求。此时缓存是空的，所以每一条都会入队一次。
     for (library.samples) |sample| _ = thumbs.acquire(sample);
 
     const settled = waitSettled(io, thumbs);
@@ -93,8 +102,9 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
     check(&ok, settled, "等了 {d}ms 仍有请求没落地（pending={d}）", .{ settle_timeout_ms, thumbs.stats().pending });
 
     const first = thumbs.stats();
-    check(&ok, first.requested == handler_count, "requested={d} 应等于有 handler 的样本数 {d}", .{ first.requested, handler_count });
-    check(&ok, first.no_handler == gated_count, "no_handler={d} 应等于没有 handler 的样本数 {d}", .{ first.no_handler, gated_count });
+    const sample_count: u32 = @intCast(library.samples.len);
+    check(&ok, first.requested == sample_count, "requested={d} 应等于样本数 {d}（每行入队一次）", .{ first.requested, sample_count });
+    check(&ok, first.no_handler >= undeclared_count, "no_handler={d} 至少应覆盖无人声明接手的 {d} 条", .{ first.no_handler, undeclared_count });
     check(&ok, first.dropped == 0, "dropped={d} 不该丢请求（队列容量 32 > 3）", .{first.dropped});
 
     // 第二轮：逐条再问一次。有图的必须命中缓存，没 handler 的仍然被门禁挡下。
@@ -118,8 +128,9 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
                 check(&ok, false, "{s}: 第二轮还 pending（没落地）", .{sample.file_name});
             },
             .no_handler => {
-                check(&ok, !hasHandler(allocator, sample.file_path), "{s}: 有 handler 却被门禁挡下", .{sample.file_name});
-                std.debug.print("demo-thumbs: {s:<14} 无预览（能力门禁，没调 thumb.get）\n", .{sample.file_name});
+                // 负缓存命中：这一条第二轮没有再次入队。原因是 provider 全部谢绝
+                // （no_handler/unsupported），不是能力门禁在 UI 线程上挡的。
+                std.debug.print("demo-thumbs: {s:<14} 无预览（provider 谢绝，已负缓存）\n", .{sample.file_name});
             },
             .failed => {
                 std.debug.print("demo-thumbs: {s:<14} 取图失败（文件没了 / Shell 出错）\n", .{sample.file_name});
@@ -149,11 +160,6 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
     }
     std.debug.print("demo-thumbs: OK\n", .{});
     return 0;
-}
-
-fn hasHandler(allocator: std.mem.Allocator, path: []const u8) bool {
-    const info = caps.forPath(allocator, path) catch return false;
-    return info.has_handler;
 }
 
 fn check(ok: *bool, condition: bool, comptime fmt: []const u8, args: anytype) void {

@@ -59,7 +59,9 @@
 //! `Provider.open` 是**同步阻塞**调用：缩略图 provider 会进第三方 COM handler，
 //! 可能卡住或崩溃。**不要在 UI 线程上调它**；`preview_panel.Panel` 把它放在一条
 //! 工作线程上，视图只读一份已经落地的 `Outcome`（同一约定见 `thumbs.zig`）。
-//! `Provider.isolation` 目前只是声明，等 M4 的 helper 进程用它决定执行位置。
+//! `Provider.isolation` 是"provider 打算跑在哪里"的声明；Shell 缩略图 provider 的
+//! `open` 本身仍在进程内执行，但它会主动把像素提取交给 helper 进程（`thumb_host`），
+//! `Request.allow_isolation = false`（`--no-isolation`）时才退回进程内取图。
 //!
 //! 音频还有**第二条**线程：`audio/player.Player` 的播放线程由它自己拥有，
 //! 只通过 `std.atomic.Value(u64)` 把播放位置交给 UI；播放线程不碰任何视图对象。
@@ -95,6 +97,18 @@ pub const Request = struct {
     max_px: u32,
     /// 视频/音频要哪个时间点（毫秒）；静态图忽略。M1 还没有 provider 用它。
     at_ms: ?i64 = null,
+    /// 允许 provider 把"碰第三方 handler"的工作交给隔离 helper 进程。
+    ///
+    /// 只有 Shell 缩略图 provider 会读它：`true`（默认）时先走 `thumb_host`，
+    /// helper 不可用才退回进程内；`false`（`--no-isolation`）时直接进程内取图。
+    /// 图片 / 视频 / 音频 provider 不碰第三方 handler，忽略这个字段。
+    allow_isolation: bool = true,
+    /// 这次请求是列表行内小图（32pt / 64px），不是预览条。
+    ///
+    /// 音频 provider 用它选择**粗采样**：图标只需要"一眼分清是哪个文件"的判别力，
+    /// 不需要保真度，更不该为它解码整段音频。`icon_capable = true` 的 provider 在
+    /// 这个标志为真时返回 `image`（而不是 `audio`）；预览条（`icon = false`）行为不变。
+    icon: bool = false,
 };
 
 /// `open` 唯一允许返回的错误：连 outcome 都构造不出来。
@@ -276,7 +290,21 @@ pub const Provider = struct {
     /// 同步打开。成功返回四个载荷分支之一；打不开用 `none.*` **谢绝**，不要返回
     /// error——注册表会继续问下一个 provider。只有 OOM 算 error。
     open: *const fn (std.mem.Allocator, Request) Error!Outcome,
+    /// 这个 provider 将来跑在哪里。当前全是 `.in_process`；M4 的 helper 进程读这个
+    /// 字段。注意它与 `Request.allow_isolation` 是两件事：Shell provider 的 `open`
+    /// 本身仍在进程内执行，但它会**主动**把像素提取交给 helper（见
+    /// `providers/thumb.zig`），`allow_isolation = false` 时才退回进程内。
     isolation: Isolation = .in_process,
+    /// 能否生成 32pt 级别的"小图"（列表行内 64px）。
+    ///
+    /// 缩略图不是"预览的缩小版"，而是**身份指纹**：要求的是"一眼分清这是哪个
+    /// 文件"的判别力，不是保真度。`providers/root.registryForIcon` 按这一位筛表。
+    ///
+    /// 图标请求（`Request.icon = true`）必须返回 `image`；预览请求（`icon = false`）
+    /// 的返回类型不变。音频 provider 可以声明这一位，但**不许**用"解码整段再缩"
+    /// 实现——WAV 用等距窗口粗采样，MF 音频只在"打开容器 + 若干次 seek"低于
+    /// 15 ms/张 时才做，否则保持 false 显示占位。单张图标的预算是 **15 ms**。
+    icon_capable: bool = false,
 };
 
 /// 一张顺序表。`providers` 的顺序是偏好，不是"第一个 supports 就结束"：
@@ -362,4 +390,3 @@ pub fn countLines(text: []const u8) usize {
     }
     return lines;
 }
-

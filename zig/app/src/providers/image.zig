@@ -39,6 +39,9 @@ pub const provider: preview.Provider = .{
     .kind = .image,
     .supports = supports,
     .open = open,
+    // 列表行内的 32pt 小图也归这里：PNG/BMP 的行内图与预览图走同一条 WIC 解码链，
+    // 不再为了一个 32px 图标去问 Shell。
+    .icon_capable = true,
 };
 
 /// 本 provider 自己负责的栅格格式。**故意不含 `.psd` / `.ai` / `.blend`**：

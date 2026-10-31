@@ -20,7 +20,7 @@ pub fn printUsage() void {
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
             "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
             "      otto-lite --settings-probe --set-opacity=<0..100>   （验收探针；窗口隐藏）\n" ++
-            "      otto-lite --preview <file> [--no-shell-preview] | --play-test <file> [--seek-at <ms>]\n" ++
+            "      otto-lite --preview <file> [--no-shell-preview] [--no-isolation] | --play-test <file> [--seek-at <ms>]\n" ++
             "      otto-lite --copy-now <file>\n" ++
             "      otto-lite --convert <in.json> <out.otto>\n" ++
             "      otto-lite --library-info <file>\n" ++

@@ -1,6 +1,6 @@
 //! `--thumb-bench <dir>`：进程内取图 vs 隔离 helper 的同一份对照（不开窗、不碰 nanoui）。
 //!
-//! 三件事，按顺序：
+//! 四件事，按顺序：
 //!
 //!   1. **字节一致**：目录里每个文件各取一次（`thumb.get` 与 `thumb_host.get`），
 //!      比较宽 / 高 / 跨度 / 字节数 / 像素；失败也要"同名"（NoHandler 对 NoHandler）。
@@ -8,12 +8,17 @@
 //!   2. **200 张耗时**：找一张真能出图的文件，把字节拷成 200 个不同的文件名（不同路径
 //!      才不会被 Shell 的路径缓存糊掉），两种后端各跑一遍，报"冷（含 helper spawn）"
 //!      与"200 次摊销后"两组数字。这就是 M4 的验收点：一次进程启动被 200 张摊薄。
-//!   3. **不留下进程**：结束前 `thumb_host.deinit()`，临时目录删干净。
+//!   3. **行内小图真实路径**：同一批 200 个路径再走一遍 `registryForIcon(false)`，
+//!      量 `image-wic` 的行内小图（`--bench` 的 100 张是同一套，两个入口互相校验）。
+//!   4. **不留下进程**：结束前 `thumb_host.deinit()`，临时目录删干净。
 //!
-//! 这个命令是给"改隔离层的人"看的诊断入口，不是产品功能：它把 helper 的 spawn /
-//! 重启 / 超时账一起打出来，方便判断"慢"是 Shell 的锅还是隔离层的锅。
+//! 这个命令是给"改隔离层 / 改 provider 表的人"看的诊断入口，不是产品功能：它把
+//! helper 的 spawn / 重启 / 超时账一起打出来，也把"实际行内路径"和"口岸对照"
+//! 放在同一张输出里，方便判断"慢"是 Shell、helper 还是 provider 的锅。
 
 const std = @import("std");
+const core = @import("otto_core");
+const providers = @import("providers/root.zig");
 const thumb = @import("otto_thumb");
 const thumb_host = @import("otto_thumb_host");
 
@@ -128,6 +133,19 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, dir_path: []con
             if (total_delta >= 0) "+" else "",
             total_delta / @as(f64, @floatFromInt(copy_count)),
         },
+    );
+
+    // ---- 3. 行内小图现在的实际路径：provider 注册表 ----------------------
+    // `thumb-bench` 的第一、二节仍量"口岸层"的进程内 vs helper 字节一致；
+    // 这一节量列表左侧那格真正会走的路（PNG/BMP 由 image-wic 解），用来和
+    // `--bench` 的 100 张数字互相对照。
+    thumb_host.deinit();
+    const provider_cold = timeProviderOne(io, allocator, copies.paths.items[0]);
+    _ = timeProviderMany(io, allocator, copies.paths.items);
+    const provider = timeProviderMany(io, allocator, copies.paths.items);
+    std.debug.print(
+        "thumb-bench: 200 张·provider {d:.2} ms（{d:.2} ms/张）failed={d}；首张含 WIC 初始化 {d:.2} ms\n",
+        .{ provider.total_ms, perImage(provider.total_ms), provider.failures, provider_cold },
     );
 
     const stats = thumb_host.stats();
@@ -353,6 +371,44 @@ fn timeMany(io: std.Io, allocator: std.mem.Allocator, paths: []const []u8, mode:
             var owned = image;
             owned.deinit(allocator);
         } else |_| timing.failures += 1;
+    }
+    timing.total_ms = elapsedMs(io, started);
+    return timing;
+}
+
+/// 行内小图真实路径：`registryForIcon(false).open(.icon = true)`。
+fn providerFetch(allocator: std.mem.Allocator, path: []const u8) bool {
+    const registry = providers.registryForIcon(false);
+    var sample = core.model.Sample{
+        .id = path,
+        .file_name = std.fs.path.basename(path),
+        .file_ext = std.fs.path.extension(path),
+        .file_path = path,
+    };
+    const outcome = registry.open(allocator, .{
+        .sample = &sample,
+        .max_px = size_px,
+        .icon = true,
+    }) catch return false;
+    var owned = outcome;
+    defer owned.deinit(allocator);
+    return switch (owned) {
+        .image => true,
+        else => false,
+    };
+}
+
+fn timeProviderOne(io: std.Io, allocator: std.mem.Allocator, path: []const u8) f64 {
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    _ = providerFetch(allocator, path);
+    return elapsedMs(io, started);
+}
+
+fn timeProviderMany(io: std.Io, allocator: std.mem.Allocator, paths: []const []u8) Timing {
+    var timing = Timing{};
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    for (paths) |path| {
+        if (!providerFetch(allocator, path)) timing.failures += 1;
     }
     timing.total_ms = elapsedMs(io, started);
     return timing;

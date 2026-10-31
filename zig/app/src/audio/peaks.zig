@@ -101,6 +101,19 @@ pub fn compute(
     return .{ .min = min, .max = max };
 }
 
+/// 单帧的 i16 值（多声道先平均）。给音频图标的**粗采样**用：只读几帧时不需要
+/// 构造整段 PCM。调用方保证 `frame * channels * bytes_per_sample` 在 `pcm` 内。
+pub fn frameValue(
+    pcm: []const u8,
+    frame: usize,
+    channels: u16,
+    bits: u16,
+    format: wav.SampleFormat,
+) i16 {
+    if (channels == 0) return 0;
+    return mixedSample(pcm, frame, @as(usize, channels), bits, format);
+}
+
 /// 一帧的所有声道先平均（i64 累加，不溢出）再夹回 i16。
 fn mixedSample(
     pcm: []const u8,

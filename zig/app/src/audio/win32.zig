@@ -88,6 +88,9 @@ pub const FILE_SHARE_WRITE: DWORD = 0x0000_0002;
 pub const FILE_SHARE_DELETE: DWORD = 0x0000_0004;
 pub const OPEN_EXISTING: DWORD = 3;
 pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x0000_0080;
+pub const FILE_BEGIN: DWORD = 0;
+pub const FILE_CURRENT: DWORD = 1;
+pub const FILE_END: DWORD = 2;
 
 pub const COINIT_MULTITHREADED: DWORD = 0x0;
 pub const CLSCTX_ALL: DWORD = 0x17;
@@ -118,6 +121,12 @@ pub extern "kernel32" fn CreateFileW(
     template: ?HANDLE,
 ) callconv(.winapi) HANDLE;
 pub extern "kernel32" fn GetFileSizeEx(file: HANDLE, size: *i64) callconv(.winapi) BOOL;
+pub extern "kernel32" fn SetFilePointerEx(
+    file: HANDLE,
+    distance: i64,
+    new_position: ?*i64,
+    method: DWORD,
+) callconv(.winapi) BOOL;
 pub extern "kernel32" fn ReadFile(
     file: HANDLE,
     buffer: [*]u8,
@@ -126,6 +135,7 @@ pub extern "kernel32" fn ReadFile(
     overlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+pub extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 
 // ---------------------------------------------------------------------------
 // ole32：套间与 COM 激活
