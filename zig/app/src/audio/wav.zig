@@ -10,7 +10,8 @@
 //!   * PCM 8/16/24/32 位（8 位按 WAV 约定是无符号）、IEEE float 32 位；
 //!   * WAVE_FORMAT_EXTENSIBLE（`0xFFFE`）里的 PCM / IEEE_FLOAT 子格式；
 //!   * 单声道 / 立体声原样保留；**多于 2 声道下混到立体声**（规则与 FLAC 共用
-//!     `audio/downmix.zig`：偶数下标 → L、奇数下标 → R，各自简单平均）。
+//!     `audio/downmix.zig`：按标准顺序 `FL, FR, FC, LFE, BL, BR…`，C/环绕按
+//!     0.7071 进两侧，**LFE 丢弃**；见那边的矩阵表与理由）。
 //!     不做采样率转换；
 //!   * 不支持：ADPCM / A-law / μ-law / float64、压缩格式、多 `data` 合并、
 //!     大于 `file.max_file_bytes` 的文件（那是 provider 的事）。
@@ -370,8 +371,8 @@ test "坏文件：不是 RIFF/WAVE、块越界" {
     try testing.expectError(error.Truncated, decode(testing.allocator, truncated));
 }
 
-test "4 声道下混到立体声：偶数下标 → L、奇数下标 → R 的平均" {
-    // 两帧：L=(1000+3000)/2=2000，R=(2000+4000)/2=3000。
+test "4 声道下混到立体声：BL 只进左、BR 只进右（各乘 0.7071）" {
+    // 两帧：L=1000+0.7071·3000=3121，R=2000+0.7071·4000=4828（负帧对称）。
     const samples = [_]i16{ 1000, 2000, 3000, 4000, -1000, -2000, -3000, -4000 };
     const pcm = std.mem.sliceAsBytes(&samples);
     const file = try buildWav(testing.allocator, format_pcm, 4, 44_100, 16, pcm);
@@ -383,15 +384,16 @@ test "4 声道下混到立体声：偶数下标 → L、奇数下标 → R 的�
     try testing.expectEqual(@as(u16, 2), wav.channels);
     try testing.expectEqual(@as(u64, 2), wav.frames);
     const out = std.mem.bytesAsSlice(i16, wav.pcm);
-    try testing.expectEqual(@as(i16, 2000), out[0]);
-    try testing.expectEqual(@as(i16, 3000), out[1]);
-    try testing.expectEqual(@as(i16, -2000), out[2]);
-    try testing.expectEqual(@as(i16, -3000), out[3]);
+    try testing.expectEqual(@as(i16, 3121), out[0]);
+    try testing.expectEqual(@as(i16, 4828), out[1]);
+    try testing.expectEqual(@as(i16, -3121), out[2]);
+    try testing.expectEqual(@as(i16, -4828), out[3]);
 }
 
-test "8 位 PCM 是无符号的（128 = 静音），下混先归一化" {
+test "8 位 PCM 是无符号的（128 = 静音），下混先归一化再限幅" {
     // 4 声道 8 位一帧：0(-1), 255(+127/128), 0(-1), 255(+127/128)
-    // → L 平均 -1 → 1；R 平均 ≈ +0.992 → 254。
+    // L = -1 + 0.7071·(-1) = -1.707 → 夹到 -1 → 0；
+    // R = 0.992 + 0.7071·0.992 = 1.694 → 夹到 +1 → 255。
     const pcm = [_]u8{ 0, 255, 0, 255 };
     const file = try buildWav(testing.allocator, format_pcm, 4, 8000, 8, &pcm);
     defer testing.allocator.free(file);
@@ -399,7 +401,19 @@ test "8 位 PCM 是无符号的（128 = 静音），下混先归一化" {
     var wav = try decode(testing.allocator, file);
     defer wav.deinit(testing.allocator);
     try testing.expectEqual(@as(u16, 2), wav.channels);
-    try testing.expectEqualSlices(u8, &[_]u8{ 1, 254 }, wav.pcm);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 255 }, wav.pcm);
+}
+
+test "5.1 只有 LFE：WAV 路径下混成静音（LFE 不进任何一侧）" {
+    // 一帧 6 声道 16 位：L/R/C/BL/BR 全 0，只有 LFE 满幅。
+    const samples = [_]i16{ 0, 0, 0, 20000, 0, 0 };
+    const file = try buildWav(testing.allocator, format_pcm, 6, 44_100, 16, std.mem.sliceAsBytes(&samples));
+    defer testing.allocator.free(file);
+
+    var wav = try decode(testing.allocator, file);
+    defer wav.deinit(testing.allocator);
+    try testing.expectEqual(@as(u16, 2), wav.channels);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, wav.pcm);
 }
 
 test "data 长度不是整帧：尾部的半帧被丢弃，不冒充一帧" {

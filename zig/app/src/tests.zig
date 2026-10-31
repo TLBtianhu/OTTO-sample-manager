@@ -70,6 +70,8 @@ test {
     _ = @import("media_key.zig");
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");
+    // 多声道下混的文件级回归：真 FLAC/WAV（ffmpeg 现场生成，缺失时 Skip）。
+    _ = @import("audio/downmix_files_test.zig");
     _ = @import("providers/root.zig");
     // WIC 解码器的真解码测试（素材不在时 Skip）；拆文件是为了守住 600 行。
     _ = @import("providers/image_wic_test.zig");
