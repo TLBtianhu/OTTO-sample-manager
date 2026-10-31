@@ -19,6 +19,8 @@ pub const Info = struct {
     matched: usize,
     /// 选中集合的大小。
     selected: usize,
+    /// 当前后缀筛选的说明（`png` / `png、jpg`）；null = 没有后缀筛选。
+    ext_filter: ?[]const u8 = null,
     /// Ctrl+C 的提示还剩几拍（>0 = 正在闪）。
     flash_left: u32 = 0,
     flash_count: usize = 0,
@@ -61,6 +63,10 @@ pub fn draw(c: *ui.Context, info: Info) Action {
         info.matched,
         info.selected,
     });
+    // 后缀筛选不是"另一个数字"：写明当前只看了哪几种，和命中数对得上。
+    if (info.ext_filter) |exts| {
+        ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 仅 {s}", .{exts});
+    }
     if (info.import_status) |status| {
         ui.textf(c, .{
             .size = 11,
