@@ -9,6 +9,7 @@
 //! 失败信息由各 `run` 自己打印具名错误，这里不做二次包装。
 
 const std = @import("std");
+const thumb_host = @import("otto_thumb_host");
 const bench = @import("bench.zig");
 const demo_filter = @import("demo_filter.zig");
 const demo_play = @import("demo_play.zig");
@@ -32,6 +33,16 @@ pub fn run(
     allocator: std.mem.Allocator,
     options: options_mod.Options,
 ) !?u8 {
+    // 无窗口命令的**统一收尾**：缩略图 helper 是进程级单例，`helper_path` 的
+    // 副本由 `thumb_host_win.startLocked` 分配，只有 `thumb_host.deinit()` 会释放。
+    // GUI 在 `thumbs.deinit()` 里做同一件事；CLI 没有那一层，必须在这里收尾——
+    // **CLI 与 GUI 都必须收尾**。漏掉时 debug / ReleaseSafe 的 SafeAllocator 会在
+    // 进程退出时报 `leaked`（`--preview` 一个只有系统 handler 的格式即可复现，
+    // 回归检查见 `zig/provider-matrix.ps1` 的"泄漏回归"一节）。
+    // 放在最前面而不是某一条命令里：任何一条无窗口命令都可能在出结果时碰过
+    // helper，收尾不该依赖"这条命令记得自己清"。
+    defer thumb_host.deinit();
+
     // `--version` 不能碰库文件：便携版解压出来还没有 data\，安装版第一次启动也一样。
     if (options.version_requested) {
         const exe_path = try std.process.executablePathAlloc(init.io, allocator);
