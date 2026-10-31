@@ -105,6 +105,19 @@ pub fn build(b: *std.Build) void {
         .name = "otto-lite",
         .root_module = app_module,
     });
+    // Windows 子系统（PE Subsystem = 2）：双击/开始菜单启动时由系统直接建窗口，
+    // 不会先分配控制台、也就不会闪一个黑框。Zig 0.17 的 `addExecutable` options
+    // 里没有这个字段，它挂在 Compile step 上（会变成编译器的 `--subsystem`）。
+    //
+    // 子系统只决定“进程启动时要不要分配控制台”，不决定 stdio 能不能写：
+    // stdout/stderr 被 PowerShell / ProcessStartInfo 重定向成管道或文件时照常
+    // 继承并写入（`&`、`RedirectStandardOutput` 都能读到）。直接连到 cmd 的
+    // 控制台设备句柄对没附着控制台的 GUI 进程本来无效，所以 CLI 入口在输出前
+    // 会 AttachConsole(ATTACH_PARENT_PROCESS) 并重开 CONOUT$（见 src/console.zig），
+    // **只在无窗口命令路径上做，GUI 路径绝不 attach**。
+    // `otto-thumb-host` 保持控制台子系统（它由 CREATE_NO_WINDOW 拉起、走管道），
+    // 不要跟着改。
+    exe.subsystem = .windows;
 
     b.installArtifact(exe);
 

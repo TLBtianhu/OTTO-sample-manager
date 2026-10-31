@@ -28,6 +28,19 @@ user data is committed. Its files (`D:/lib/...`) do not exist on a normal
 machine, so the default list shows the "file missing" placeholder in every
 thumbnail slot — that is the honest state, not a broken image.
 
+`zig build` produces two exes. `otto-lite.exe` is linked as a **Windows GUI
+subsystem** program (PE subsystem 2, `exe.subsystem = .windows` in
+`build.zig`), so Explorer / the Start Menu start it without first opening a
+console window. `otto-thumb-host.exe` stays a console-subsystem program (3):
+the app spawns it with `CREATE_NO_WINDOW` and talks to it over pipes, so it
+must keep its own stdio. Capture is unchanged: a redirected stdout/stderr is
+an ordinary inherited pipe/file handle, so `--preview` and the other headless
+switches still print what the caller reads (`&`, `RedirectStandardOutput`).
+A raw console-device handle is unusable for a process that is not attached to
+a console, so the CLI entry point (`src/console.zig`, before `commands.run`,
+headless commands only) calls `AttachConsole(ATTACH_PARENT_PROCESS)` and
+reopens stdout/stderr on `CONOUT$` when needed; GUI startup never attaches.
+
 ## Library files (`OTTOLIB` v1)
 
 The positional library argument is opened by **file header**, not by extension:
