@@ -4,6 +4,10 @@
 //! `preview.Outcome`。预览区只由 Outcome 驱动；事实无条件显示在预览区下方（UI），
 //! 并由 `--preview` 无条件打印——所以"没有预览组件"不会变成"什么都不知道"。
 //!
+//! 时长是唯一一个**可以由显示层补**的字段：旧库（`duration == 0`）由
+//! `duration_trust.display` 就地 probe 一次文件头，调用方把结果放进 `Duration`
+//! 传进来。其余字段永远是 `Sample` 的原值——显示层不做写操作。
+//!
 //! 为什么从预览注册表里搬出来：一个永远 supports、永远成功的 provider 会把 `none`
 //! 分支整个吃掉，让"没有预览"永远显示不出来（本机 `.wav` 的影子 handler 就是例子）。
 //! 事实不是一种预览能力，是一条数据；`text` 分支留给真正能预览文本内容的 provider
@@ -31,12 +35,25 @@ pub const Facts = struct {
     }
 };
 
+/// 事实区要显示的时长。**不直接读 `Sample.duration`**：旧库条目是 0，显示层会
+/// 用 `duration_trust.display` 就地补一个（见那边文件头）。`estimated = true`
+/// 时加 `≈`，与列表行同一口径。
+pub const Duration = struct {
+    seconds: f64 = 0,
+    estimated: bool = false,
+
+    /// 不查 side table 的默认口径：库里存的就是这个值。
+    pub fn of(sample: *const core.model.Sample) Duration {
+        return .{ .seconds = sample.duration };
+    }
+};
+
 /// 造一份 UI 事实。`sample` 的字符串可以在返回后失效：两个字段都复制了。
-/// `estimated` = 这条样本的时长是估算的（显示成 `≈`），与列表行同一口径。
+/// `duration` = 这一行该显示的时长（库里的，或显示层补出来的）。
 pub fn init(
     allocator: std.mem.Allocator,
     sample: *const core.model.Sample,
-    estimated: bool,
+    duration: Duration,
 ) std.mem.Allocator.Error!Facts {
     var size_buffer: [32]u8 = undefined;
     var duration_buffer: [32]u8 = undefined;
@@ -46,7 +63,7 @@ pub fn init(
         .{
             sample.displayName(),
             formatSize(sample.file_size, &size_buffer),
-            formatDuration(sample.duration, estimated, &duration_buffer),
+            formatDuration(duration.seconds, duration.estimated, &duration_buffer),
             extensionText(sample),
         },
     );
@@ -59,7 +76,7 @@ pub fn init(
 pub fn formatBlock(
     allocator: std.mem.Allocator,
     sample: *const core.model.Sample,
-    estimated: bool,
+    duration: Duration,
 ) std.mem.Allocator.Error![]u8 {
     var size_buffer: [32]u8 = undefined;
     var duration_buffer: [32]u8 = undefined;
@@ -69,7 +86,7 @@ pub fn formatBlock(
         .{
             sample.displayName(),
             formatSize(sample.file_size, &size_buffer),
-            formatDuration(sample.duration, estimated, &duration_buffer),
+            formatDuration(duration.seconds, duration.estimated, &duration_buffer),
             sample.file_path,
             extensionText(sample),
         },
@@ -126,7 +143,7 @@ fn fakeSample() core.model.Sample {
 
 test "Facts.init 给两行并复制路径；原样本失效不影响事实" {
     var sample = fakeSample();
-    const facts = try init(testing.allocator, &sample, false);
+    const facts = try init(testing.allocator, &sample, Duration.of(&sample));
     defer facts.deinit(testing.allocator);
 
     try testing.expect(std.mem.indexOf(u8, facts.summary, "名称: Kick") != null);
@@ -142,7 +159,7 @@ test "Facts.init 给两行并复制路径；原样本失效不影响事实" {
 
 test "formatBlock 五行：名字/大小/时长/路径/扩展名" {
     const sample = fakeSample();
-    const text = try formatBlock(testing.allocator, &sample, false);
+    const text = try formatBlock(testing.allocator, &sample, Duration.of(&sample));
     defer testing.allocator.free(text);
 
     try testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "\n") + 1);
@@ -160,7 +177,7 @@ test "缺字段时写“未知/（无）”，扩展名可从路径推导" {
         .file_ext = "",
         .file_path = "C:\\lib\\Take.PNG",
     };
-    const text = try formatBlock(testing.allocator, &no_ext, false);
+    const text = try formatBlock(testing.allocator, &no_ext, Duration.of(&no_ext));
     defer testing.allocator.free(text);
 
     try testing.expect(std.mem.indexOf(u8, text, "大小: 0 B") != null);
@@ -173,9 +190,28 @@ test "缺字段时写“未知/（无）”，扩展名可从路径推导" {
         .file_ext = "",
         .file_path = "C:\\lib\\noext",
     };
-    const other = try formatBlock(testing.allocator, &no_name, false);
+    const other = try formatBlock(testing.allocator, &no_name, Duration.of(&no_name));
     defer testing.allocator.free(other);
     try testing.expect(std.mem.endsWith(u8, other, "扩展名: （无）"));
+}
+
+test "旧库（duration = 0）：事实区用显示层补出来的时长，不写未知" {
+    var sample = core.model.Sample{
+        .id = "s4",
+        .file_name = "viper",
+        .file_ext = ".mp3",
+        .file_path = "C:\\lib\\viper.mp3",
+        .file_size = 654942,
+        .duration = 0,
+    };
+    // 与列表行同一条口径：显示层从文件头补出来的值 + estimated 决定 ≈。
+    const facts = try init(testing.allocator, &sample, .{ .seconds = 40.933, .estimated = true });
+    defer facts.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, facts.summary, "时长: ≈40.93 s") != null);
+
+    const block = try formatBlock(testing.allocator, &sample, .{ .seconds = 2.036 });
+    defer testing.allocator.free(block);
+    try testing.expect(std.mem.indexOf(u8, block, "时长: 2.04 s") != null);
 }
 
 test "formatSize / formatDuration 的边界" {

@@ -72,6 +72,8 @@ test {
     // 行内时长文本（精确 / ≈估算 / 未知）与 app 侧的可信度 side table。
     _ = @import("duration_text.zig");
     _ = @import("duration_trust.zig");
+    // side table 的测试（真临时文件 + 真 probe）：缓存命中/未命中/失败/文件变了。
+    _ = @import("duration_trust_test.zig");
     _ = @import("media_key.zig");
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");
