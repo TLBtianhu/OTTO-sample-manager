@@ -9,8 +9,9 @@
 //!   * `fmt ` 在 `data` 之后 → `error.DataBeforeFmt`（少见，但不能猜）；
 //!   * PCM 8/16/24/32 位（8 位按 WAV 约定是无符号）、IEEE float 32 位；
 //!   * WAVE_FORMAT_EXTENSIBLE（`0xFFFE`）里的 PCM / IEEE_FLOAT 子格式；
-//!   * 单声道 / 立体声原样保留；**多于 2 声道下混到立体声**（偶数下标 → L，
-//!     奇数下标 → R，各自简单平均）。不做采样率转换；
+//!   * 单声道 / 立体声原样保留；**多于 2 声道下混到立体声**（规则与 FLAC 共用
+//!     `audio/downmix.zig`：偶数下标 → L、奇数下标 → R，各自简单平均）。
+//!     不做采样率转换；
 //!   * 不支持：ADPCM / A-law / μ-law / float64、压缩格式、多 `data` 合并、
 //!     大于 `file.max_file_bytes` 的文件（那是 provider 的事）。
 //!
@@ -20,6 +21,9 @@
 
 const std = @import("std");
 const wav_header = @import("otto_wav_header");
+// 多声道下混与 FLAC provider 共用同一段规则：本文件只负责"何时下混"，
+// 不在这里写第二份混音矩阵。
+const downmix = @import("downmix.zig");
 
 /// 头部错误来自共享的 `otto_wav_header`（probe 也用同一份解析）；本文件只加
 /// 解码特有的两个：`OutOfMemory` 与 `Empty`（0 帧）。
@@ -83,7 +87,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Wav {
 
     // 单声道 / 立体声原样保留（不做无谓的 float 往返，声音逐位不变）；
     // 多于 2 声道才下混，且下混后统一成 2 声道。
-    const fmt: Fmt = .{
+    const fmt: downmix.Fmt = .{
         .channels = header.channels,
         .bits = header.bits,
         .format = header.format,
@@ -91,7 +95,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Wav {
     const pcm = if (fmt.channels <= 2)
         try allocator.dupe(u8, payload[0..used])
     else
-        try downmix(allocator, payload[0..used], fmt);
+        try downmix.allocate(allocator, payload[0..used], fmt);
 
     return .{
         .pcm = pcm,
@@ -103,122 +107,6 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Wav {
         // 毫秒向下取整：1 帧 @ 44.1 kHz 是 0 ms，不冒充 1 ms。
         .duration_ms = @as(u64, @intCast(frames)) * 1000 / header.sample_rate,
     };
-}
-
-/// 下混只需要三个字段；采样率用不到。
-const Fmt = struct {
-    channels: u16,
-    bits: u16,
-    format: SampleFormat,
-};
-
-
-/// 多声道 → 立体声：偶数下标进左、奇数下标进右，各自平均。5.1 的 LFE 也参与
-/// 平均（M1 不装滤波器）；某些声道的缺失用 0 补齐，不做相位处理。
-fn downmix(allocator: std.mem.Allocator, payload: []const u8, fmt: Fmt) Error![]u8 {
-    const bytes_per_sample: usize = fmt.bits / 8;
-    const src_frame = @as(usize, fmt.channels) * bytes_per_sample;
-    const dst_frame = 2 * bytes_per_sample;
-    const frames = payload.len / src_frame;
-    const out = try allocator.alloc(u8, frames * dst_frame);
-    errdefer allocator.free(out);
-
-    var frame: usize = 0;
-    while (frame < frames) : (frame += 1) {
-        var sum = [2]f64{ 0, 0 };
-        var count = [2]u32{ 0, 0 };
-        var channel: usize = 0;
-        while (channel < fmt.channels) : (channel += 1) {
-            const offset = frame * src_frame + channel * bytes_per_sample;
-            const value = readSample(payload, offset, fmt.bits, fmt.format);
-            const side = channel & 1;
-            sum[side] += value;
-            count[side] += 1;
-        }
-        var side: usize = 0;
-        while (side < 2) : (side += 1) {
-            const value = if (count[side] == 0)
-                0
-            else
-                sum[side] / @as(f64, @floatFromInt(count[side]));
-            writeSample(out, frame * dst_frame + side * bytes_per_sample, fmt.bits, fmt.format, value);
-        }
-    }
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// 采样读写（只在下混时使用；<= 2 声道走 memcpy）
-// ---------------------------------------------------------------------------
-
-fn readSample(bytes: []const u8, offset: usize, bits: u16, format: SampleFormat) f64 {
-    return switch (format) {
-        .float => @as(f64, @floatCast(@as(f32, @bitCast(readU32(bytes, offset))))),
-        .pcm => switch (bits) {
-            8 => (@as(f64, @floatFromInt(bytes[offset])) - 128.0) / 128.0,
-            16 => @as(f64, @floatFromInt(readI16(bytes, offset))) / 32768.0,
-            24 => @as(f64, @floatFromInt(readI24(bytes, offset))) / 8388608.0,
-            32 => @as(f64, @floatFromInt(readI32(bytes, offset))) / 2147483648.0,
-            else => 0,
-        },
-    };
-}
-
-fn writeSample(bytes: []u8, offset: usize, bits: u16, format: SampleFormat, value: f64) void {
-    // NaN / ±inf 在 float WAV 里是合法数据；下混时不能把它变成 UB。
-    const finite = if (std.math.isNan(value)) 0.0 else std.math.clamp(value, -1.0, 1.0);
-    switch (format) {
-        .float => writeU32(bytes, offset, @bitCast(@as(f32, @floatCast(finite)))),
-        .pcm => switch (bits) {
-            8 => {
-                const scaled: i64 = @intFromFloat(@round(finite * 127.0));
-                bytes[offset] = @intCast(std.math.clamp(scaled + 128, 0, 255));
-            },
-            16 => writeU16(bytes, offset, @bitCast(@as(i16, @intFromFloat(@round(finite * 32767.0))))),
-            24 => writeU24(bytes, offset, @intFromFloat(@round(finite * 8388607.0))),
-            32 => writeU32(bytes, offset, @bitCast(@as(i32, @intFromFloat(@round(finite * 2147483647.0))))),
-            else => {},
-        },
-    }
-}
-
-fn readU16(bytes: []const u8, offset: usize) u16 {
-    return std.mem.readInt(u16, bytes[offset..][0..2], .little);
-}
-
-fn readU32(bytes: []const u8, offset: usize) u32 {
-    return std.mem.readInt(u32, bytes[offset..][0..4], .little);
-}
-
-fn readI16(bytes: []const u8, offset: usize) i16 {
-    return @bitCast(readU16(bytes, offset));
-}
-
-fn readI32(bytes: []const u8, offset: usize) i32 {
-    return @bitCast(readU32(bytes, offset));
-}
-
-fn readI24(bytes: []const u8, offset: usize) i32 {
-    const raw: u32 = @as(u32, bytes[offset]) |
-        (@as(u32, bytes[offset + 1]) << 8) |
-        (@as(u32, bytes[offset + 2]) << 16);
-    if (raw & 0x0080_0000 != 0) return @bitCast(raw | 0xFF00_0000);
-    return @intCast(raw);
-}
-
-fn writeU16(bytes: []u8, offset: usize, value: u16) void {
-    std.mem.writeInt(u16, bytes[offset..][0..2], value, .little);
-}
-
-fn writeU32(bytes: []u8, offset: usize, value: u32) void {
-    std.mem.writeInt(u32, bytes[offset..][0..4], value, .little);
-}
-
-fn writeU24(bytes: []u8, offset: usize, value: i32) void {
-    const raw: u32 = @bitCast(value);
-    bytes[offset] = @truncate(raw);
-    bytes[offset + 1] = @truncate(raw >> 8);
-    bytes[offset + 2] = @truncate(raw >> 16);
 }
 
 // ---------------------------------------------------------------------------

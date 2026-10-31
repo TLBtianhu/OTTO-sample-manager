@@ -6,8 +6,9 @@
 //! allocator。上限 `max_file_bytes` 防止把 4 GB 的 wav 整个搬进内存；超限是明确的
 //! `FileTooLarge`，由 provider 记成 `none.failed`（不是崩溃，也不是"没有预览组件"）。
 //!
-//! 另有一个 `Reader`（`openReader` + `readAt`）：给音频图标的粗采样用——打开一次、
-//! 按偏移读几帧，不搬整段文件。它和 `readAll` 走同一套 CreateFileW / 错误映射。
+//! 另有一个 `Reader`（`openReader` + `readAt`）：给音频图标的粗采样与
+//! `audio/file_reader.zig` 的流式适配器用——打开一次、按偏移读，不搬整段文件。
+//! 它和 `readAll` 走同一套 CreateFileW / 错误映射。
 //!
 //! 错误映射：文件不存在与没有权限分开，provider 才能把前者落到
 //! `none.file_missing`、后者落到 `none.failed`。
@@ -15,8 +16,9 @@
 const std = @import("std");
 const win = @import("win32.zig");
 
-/// 单个音频文件的上限。M1 的试听是"整段解码进内存"，没有流式；512 MiB 已经
-/// 能装下约 25 分钟 44.1 kHz/16-bit 立体声，再大就该走流式（M2+）。
+/// 单个音频文件的上限。WAV / MF 仍把压缩文件整份读进来；FLAC 走
+/// `audio/file_reader.zig` 的流式 Reader，不按文件大小分配。512 MiB 足够装下
+/// 约 25 分钟 44.1 kHz/16-bit 立体声的**解码后 PCM**（这才是常驻内存的大头）。
 pub const max_file_bytes: u64 = 512 * 1024 * 1024;
 
 pub const Error = error{
