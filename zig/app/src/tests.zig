@@ -22,10 +22,11 @@
 //!   * `audio/waveform.zig` —— 峰值到位图的尺寸、BGRA 顺序、静音细线与越界写；
 //!   * `providers/`     —— 缩略图 provider 的纯逻辑（真实 Shell 取图由
 //!                         `--preview` / `--demo-thumbs` 覆盖）与音频 provider 的
-//!                         `supports`/文件缺失分支；WAV/FLAC/MP3/AIFF/Ogg 的整段
-//!                         解码测试在 `audio/decode_test.zig` 与
+//!                         `supports`/文件缺失分支；WAV/FLAC/MP3/AIFF/Ogg/Opus 的
+//!                         整段解码测试在 `audio/decode_test.zig` 与
 //!                         `providers/native_audio_*_test.zig`（真实播放由
-//!                         `--play-test` 覆盖）。
+//!                         `--play-test` 覆盖）。Opus 侧还钉住"CELT 能播、SILK
+//!                         读到一半才拒绝 → 谢绝而不是 failed"这条四态边界。
 //!   * `providers/image*.zig` —— WIC 解码链与图片 provider（真 PNG/BMP/缩放/坏文件）；
 //!                         WIC 是系统解码器，不需要窗口、Shell 或音频设备。
 test {
@@ -78,7 +79,8 @@ test {
     _ = @import("duration_trust_test.zig");
     // 列表行里的 Ogg 时长：`display` → `format` 给出 3.0s（不带 ≈）。
     _ = @import("duration_trust_ogg_test.zig");
-    // 列表行里的 Opus 时长：旧库 duration=0 → 2.0s（同样不带 ≈）；预览仍然谢绝。
+    // 列表行里的 Opus 时长：旧库 duration=0 → 2.0s（同样不带 ≈）；预览从 0.25.0 起
+    // 也能播（CELT），SILK 语音仍然谢绝。
     _ = @import("duration_trust_opus_test.zig");
     _ = @import("media_key.zig");
     _ = @import("audio/peaks.zig");
@@ -90,13 +92,15 @@ test {
     _ = @import("providers/root.zig");
     // 真实注册表的 legacy 对照：.wav 里装 FLAC、截断 ADPCM、AIFF 改名 .xyz。
     _ = @import("providers/legacy_registry_test.zig");
-    // 纯 Zig 音频 provider 的三侧测试：FLAC（含 ffmpeg 逐字节 SHA）、MP3
+    // 纯 Zig 音频 provider 的四侧测试：FLAC（含 ffmpeg 逐字节 SHA）、MP3
     // （真 viper.mp3 的时长/样本数 + 与 ffmpeg 的逐样本对比）、Ogg Vorbis
-    // （真 ogg 的帧数/时长 + 与 ffmpeg 逐样本对比 + Opus 的谢绝语义）。拆文件
+    // （真 ogg 的帧数/时长 + 与 ffmpeg 逐样本对比 + 容器里装 Opus 的两种语义）、
+    // Ogg Opus（CELT 能播 + SILK **读到一半**才拒绝 → 谢绝而不是 failed）。拆文件
     // 是为了 provider 正文只留解码路径。
     _ = @import("providers/native_audio_test.zig");
     _ = @import("providers/native_audio_mp3_test.zig");
     _ = @import("providers/native_audio_ogg_test.zig");
+    _ = @import("providers/native_audio_opus_test.zig");
     // WIC 解码器的真解码测试（素材不在时 Skip）；拆文件是为了守住 600 行。
     _ = @import("providers/image_wic_test.zig");
     // 更新检查的纯逻辑（M5）：feed 解析、版本判定、minisign 信封与真实签名向量。

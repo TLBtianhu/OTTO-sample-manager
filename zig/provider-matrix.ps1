@@ -1,4 +1,4 @@
-# One row per sample: which preview provider answers, in two rounds (default and
+﻿# One row per sample: which preview provider answers, in two rounds (default and
 # `--no-shell-preview`), plus the exit code. This is the gate for the
 # "every format is self-sufficient" registry (zig/app/src/providers/root.zig).
 #
@@ -36,7 +36,7 @@
 #      process exits, so this check turns red the moment that teardown is dropped
 #      (the deliberate-break case).
 #
-# Expected table (0.20.0 + legacy + Ogg):
+# Expected table (0.20.0 + legacy + Ogg + Opus):
 #
 #   素材               默认          no-shell
 #   img00.png          image-wic     image-wic      (core row: PNG never needs Shell)
@@ -46,19 +46,22 @@
 #   tone_440.wav       wasapi-pcm    wasapi-pcm
 #   tone_660.flac      native-audio  native-audio   (vendored zig-audio, pure Zig)
 #   vorbis-44k.ogg     native-audio  native-audio   (vendored zig-audio v0.10 Ogg Vorbis)
+#   opus-music.opus    native-audio  native-audio   (vendored zig-audio v0.13, Opus CELT layer)
 #   legacy-adpcm.wav   wasapi-pcm    wasapi-pcm     (MS ADPCM WAV, zig-audio v0.8)
 #   legacy.aiff        native-audio  native-audio   (AIFF PCM16, zig-audio v0.8)
 #   mystery.xyz        none          none
 #
 # The audio rows need an audio endpoint: `wasapi-pcm` (WAV/ADPCM) and
-# `native-audio` (FLAC / MP3 / AIFF / Ogg Vorbis) initialise the shared-mode
+# `native-audio` (FLAC / MP3 / AIFF / Ogg / Opus) initialise the shared-mode
 # device inside `open`, and a box with no endpoint makes them decline (then
 # shell-thumbnail may answer, or nothing). bench.ps1 calls that SKIP; here it is
 # a FAIL by design -- the point of the gate is that audio preview works on this
-# machine, not that it would work on one where it cannot. `.ogg` is declared by
-# extension, so an Ogg file carrying Opus is claimed and then *declined*
-# (`unsupported`, not `failed`) -- that path is covered by the app tests
-# (`providers/native_audio_ogg_test.zig`), not by this table.
+# machine, not that it would work on one where it cannot. `.ogg` / `.opus` are
+# declared by extension, so a stream whose packets the decoder cannot handle
+# (Opus SILK / Hybrid) is claimed and then *declined* (`unsupported`, not
+# `failed`) -- that half of the same codec is covered by the app tests
+# (`providers/native_audio_opus_test.zig`), not by this table, because a `none`
+# row here would claim the opposite of what the extension promises.
 #
 # open_ms is printed for every round but has **no threshold**: a cold decoder or a
 # busy audio endpoint legitimately varies by hundreds of ms (viper.mp3 through
@@ -120,6 +123,14 @@ $script:cases = @(
   # Ogg Vorbis: zig-audio v0.10 decodes it in pure Zig; the registry claims
   # `.ogg` in native-audio and the duration comes from the last page's granule.
   [pscustomobject]@{ Name = 'vorbis-44k.ogg'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
+  # Ogg Opus, CELT layer (config 31, 128k, 2 s): zig-audio v0.13 decodes it, so
+  # `.opus` is claimed and answered by native-audio like any other extension.
+  # This row is also the guard for the *decline* half of the same codec: the
+  # voice sample (`opus-voice.opus`, SILK + hybrid) must answer none/unsupported
+  # instead of failed -- covered by the app tests
+  # (`providers/native_audio_opus_test.zig`), because a `none` row here would
+  # make the table claim "we play every .opus".
+  [pscustomobject]@{ Name = 'opus-music.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
   # Legacy formats decoded by zig-audio v0.8: MS ADPCM WAV stays with the WAV
   # provider; AIFF is claimed by native-audio.
   [pscustomobject]@{ Name = 'legacy-adpcm.wav'; Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },

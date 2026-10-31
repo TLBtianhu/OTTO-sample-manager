@@ -1,14 +1,21 @@
 //! Mutation fuzzer: start from valid WAV, FLAC, MP3, AIFF, legacy-WAV
-//! (G.711 / ADPCM) and Ogg/Vorbis templates, flip/truncate bytes, and drive the
-//! public parser/decoder through every reachable error path.
+//! (G.711 / ADPCM) and Ogg/Vorbis/Opus templates, flip/truncate bytes, and
+//! drive the public parser/decoder through every reachable error path.
+//!
+//! Ogg/Opus gets two passes. The dispatcher decodes it now, so the CELT decoder
+//! sees every mutated payload; and every Ogg-looking input is *also* handed to
+//! `opus.inspect` directly, because the structural parse reports things the
+//! decoder never reaches (TOC framing, padding, frame counts).
 //!
 //! The same `run` function is used by `zig build fuzz` (10,000 rounds) and by a
 //! normal test (1,000 rounds), so CI always exercises it.
 
 const std = @import("std");
 const root = @import("root.zig");
+const opus = @import("opus.zig");
 const testutil = @import("testutil.zig");
 const flac_build = @import("flac_build.zig");
+const opus_build = @import("opus_build.zig");
 const vorbis_build = @import("vorbis_build.zig");
 
 pub const default_rounds: usize = 10_000;
@@ -20,14 +27,24 @@ pub const Stats = struct {
     opened: usize = 0,
     open_errors: usize = 0,
     read_errors: usize = 0,
+    opus_parsed: usize = 0,
     samples: u64 = 0,
 };
 
 pub fn main() !void {
     const stats = try run(std.heap.page_allocator, default_rounds, default_seed);
     std.debug.print(
-        "fuzz: {d} rounds, probe-hit {d}, opened {d}, open errors {d}, read errors {d}, samples {d}\n",
-        .{ stats.rounds, stats.probed, stats.opened, stats.open_errors, stats.read_errors, stats.samples },
+        "fuzz: {d} rounds, probe-hit {d}, opened {d}, open errors {d}, read errors {d}, " ++
+            "opus structural parses {d}, samples {d}\n",
+        .{
+            stats.rounds,
+            stats.probed,
+            stats.opened,
+            stats.open_errors,
+            stats.read_errors,
+            stats.opus_parsed,
+            stats.samples,
+        },
     );
     std.debug.print("fuzz: no panic, no out-of-bounds, all errors named\n", .{});
 }
@@ -68,10 +85,15 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
     const ogg_base = try vorbis_build.minimalFile(allocator);
     defer allocator.free(ogg_base);
 
+    // A complete Ogg/Opus file: OpusHead, OpusTags and two audio packets, one
+    // code 0 and one code 3 with padding and VBR lengths.
+    const opus_base = try buildOpusTemplate(allocator);
+    defer allocator.free(opus_base);
+
     const templates = [_][]const u8{
         wav_base,    flac_base,   mp3_base, mp3_stereo_base,
         mulaw_base,  alaw_base,   ima_base, ms_base,
-        aiff16_base, aiff24_base, ogg_base,
+        aiff16_base, aiff24_base, ogg_base, opus_base,
     };
 
     var longest: usize = 0;
@@ -86,13 +108,24 @@ pub fn run(allocator: std.mem.Allocator, rounds: usize, seed: u64) !Stats {
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         // Round-robin over the templates: WAV, FLAC, MP3 (mono and joint
-        // stereo), G.711, both ADPCM codecs, both AIFF depths and Ogg/Vorbis.
+        // stereo), G.711, both ADPCM codecs, both AIFF depths, Ogg/Vorbis and
+        // Ogg/Opus.
         const base = templates[round % templates.len];
         const len = mutate(random, base, buf);
 
         // 36 bytes let `probe` see an Ogg page's first packet magic, which is
         // where the container/codec distinction lives.
         if (root.probe(buf[0..@min(len, 36)]) != null) stats.probed += 1;
+
+        // The structural parser runs a second time on its own, independently of
+        // whether the decoder gets that far: whatever the mutation did to the
+        // head, the tags or the TOC, the failure has to stay inside the named
+        // error set.
+        if (len >= 4 and std.mem.eql(u8, buf[0..4], "OggS")) {
+            var structural = std.Io.Reader.fixed(buf[0..len]);
+            if (opus.inspect(allocator, &structural, "")) |_| {} else |err| accept(err);
+            stats.opus_parsed += 1;
+        }
 
         var reader = std.Io.Reader.fixed(buf[0..len]);
         var dec = root.open(allocator, &reader) catch |err| {
@@ -297,6 +330,38 @@ fn buildAiffTemplate(allocator: std.mem.Allocator, bits: u16) ![]u8 {
     defer allocator.free(payload);
     for (payload, 0..) |*byte, i| byte.* = @truncate(i * 29 + 7);
     return testutil.buildAiff(allocator, 1, 44_100, bits, frames, payload);
+}
+
+/// A complete Ogg Opus file with two audio packets: one code 0 (20 ms CELT,
+/// stereo) and one code 3 (SILK 10 ms, two VBR frames, six bytes of padding).
+/// Mutations therefore land in `OpusHead`, `OpusTags`, the frame count byte,
+/// the length fields and the padding run.
+fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
+    const frame_a = try allocator.alloc(u8, 48);
+    defer allocator.free(frame_a);
+    const frame_b = try allocator.alloc(u8, 36);
+    defer allocator.free(frame_b);
+    const frame_c = try allocator.alloc(u8, 24);
+    defer allocator.free(frame_c);
+    for (frame_a, 0..) |*byte, i| byte.* = @truncate(i * 11 + 3);
+    for (frame_b, 0..) |*byte, i| byte.* = @truncate(i * 5 + 1);
+    for (frame_c, 0..) |*byte, i| byte.* = @truncate(i * 17 + 9);
+
+    const plain = try opus_build.packet(allocator, .{ .stereo = true, .frames = &.{frame_a} });
+    defer allocator.free(plain);
+    const padded = try opus_build.packet(allocator, .{
+        .config = 8, // SILK-only WB, 10 ms
+        .code = 3,
+        .vbr = true,
+        .padding = 6,
+        .frames = &.{ frame_b, frame_c },
+    });
+    defer allocator.free(padded);
+
+    return opus_build.file(allocator, .{
+        .comments = &.{"ENCODER=zig-audio-fuzz"},
+        .packets = &.{ plain, padded },
+    });
 }
 
 /// Copy the valid template, then apply one mutation strategy. Returns the

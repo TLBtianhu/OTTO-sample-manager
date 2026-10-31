@@ -15,6 +15,10 @@ test {
     _ = @import("aiff_test.zig");
     _ = @import("legacy_vectors_test.zig");
     _ = @import("ogg_test.zig");
+    _ = @import("opus_head_test.zig");
+    _ = @import("opus_packet_test.zig");
+    _ = @import("opus_test.zig");
+    _ = @import("vorbis_meta_test.zig");
     _ = @import("vorbis_test.zig");
     _ = @import("vorbis_huffman_test.zig");
     _ = @import("vorbis_floor_test.zig");
@@ -22,6 +26,9 @@ test {
     _ = @import("vorbis_dsp_test.zig");
     _ = @import("vorbis_decode_test.zig");
     _ = @import("ogg_vectors_test.zig");
+    _ = @import("opus_vectors_test.zig");
+    _ = @import("opus_celt_test.zig");
+    _ = @import("opus_celt_vectors_test.zig");
     _ = @import("ffmpeg_test.zig");
     _ = @import("fuzz.zig");
 }

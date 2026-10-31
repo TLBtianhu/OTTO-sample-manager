@@ -11,6 +11,11 @@ pub const Format = enum {
     /// Ogg container carrying a Vorbis stream, fully decoded: floor 1, residue
     /// 0/1/2, inverse coupling, IMDCT and the lap.
     ogg_vorbis,
+    /// Ogg container carrying an Opus stream. This version parses the
+    /// container, both headers, every packet's TOC framing and the stream
+    /// length, but ships no Opus decoder: `probe` names it, `open` refuses
+    /// with `error.Unsupported`. See `opus.zig`.
+    ogg_opus,
 };
 
 pub const Info = struct {

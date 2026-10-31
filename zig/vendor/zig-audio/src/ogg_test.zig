@@ -304,15 +304,24 @@ test "ogg: the first audio stream wins and unknown BOS streams are skipped" {
 
 test "ogg: Opus is identified, but never claimed as Vorbis" {
     const opus_head = "OpusHead" ++ [_]u8{ 1, 2, 0x38, 0x01, 0x80, 0xBB, 0, 0, 0, 0, 0 };
+    // RFC 7845 5.2 requires the second packet to be `OpusTags`, so the decoder
+    // is right to demand it; without one this would be `Corrupt` before the
+    // dispatch could be demonstrated.
+    const opus_tags = "OpusTags" ++ [_]u8{ 4, 0, 0, 0 } ++ "test" ++ [_]u8{ 0, 0, 0, 0 };
     var writer = ogg_build.Writer.init(testing.allocator, 300);
     defer writer.deinit();
     try writer.addPage(ogg.Flag.bos, 0, &.{opus_head[0..]});
+    try writer.addPage(0, 0, &.{opus_tags[0..]});
     try writer.addPage(ogg.Flag.eos, 48000, &.{"audio"});
     const bytes = try writer.finish();
     defer testing.allocator.free(bytes);
 
     try testing.expectEqual(ogg.Codec.opus, ogg.identify(bytes));
-    try testing.expectEqual(@as(?root.Format, null), root.probe(bytes));
+    // The container layer names Opus as `.ogg_opus`, and `open` dispatches to
+    // the Opus decoder rather than the Vorbis one. The single "audio" packet is
+    // not a valid CELT frame, but that failure belongs to `read`: a packet's
+    // coding mode lives inside the packet, not in the header.
+    try testing.expectEqual(root.Format.ogg_opus, root.probe(bytes).?);
 
     var reader = std.Io.Reader.fixed(bytes);
     var demux = try ogg.Demuxer.init(testing.allocator, &reader, "");
@@ -320,7 +329,10 @@ test "ogg: Opus is identified, but never claimed as Vorbis" {
     try testing.expectEqual(ogg.Codec.opus, demux.streamCodec());
 
     var root_reader = std.Io.Reader.fixed(bytes);
-    try testing.expectError(error.Unsupported, root.open(testing.allocator, &root_reader));
+    var opened = try root.open(testing.allocator, &root_reader);
+    defer opened.deinit();
+    var pcm: [8]i16 = undefined;
+    try testing.expectError(error.Unsupported, opened.read(&pcm));
 }
 
 test "ogg: an Ogg file with no audio stream is Unsupported" {

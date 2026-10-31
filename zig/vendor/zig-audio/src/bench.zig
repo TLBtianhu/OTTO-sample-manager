@@ -62,6 +62,14 @@ const vorbis_seconds: f64 = 20.0;
 const vorbis_target_speedup: f64 = 100.0;
 const vorbis_total_frames: u64 = 132_300;
 
+/// 1 s of a 440 Hz sine, stereo Opus at 128 kbps, 20 ms frames: every packet is
+/// the CELT-only configuration 31, so this row measures the whole CELT chain
+/// (range decoder, allocation, PVQ, IMDCT, overlap-add, post-filter,
+/// de-emphasis) on two channels.
+const opus_fixture = @embedFile("fixtures/opus-stereo-48k-128.opus");
+const opus_seconds: f64 = 20.0;
+const opus_target_speedup: f64 = 100.0;
+const opus_total_frames: u64 = 48_000;
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -71,6 +79,7 @@ pub fn main() !void {
     try benchMp3(allocator, io);
     try benchMp3Stereo(allocator, io);
     try benchVorbis(allocator, io);
+    try benchOpus(allocator, io);
     try benchLegacy(allocator, io);
 }
 
@@ -447,4 +456,34 @@ fn report(
         return error.BelowThroughputTarget;
     }
     std.debug.print("OK: above the {d:.0}x realtime target\n", .{target});
+}
+
+fn benchOpus(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 48_000 < opus_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(opus_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.channels != 2) return error.UnexpectedChannelCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            if (n % 2 != 0) return error.UnexpectedSampleCount;
+            decoded_frames += n / 2;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+        // `granule - pre_skip` is only known once the last page has been read.
+        if (dec.info.total_frames != opus_total_frames) return error.UnexpectedFrameCount;
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report("Opus 128k stereo (CELT)", elapsed_ns, @floatFromInt(decoded_frames), 48_000, 2, opus_target_speedup, files);
 }
