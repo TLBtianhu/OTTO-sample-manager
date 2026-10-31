@@ -38,6 +38,7 @@ const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const preview = @import("preview.zig");
 const preview_audio = @import("preview_audio.zig");
+const media_key = @import("media_key.zig");
 const sample_facts = @import("sample_facts.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
 const trace = @import("trace.zig");
@@ -323,6 +324,14 @@ pub const Panel = struct {
         };
     }
 
+    /// 空格：正在播就停，否则从当前位置播；不是音频/还在读时什么都不做。
+    /// 返回 true = 播放状态变了，调用方据此重画。日志在 `preview_audio.toggle`。
+    pub fn togglePlay(self: *Panel, sample: ?*const core.model.Sample) bool {
+        if (self.current) |*outcome| return preview_audio.toggle(outcome, if (sample) |s| s.file_name else "?");
+        self.wants_play = self.pending;
+        return false;
+    }
+
     // -----------------------------------------------------------------------
     // 渲染：五个分支 + 两种"还没有答案"的状态 + 无条件的事实
     // -----------------------------------------------------------------------
@@ -521,8 +530,9 @@ fn drawSlot(self: *Panel, c: *ui.Context) void {
     switch (outcome) {
         .image => |bitmap| {
             var key_buffer: [64]u8 = undefined;
+            const key = media_key.make(&key_buffer, "preview", self.requested_path orelse "?", self.requested_mtime, self.requested_size);
             const drawn = ui.image(c, .{
-                .key = imageKey(self, &key_buffer),
+                .key = key,
                 .source = .{ .pixels = .{
                     .bgra = bitmap.pixels,
                     .width = bitmap.width,
@@ -566,19 +576,6 @@ fn drawFacts(self: *Panel, c: *ui.Context) void {
         .max_lines = 1,
     });
     ui.textf(c, .{ .size = 9.5, .color = c.theme.muted, .wrap = true, .max_lines = 1 }, "路径: {s}", .{facts.path});
-}
-
-/// 图像缓存键：路径 + mtime（内容变了键就变）。用哈希压成定长，长路径不会溢出；
-/// `current` 有效期间 `requested_*` 不会被改（`sync` 先清 current 再换指纹）。
-fn imageKey(self: *const Panel, buffer: *[64]u8) []const u8 {
-    const path = self.requested_path orelse "?";
-    const mtime = self.requested_mtime;
-    const size = self.requested_size;
-    var hasher = std.hash.Wyhash.init(0);
-    hasher.update(path);
-    hasher.update(std.mem.asBytes(&mtime));
-    hasher.update(std.mem.asBytes(&size));
-    return std.fmt.bufPrint(buffer, "preview|{x:0>16}", .{hasher.final()}) catch "preview";
 }
 
 fn reasonText(reason: preview.Reason) []const u8 {

@@ -138,7 +138,7 @@ pub const emptyBitmap: Bitmap = .{ .pixels = &.{}, .width = 0, .height = 0, .str
 ///   * `position_ms` 是 UI 线程最后一次读到的快照；跨线程的真值在 Player 的
 ///     `std.atomic.Value(u64)` 里。UI **只读** `positionMs()`，不碰播放线程。
 ///
-/// `play` / `stop` 可以在 UI 线程调用（只投递命令并等 ack，不碰设备句柄）；`seek` 在 M1 不支持。
+/// `play` / `stop` / `seek` 可以在 UI 线程调用（只投递命令并等 ack，不碰设备句柄）。
 pub const AudioSession = struct {
     pcm: []const u8,
     sample_rate: u32,
@@ -179,9 +179,19 @@ pub const AudioSession = struct {
         return self.duration_ms;
     }
 
-    /// M1 不做 seek：接口先留在这里，调用方不用等 M2 再改签名。
-    pub fn seek(_: *AudioSession, _: u64) error{Unsupported}!void {
-        return error.Unsupported;
+    /// 把播放头设到 `ms`，钳到 `[0, duration]`。
+    ///
+    /// 正在播时由 Player 丢弃端点缓冲后从新位置继续；没在播（或没有播放设备）
+    /// 时只是记住位置，下一次 `play` 从这里开始。Player 的 seek 是同步的：
+    /// 返回时 `positionMs()` 已经是新位置。
+    pub fn seek(self: *AudioSession, ms: u64) !void {
+        const target = @min(ms, self.duration_ms);
+        if (self.player) |player| {
+            try player.seek(target);
+            self.position_ms = player.positionMs();
+            return;
+        }
+        self.position_ms = target;
     }
 
     /// 停播 → join 播放线程 → 释放 Player、波形位图、峰值、PCM。

@@ -33,6 +33,7 @@ test {
     _ = @import("filter.zig");
     _ = @import("transport.zig");
     _ = @import("options.zig");
+    _ = @import("options_test.zig");
     _ = @import("library_io.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");
@@ -52,6 +53,7 @@ test {
     _ = @import("preview_test.zig");
     _ = @import("preview_snapshot.zig");
     _ = @import("sample_facts.zig");
+    _ = @import("media_key.zig");
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");
     _ = @import("providers/root.zig");

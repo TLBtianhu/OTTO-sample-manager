@@ -307,3 +307,23 @@ test "countLines：末尾没有换行时按实际行数算" {
     try testing.expectEqual(@as(usize, 5), preview.countLines("a\nb\nc\nd\ne"));
     try testing.expectEqual(@as(usize, 2), preview.countLines("a\n"));
 }
+
+test "AudioSession.seek：没有播放设备时也钳位并记住位置（下次 play 的起点）" {
+    var session: preview.AudioSession = .{
+        .pcm = &.{},
+        .sample_rate = 22050,
+        .channels = 1,
+        .bits = 16,
+        .duration_ms = 800,
+    };
+    defer session.deinit(testing.allocator);
+
+    try session.seek(600);
+    try testing.expectEqual(@as(u64, 600), session.positionMs());
+    // 超出时长：钳到 duration，不产生越界位置。
+    try session.seek(5000);
+    try testing.expectEqual(@as(u64, 800), session.positionMs());
+    // 0 是合法位置。
+    try session.seek(0);
+    try testing.expectEqual(@as(u64, 0), session.positionMs());
+}

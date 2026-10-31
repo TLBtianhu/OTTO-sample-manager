@@ -27,6 +27,9 @@ pub const Options = struct {
     preview_path: ?[]const u8 = null,
     /// `--play-test <file>`：解码 + 真播放 300ms + 断言位置前进，不开窗口。
     play_test_path: ?[]const u8 = null,
+    /// `--seek-at <ms>`：给 `--play-test` 用——播 200ms 后跳到这个位置，
+    /// 断言位置在新位置附近并继续播到结束。单独给没有意义（只有 play-test 读它）。
+    seek_at_ms: ?u64 = null,
     demo_transport: bool = false,
     watch_dir: ?[]const u8 = null,
     copy_now: ?[]const u8 = null,
@@ -126,6 +129,12 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.play_test_path = args[index];
         } else if (std.mem.startsWith(u8, arg, "--play-test=")) {
             options.play_test_path = arg["--play-test=".len..];
+        } else if (std.mem.eql(u8, arg, "--seek-at")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.seek_at_ms = try parseMillis(args[index]);
+        } else if (std.mem.startsWith(u8, arg, "--seek-at=")) {
+            options.seek_at_ms = try parseMillis(arg["--seek-at=".len..]);
         } else if (std.mem.eql(u8, arg, "--demo")) {
             index += 1;
             if (index == args.len) return error.MissingValue;
@@ -312,6 +321,11 @@ fn parseCount(text: []const u8) error{InvalidValue}!u32 {
     return count;
 }
 
+/// `--seek-at` 的毫秒数：0 合法（跳回开头），负数/非数字报 InvalidValue。
+fn parseMillis(text: []const u8) error{InvalidValue}!u64 {
+    return std.fmt.parseInt(u64, text, 10) catch error.InvalidValue;
+}
+
 /// 命令行用法。放在这里（而不是 `main.zig`）是为了让 `main` 保持在 600 行以内：
 /// 这段是纯数据，和解析器贴身放也不会漂移。
 pub fn printUsage() void {
@@ -325,7 +339,7 @@ pub fn printUsage() void {
             "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge]\n" ++
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
             "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
-            "      otto-lite --preview <file> | --play-test <file>\n" ++
+            "      otto-lite --preview <file> | --play-test <file> [--seek-at <ms>]\n" ++
             "      otto-lite --copy-now <file>\n" ++
             "      otto-lite --convert <in.json> <out.otto>\n" ++
             "      otto-lite --library-info <file>\n" ++
@@ -519,23 +533,6 @@ test "--no-isolation 是开关；--thumb-bench 两种写法都收" {
     try testing.expect(joined.no_isolation);
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--thumb-bench" }));
-}
-
-test "--cache-budget-kib：两种写法、KiB → 字节、默认 256 MiB、非数字报 InvalidValue" {
-    const joined = try parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=100" });
-    try testing.expectEqual(@as(u64, 100 * 1024), joined.disk_cache_budget_bytes);
-    try testing.expect(joined.cache_budget_set);
-
-    const spaced = try parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib", "256" });
-    try testing.expectEqual(@as(u64, 256 * 1024), spaced.disk_cache_budget_bytes);
-    try testing.expect(spaced.cache_budget_set);
-
-    const plain = try parse(&[_][]const u8{"otto-lite"});
-    try testing.expectEqual(@as(u64, 256 * 1024 * 1024), plain.disk_cache_budget_bytes);
-    try testing.expect(!plain.cache_budget_set);
-
-    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib" }));
-    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--cache-budget-kib=x" }));
 }
 
 test "--settings-probe 是开关，不吞下一个参数" {

@@ -113,6 +113,16 @@ pub fn progressX(width: u32, position_ms: u64, duration_ms: u64, line: u32) u32 
     return @intCast(@as(u64, usable) * clamped / duration_ms);
 }
 
+/// 波形上点击的 x 偏移（点，相对波形左边缘）→ 目标毫秒。
+/// `0` 在左端、`width` 在右端；点击越界时夹到两端，四舍五入到整毫秒。
+/// 纯几何，放在这里能在没有窗口的测试里验证；视图只负责把鼠标坐标减掉矩形原点。
+pub fn positionMsAt(offset_x: f32, width: f32, duration_ms: u64) u64 {
+    if (width <= 0 or duration_ms == 0) return 0;
+    const fraction = std.math.clamp(offset_x / width, 0, 1);
+    const ms: f32 = @round(fraction * @as(f32, @floatFromInt(duration_ms)));
+    return @intFromFloat(@max(0, ms));
+}
+
 // ---------------------------------------------------------------------------
 // 测试：纯内存，不碰窗口（需要的人眼确认交给 `--nanoui-snapshot`）
 // ---------------------------------------------------------------------------
@@ -219,4 +229,18 @@ test "progressX：0 / 中间 / 末尾 / 越界 / duration 为 0" {
     try testing.expectEqual(@as(u32, 0), progressX(240, 400, 0, 2));
     // 线比画布还宽的退化情况：不产生负的可用宽度。
     try testing.expectEqual(@as(u32, 0), progressX(2, 400, 800, 4));
+}
+
+test "positionMsAt：50% 点击 = 半个时长，越界夹到两端，0 宽/0 时长安全" {
+    try testing.expectEqual(@as(u64, 0), positionMsAt(0, 240, 800));
+    try testing.expectEqual(@as(u64, 400), positionMsAt(120, 240, 800));
+    try testing.expectEqual(@as(u64, 800), positionMsAt(240, 240, 800));
+    // 点在波形外面（左边/右边）：夹到 0 / duration，不产生负毫秒。
+    try testing.expectEqual(@as(u64, 0), positionMsAt(-30, 240, 800));
+    try testing.expectEqual(@as(u64, 800), positionMsAt(300, 240, 800));
+    // 四舍五入：33% 的 800 ms = 264 ms。
+    try testing.expectEqual(@as(u64, 264), positionMsAt(79.2, 240, 800));
+    // 退化输入不除零。
+    try testing.expectEqual(@as(u64, 0), positionMsAt(10, 0, 800));
+    try testing.expectEqual(@as(u64, 0), positionMsAt(10, 240, 0));
 }

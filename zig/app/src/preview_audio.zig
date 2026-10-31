@@ -18,6 +18,7 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const preview = @import("preview.zig");
+const media_key = @import("media_key.zig");
 const player_mod = @import("audio/player.zig");
 const waveform = @import("audio/waveform.zig");
 const ui = nanoui.ui;
@@ -96,9 +97,33 @@ pub fn play(session: *preview.AudioSession) bool {
     return true;
 }
 
+/// 空格：正在播就停（保留位置），否则从当前位置播；不是音频就什么都不做。
+/// 返回 true = 播放状态真的变了（调用方据此重画）。日志是 `--nanoui-script`
+/// 验收 `play`/`stop` 两行的来源。
+pub fn toggle(outcome: *preview.Outcome, name: []const u8) bool {
+    switch (outcome.*) {
+        .audio => |*session| {
+            if (session.isPlaying()) {
+                session.stop();
+                std.debug.print("otto-lite: stop name={s}\n", .{name});
+                return true;
+            }
+            if (play(session)) {
+                std.debug.print("otto-lite: play name={s} position_ms={d}\n", .{ name, session.positionMs() });
+                return true;
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
 /// 波形（图）+ 播放进度（div）。`waveform.pixels` 为空时什么都不画，
 /// 调用方不用先判断。
-fn drawWave(c: *ui.Context, session: *const preview.AudioSession, identity: Identity) void {
+///
+/// 整条波形是可点击的：x 比例 → 毫秒 → `AudioSession.seek()`。点击帧里先处理
+/// seek 再画进度线，所以线在同一帧就到点击位置；未播放时只是把播放头放过去。
+fn drawWave(c: *ui.Context, session: *preview.AudioSession, identity: Identity) void {
     const bitmap = session.waveform;
     if (bitmap.width == 0 or bitmap.height == 0 or bitmap.pixels.len == 0) return;
 
@@ -107,11 +132,14 @@ fn drawWave(c: *ui.Context, session: *const preview.AudioSession, identity: Iden
     // 轨道：圆角浅底，透明背景的位图叠上去才有"波形在条里"的样子；`clip` 让
     // 进度线不会画出圆角之外。
     const stack = ui.div(c).w(w).h(h).rounded(4).bg(c.theme.track).clip();
+    const it = stack.interaction();
     defer stack.end();
+
+    if (it.clicked) seekFromClick(c, session, it.rect);
 
     var key_buffer: [64]u8 = undefined;
     if (!ui.image(c, .{
-        .key = key(&key_buffer, identity),
+        .key = media_key.make(&key_buffer, "wave", identity.path, identity.mtime, identity.size),
         .source = .{ .pixels = .{
             .bgra = bitmap.pixels,
             .width = bitmap.width,
@@ -136,10 +164,20 @@ fn drawWave(c: *ui.Context, session: *const preview.AudioSession, identity: Iden
     ui.div(c).absolute().w(line_width).hFull().offset(x, 0).rounded(1).bg(c.theme.accent).end();
 }
 
-fn key(buffer: *[64]u8, identity: Identity) []const u8 {
-    var hasher = std.hash.Wyhash.init(0x7761_7665); // "wave"
-    hasher.update(identity.path);
-    hasher.update(std.mem.asBytes(&identity.mtime));
-    hasher.update(std.mem.asBytes(&identity.size));
-    return std.fmt.bufPrint(buffer, "wave|{x:0>16}", .{hasher.final()}) catch "wave";
+/// 波形点击：把鼠标相对矩形左边缘的 x 换成比例，再换成目标毫秒。
+/// `it.rect` 是上一帧的布局矩形（nanoui 的命中就是按上一帧算的），用它做换算
+/// 与用户看到的波形一致。失败只打日志，不弹窗。
+fn seekFromClick(c: *ui.Context, session: *preview.AudioSession, rect: ?ui.Rect) void {
+    const r = rect orelse return;
+    if (r.w <= 0) return;
+    const target = waveform.positionMsAt(c.input.mouse.x - r.x, r.w, session.durationMs());
+    session.seek(target) catch |err| {
+        std.debug.print(
+            "otto-lite: 音频 seek 失败（{s} hresult=0x{x:0>8}）\n",
+            .{ @errorName(err), @as(u32, @bitCast(player_mod.lastHresult())) },
+        );
+        return;
+    };
+    c.changed = true;
+    std.debug.print("otto-lite: seek position_ms={d}\n", .{session.positionMs()});
 }
