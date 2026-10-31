@@ -50,6 +50,10 @@ pub const provider: preview.Provider = .{
     .kind = .audio,
     .supports = supports,
     .open = open,
+    // **不参与行内图标**（实测决定，见报告）：打开 MP3 容器 + 32 次 seek 的粗采样
+    // 在本机是 47–78 ms/张，预算是 15 ms。超过预算就不做——绝不为一个 32px 图标
+    // 解码整段音频；音频行显示占位（或由 Shell 静态图兜底）。
+    .icon_capable = false,
 };
 
 /// 声明接手的扩展名。带点：与 `core.model.Sample.file_ext` 同形。

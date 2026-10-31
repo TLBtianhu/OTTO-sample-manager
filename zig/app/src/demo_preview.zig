@@ -33,8 +33,15 @@ const sample_facts = @import("sample_facts.zig");
 
 /// 打开路径、打印事实与预览摘要。`path` 原样交给口岸（相对路径按当前目录解析）。
 /// `no_shell` 为 true 时用去掉 Shell provider 的注册表（`--no-shell-preview`）：
-/// 音频/图片/视频 provider 自给自足，不靠系统缩略图兜底。
-pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8, no_shell: bool) !u8 {
+/// 音频/图片/视频 provider 自给自足，不靠系统缩略图兜底。`allow_isolation` 为
+/// false（`--no-isolation`）时 Shell provider 直接进程内取图，不尝试 helper。
+pub fn run(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    no_shell: bool,
+    allow_isolation: bool,
+) !u8 {
     const io = init.io;
 
     var sample = core.model.Sample{
@@ -67,6 +74,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, path: []const u
     const answered = registry.openAnswered(allocator, .{
         .sample = &sample,
         .max_px = preview.default_max_px,
+        .allow_isolation = allow_isolation,
     }) catch |err| {
         std.debug.print("preview: FAIL open 失败（{s}）\n", .{@errorName(err)});
         return 1;

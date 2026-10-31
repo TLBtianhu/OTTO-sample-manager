@@ -106,11 +106,20 @@ pub fn boot(
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
     // 运行形态决定：dev 没有 dataDir → null（不写盘）。预算来自设置；显式
     // `--cache-budget-kib` 仍优先于设置里的 L3 值。
-    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation, .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null, .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(), .budget_bytes = settings.l2BudgetBytes() });
+    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{
+        .isolation = !options.no_isolation,
+        .no_shell_preview = options.no_shell_preview,
+        .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null,
+        .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(),
+        .budget_bytes = settings.l2BudgetBytes(),
+    });
     errdefer thumbs.deinit();
     // 预览条也用 `init.gpa`（工作线程分配位图/文本）。注册表只有一张
-    // （`providers/root.zig`）：UI、`--preview`、`--no-shell-preview` 共用同一份顺序。
-    const preview = try preview_panel.Panel.init(init.gpa, init.io, preview_providers.registryFor(options.no_shell_preview), .{});
+    // （`providers/root.zig`）：UI、`--preview`、行内小图共用同一份顺序；
+    // `--no-shell-preview` / `--no-isolation` 同时作用于预览条与行内小图。
+    const preview = try preview_panel.Panel.init(init.gpa, init.io, preview_providers.registryFor(options.no_shell_preview), .{
+        .allow_isolation = !options.no_isolation,
+    });
     errdefer preview.deinit();
 
     // 字体索引只写进数据目录形态（portable/installed）；dev 传 null → 每次重扫。

@@ -1,16 +1,18 @@
 //! 缩略图基准：100 个**全新路径**各取一次（冷），同一批路径再取一次（热）。
 //!
-//! 计时与 fixture 的造法直接复用 `thumb_bench.zig`（`Copies` / `collectFiles` /
-//! `findSource` / `readAlongside` + `Clock.Timestamp` 左右各取一次），不另写一套：
-//! 那边是「进程内 vs 隔离 helper」的对照，这里只是把次数从 200 换成 100、把
-//! 冷/热两轮分开报 p50/p95。
+//! **走的是行内小图同一条 provider 注册表**：`providers.registryForIcon(false).open`
+//! （`image-wic` → `mf-video` → `shell-thumbnail`），不是旧的 `thumb_host.get`。
+//! 这样 `--bench` 的缩略图一项量到的就是列表左侧那格 64px 的真实链路；PNG/BMP
+//! 由 WIC 在进程内解，不再为每一张起 helper。计时与 fixture 的造法仍复用
+//! `thumb_bench.zig`（`Copies` / `collectFiles` / `readAlongside` + 时钟），不另写一套。
 //!
 //! 冷/热的准确含义（报告里要按这个写，不能含糊）：
 //!   * **冷**：100 个从没被 Shell 见过的文件名（真图字节复制而成），并且先
-//!     `thumb_host.deinit()` 把 helper 收掉。所以首张包含 CreateProcessW + helper
-//!     里的 Shell 初始化，其余 99 张是「Shell 缓存未命中 + helper 已常驻」；
-//!   * **热**：同一批 100 个路径再跑一遍。Shell 的系统级缩略图缓存 + OTTO 的
-//!     helper 都已经热了，测的是"重复预览"的路径。
+//!     `thumb_host.deinit()` 把 helper 收掉。首张包含 provider 的首次初始化
+//!     （WIC 工厂 / 可能的 helper 启动），其余 99 张是「系统缓存未命中 + provider
+//!     已就绪」；
+//!   * **热**：同一批 100 个路径再跑一遍。系统级缩略图缓存 + provider 都已热，
+//!     测的是"重复预览"的路径。
 //!
 //! **OTTO 自己的 L3（磁盘缩略图缓存）不在这条测量里**：`--bench` 不开 `Thumbs`，
 //! 也不写用户目录（宪章第九节 dev 形态不落盘）。L3 的命中/未命中要靠带 mtime 与
@@ -18,7 +20,9 @@
 //! 范围；`PERF.md` 把这条限制写清楚，不用假数字凑。
 
 const std = @import("std");
-const thumb = @import("otto_thumb");
+const core = @import("otto_core");
+const preview = @import("preview.zig");
+const providers = @import("providers/root.zig");
 const thumb_host = @import("otto_thumb_host");
 const stats = @import("bench_stats.zig");
 const thumb_bench = @import("thumb_bench.zig");
@@ -76,7 +80,7 @@ pub fn prepare(
     };
     if (files.items.len == 0) return error.NoSamples;
 
-    const source = thumb_bench.findSource(allocator, files.items) orelse return error.NoImageSource;
+    const source = (try findIconSource(allocator, files.items)) orelse return error.NoImageSource;
     defer allocator.free(source);
     const bytes = try thumb_bench.readAlongside(io, allocator, root, source);
     defer allocator.free(bytes);
@@ -87,18 +91,82 @@ pub fn prepare(
     return fixture;
 }
 
+/// 从一个目录里挑第一张 **provider 图标表真的能出图** 的栅格图片。
+/// 只试图片扩展名：视频抽帧虽然也 icon_capable，但拿 100 个视频副本做 100 次
+/// 首帧解码不是这条基准要量的事。
+fn findIconSource(allocator: std.mem.Allocator, files: []const []u8) !?[]u8 {
+    const registry = providers.registryForIcon(false);
+    for (files) |path| {
+        if (!isRasterImage(path)) continue;
+        if (!try providerSucceeds(allocator, registry, path, 16)) continue;
+        return try allocator.dupe(u8, path);
+    }
+    return null;
+}
+
+const raster_extensions = [_][]const u8{ ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff" };
+
+fn isRasterImage(path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+    for (raster_extensions) |known| {
+        if (std.ascii.eqlIgnoreCase(ext, known)) return true;
+    }
+    return false;
+}
+
+/// 行内小图用的样本（app 侧没有 core.store 索引，路径就是唯一身份）。
+fn sampleFor(path: []const u8) core.model.Sample {
+    return .{
+        .id = path,
+        .file_name = std.fs.path.basename(path),
+        .file_ext = std.fs.path.extension(path),
+        .file_path = path,
+    };
+}
+
+fn openIcon(
+    allocator: std.mem.Allocator,
+    registry: preview.Registry,
+    path: []const u8,
+    max_px: u32,
+) preview.Error!preview.Outcome {
+    var sample = sampleFor(path);
+    return registry.open(allocator, .{
+        .sample = &sample,
+        .max_px = max_px,
+        .icon = true,
+    });
+}
+
+fn providerSucceeds(
+    allocator: std.mem.Allocator,
+    registry: preview.Registry,
+    path: []const u8,
+    max_px: u32,
+) !bool {
+    const outcome = openIcon(allocator, registry, path, max_px) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    var owned = outcome;
+    defer owned.deinit(allocator);
+    return switch (owned) {
+        .image => true,
+        else => false,
+    };
+}
+
 /// 冷 + 热各 100 次。调用方先 `prepare`，拿到 `paths()` 再调这里。
 pub fn measure(io: std.Io, allocator: std.mem.Allocator, paths: []const []u8) !Report {
     var report = Report{};
 
-    // 冷：把 helper 收掉，连一次进程启动都算进第一张。
+    // 冷：把 helper 收掉，首张包含 provider 的首次初始化（WIC 工厂 / 可能的 helper）。
     thumb_host.deinit();
     const cold = try timeRound(io, allocator, paths, &report.cold_failures);
     defer allocator.free(cold);
     if (cold.len > 0) report.cold_first_ms = cold[0];
     report.cold = stats.summarize(allocator, cold);
 
-    // 热：同一批路径，helper 与 Shell 缓存都还在。
+    // 热：同一批路径，WIC / helper 与系统缓存都还在。
     const hot = try timeRound(io, allocator, paths, &report.hot_failures);
     defer allocator.free(hot);
     if (hot.len > 0) report.hot_first_ms = hot[0];
@@ -114,15 +182,19 @@ fn timeRound(
     paths: []const []u8,
     failures: *u32,
 ) ![]f64 {
+    const registry = providers.registryForIcon(false);
     const samples = try allocator.alloc(f64, paths.len);
     var used: usize = 0;
     for (paths) |path| {
         const started = stats.now(io);
         var ok = false;
-        if (thumb_host.get(allocator, path, size_px)) |image| {
-            var owned = image;
-            owned.deinit(allocator);
-            ok = true;
+        if (openIcon(allocator, registry, path, size_px)) |outcome| {
+            var owned = outcome;
+            defer owned.deinit(allocator);
+            switch (owned) {
+                .image => ok = true,
+                else => {},
+            }
         } else |_| {}
         const elapsed = stats.sinceMs(io, started);
         if (ok) {
@@ -138,7 +210,7 @@ fn timeRound(
 /// 取图并**持有**：内存测量要在"已经取到 100 张缩略图"的状态下读 WorkingSetSize，
 /// 第 3 项指标说的就是这个状态。调用方测完再 `deinit`。
 pub const Held = struct {
-    images: std.ArrayList(thumb.Thumbnail) = .empty,
+    images: std.ArrayList(preview.Bitmap) = .empty,
 
     pub fn pixelsBytes(self: *const Held) usize {
         var total: usize = 0;
@@ -147,22 +219,30 @@ pub const Held = struct {
     }
 
     pub fn deinit(self: *Held, allocator: std.mem.Allocator) void {
-        for (self.images.items) |image| {
-            var owned = image;
-            owned.deinit(allocator);
-        }
+        for (self.images.items) |image| image.deinit(allocator);
         self.images.deinit(allocator);
         self.* = .{};
     }
 };
 
 pub fn hold(allocator: std.mem.Allocator, paths: []const []u8) !Held {
+    const registry = providers.registryForIcon(false);
     var held = Held{};
     errdefer held.deinit(allocator);
     for (paths) |path| {
-        if (thumb_host.get(allocator, path, size_px)) |image| {
-            try held.images.append(allocator, image);
-        } else |_| {}
+        const outcome = openIcon(allocator, registry, path, size_px) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        var owned = outcome;
+        switch (owned) {
+            .image => |bitmap| {
+                held.images.append(allocator, bitmap) catch {
+                    bitmap.deinit(allocator);
+                    return error.OutOfMemory;
+                };
+            },
+            else => owned.deinit(allocator),
+        }
     }
     return held;
 }

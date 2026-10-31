@@ -46,6 +46,19 @@
 //! 图片 / 视频必须仍然能出答案，这是"不依赖系统缩略图"的验收开关（不是给用户的
 //! 日常选项）。UI 与 `--preview` 都通过 `registryFor` 取表，两处不会漂移。
 //!
+//! ## 行内小图：`registryForIcon`
+//!
+//! 列表左侧 32 点（2x 屏 64px）的小图与预览条**共用同一批 provider**，只是筛掉
+//! `icon_capable == false` 的项。当前结果是
+//! `[wasapi-pcm, image-wic, mf-video, shell-thumbnail]`：WAV 用粗采样（不整段解码），
+//! `mf-audio` 因 MF 打开容器 + seek 实测超 15ms/张 预算而**不参与**（见报告），
+//! 音频行显示占位。`--no-shell-preview` 时再少一项 Shell，行内小图同样**不再问
+//! Shell**，与预览的语义逐字一致。
+//!
+//! `registryForIcon` 返回**值**（`preview.Registry` 只有一枚切片指针，复制很便宜），
+//! 调用方存一份即可；两张静态表的生命周期与进程相同。顺序检查在 comptime 完成：
+//! 以后加 provider 时，图标表必须仍是"预览表按 `icon_capable` 过滤"的结果。
+//!
 //! `main.zig` 只 import 这里的 `registry` / `registryFor`，它不认识任何具体
 //! provider；以后加 provider 只改这张表（ROADMAP M1 的验收）。依赖方向：
 //! `main → providers/root → {audio, mf_audio, image, mf_video, thumb} → preview`；
@@ -78,8 +91,31 @@ const without_shell = [_]*const preview.Provider{
     &mf_video.provider,
 };
 
+/// 行内小图表：预览表按 `icon_capable` 过滤后的结果。顺序与预览一致。
+///
+/// WAV 排在最前：它用等距窗口粗采样，是唯一在 15 ms 预算内的音频图标实现。
+/// MF 音频打开容器 + seek 的固定开销超预算，保持 `icon_capable = false`
+/// （实测 47–78 ms/张，见报告），所以这里没有 `mf-audio`。
+const icon_ordered = [_]*const preview.Provider{
+    &audio.provider,
+    &image.provider,
+    &mf_video.provider,
+    &thumb.provider,
+};
+
+/// 行内小图表去掉 Shell：`--no-shell-preview` 时 PNG/BMP 仍由 WIC 出图，
+/// WAV 仍由粗采样出波形；没有自给自足 provider 的格式（PSD 等）显示占位，
+/// 绝不偷偷问 Shell。
+const icon_without_shell = [_]*const preview.Provider{
+    &audio.provider,
+    &image.provider,
+    &mf_video.provider,
+};
+
 const ordered_registry: preview.Registry = .{ .providers = &ordered };
 const no_shell_registry: preview.Registry = .{ .providers = &without_shell };
+const icon_registry: preview.Registry = .{ .providers = &icon_ordered };
+const icon_no_shell_registry: preview.Registry = .{ .providers = &icon_without_shell };
 
 /// 给 `main.zig` / `preview_panel.Panel` / `--preview` 用的那份注册表。
 /// 它和 `registryFor(false)` 返回的是**同一个对象**，不是两份独立副本。
@@ -91,6 +127,15 @@ pub const registry: preview.Registry = ordered_registry;
 /// 连"问它一次"都不会发生。
 pub fn registryFor(no_shell_preview: bool) *const preview.Registry {
     return if (no_shell_preview) &no_shell_registry else &registry;
+}
+
+/// 行内 32pt 小图（`thumbs.zig`）用的表：只留 `icon_capable` 的 provider，
+/// 顺序与预览表一致。返回**值**：调用方存一份，不需要关心静态对象的生命周期。
+///
+/// `true` 与 `registryFor(true)` 语义一致：Shell 完全不在表里，行内小图也不会
+/// 有一次"问 Shell"的机会。
+pub fn registryForIcon(no_shell_preview: bool) preview.Registry {
+    return if (no_shell_preview) icon_no_shell_registry else icon_registry;
 }
 
 comptime {
@@ -140,10 +185,46 @@ comptime {
     if (!no_shell_audio or !no_shell_mf_audio or !no_shell_image or !no_shell_mf_video) {
         @compileError("--no-shell-preview 必须保留音频 / 图片 / 视频 provider");
     }
+
+    // 行内小图表必须**恰好**是预览表按 icon_capable 过滤的结果：不能漏（行内图
+    // 少一种格式）、不能多（不该参与的项混进来）、顺序也不能变（偏好漂移）。
+    var expected_icons: usize = 0;
+    var expected_names: [ordered.len][]const u8 = undefined;
+    for (ordered) |provider| {
+        if (!provider.icon_capable) continue;
+        expected_names[expected_icons] = provider.name;
+        expected_icons += 1;
+    }
+    if (icon_ordered.len != expected_icons) {
+        @compileError("icon 注册表必须包含且只包含 icon_capable 的 provider");
+    }
+    for (icon_ordered, 0..) |provider, index| {
+        if (!provider.icon_capable) @compileError("icon 注册表里出现了 icon_capable=false 的项");
+        if (!std.mem.eql(u8, provider.name, expected_names[index])) {
+            @compileError("icon 注册表的顺序必须与预览表一致");
+        }
+    }
+    // 音频不是"不能进图标表"：只要实现是粗采样（≤15ms/张）就可以进。这里只检查
+    // 图标表里的每一项都声明了能力；WAV 的窗口采样走粗采样，MF 音频实测超预算
+    // 所以保持 false，由各 provider 自己保证"不整段解码"。
+    if (!audio.provider.icon_capable) @compileError("WAV 粗采样已实现，wasapi-pcm 应参与图标表");
+
+    // 去掉 Shell 的 icon 表 = icon 表少一项，且少的必须正好是 Shell。
+    if (icon_without_shell.len != icon_ordered.len - 1) {
+        @compileError("--no-shell-preview 的 icon 表只应少一项");
+    }
+    var icon_has_shell = false;
+    for (icon_without_shell) |provider| {
+        if (provider == &thumb.provider) @compileError("--no-shell-preview 的 icon 表里不能有 Shell");
+    }
+    for (icon_ordered) |provider| {
+        if (provider == &thumb.provider) icon_has_shell = true;
+    }
+    if (!icon_has_shell) @compileError("默认 icon 表必须保留 Shell 兜底");
 }
 
 // ---------------------------------------------------------------------------
-// 测试：两张表的顺序与成员（具体 provider 的行为各自在 provider 文件里测）
+// 测试：预览表与行内小图表的顺序 / 成员（具体 provider 的行为各自在 provider 文件里测）
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -176,4 +257,42 @@ test "--no-shell-preview：去掉 Shell，其余四项顺序不变，Shell 连 s
     try testing.expect(registryFor(false) == &registry);
     try testing.expect(trimmed.providers[2] == registry.providers[2]);
     try testing.expect(trimmed.providers[3] == registry.providers[3]);
+}
+
+test "icon 注册表：wasapi → image-wic → mf-video → shell，顺序与预览一致" {
+    const icons = registryForIcon(false);
+    try testing.expectEqual(@as(usize, 4), icons.providers.len);
+    try testing.expectEqualStrings("wasapi-pcm", icons.providers[0].name);
+    try testing.expectEqualStrings("image-wic", icons.providers[1].name);
+    try testing.expectEqualStrings("mf-video", icons.providers[2].name);
+    try testing.expectEqualStrings("shell-thumbnail", icons.providers[3].name);
+
+    for (icons.providers) |provider| try testing.expect(provider.icon_capable);
+
+    // 预览表里所有 icon_capable 的项，必须按同样的相对顺序出现在 icon 表里。
+    var cursor: usize = 0;
+    for (registry.providers) |provider| {
+        if (!provider.icon_capable) continue;
+        try testing.expect(cursor < icons.providers.len);
+        try testing.expect(provider == icons.providers[cursor]);
+        cursor += 1;
+    }
+    try testing.expectEqual(icons.providers.len, cursor);
+}
+
+test "--no-shell-preview 的 icon 表：png/bmp 仍有 image-wic，Shell 不在表里" {
+    const icons = registryForIcon(true);
+    try testing.expectEqual(@as(usize, 3), icons.providers.len);
+    try testing.expectEqualStrings("wasapi-pcm", icons.providers[0].name);
+    try testing.expectEqualStrings("image-wic", icons.providers[1].name);
+    try testing.expectEqualStrings("mf-video", icons.providers[2].name);
+    for (icons.providers) |provider| {
+        try testing.expect(provider != &thumb.provider);
+        try testing.expect(provider.icon_capable);
+    }
+}
+
+test "图标级音频：WAV 参与（粗采样），MF 音频因超预算不参与" {
+    try testing.expect(audio.provider.icon_capable);
+    try testing.expect(!mf_audio.provider.icon_capable);
 }

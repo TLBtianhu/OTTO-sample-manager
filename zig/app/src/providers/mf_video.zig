@@ -55,6 +55,8 @@ pub const provider: preview.Provider = .{
     .kind = .image,
     .supports = supports,
     .open = open,
+    // 视频首帧本来就是一张图，行内 64px 小图与预览条用同一条抽帧链。
+    .icon_capable = true,
 };
 
 const extensions = [_][]const u8{ ".mp4", ".m4v", ".mov", ".wmv" };

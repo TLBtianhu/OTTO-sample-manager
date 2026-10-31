@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const l3 = @import("thumbs_disk.zig");
+const icon = @import("thumbs_icon.zig");
 
 /// 请求的边长（像素）。列表那格是 32 点，Windows 的窗口在 150% / 200% 缩放下是
 /// 2x，所以按 64 请求：2x 屏上正好 1:1，1x 屏由图集缩到 32 点，不会糊。
@@ -33,6 +34,9 @@ pub const Options = struct {
     /// 默认 `true`：第三方 handler 崩了/卡死/弹框只带走 helper，OTTO 列表照常滚；
     /// `false` 是显式对照开关（`--no-isolation`），退回进程内 `thumb.get`。
     isolation: bool = true,
+    /// 行内小图是否也遵守 `--no-shell-preview`：`true` 时 `registryForIcon(true)`
+    /// 里根本没有 Shell provider，PSD 之类只能显示占位，绝不偷偷问系统缩略图。
+    no_shell_preview: bool = false,
     /// L3 磁盘缓存根目录；`null` = 本次不用 L3（dev 形态 / 目录建不出来）。
     disk_cache_dir: ?[]const u8 = null,
     /// L3 预算（字节）。默认 256 MiB，启动时裁剪到预算以内。
@@ -52,8 +56,9 @@ pub const View = struct {
 
 /// `acquire` 的四种答案。UI 对后三种都画占位，只是图标不同：
 ///   * `pending`   —— 已进队列 / 正在取，等一次 redraw；
-///   * `no_handler`—— 能力门禁说这台机器没有 handler（正常态，不是错误）；
-///   * `failed`    —— 文件没了 / Shell 失败 / 队列里丢了；已经记进失败表。
+///   * `no_handler`—— provider 注册表全部谢绝且原因是 no_handler/unsupported
+///                    （正常态，不是错误；已经负缓存）；
+///   * `failed`    —— 文件没了 / provider 失败 / 队列里丢了；已经记进失败表。
 pub const Lookup = union(enum) {
     ready: View,
     pending,
@@ -63,15 +68,17 @@ pub const Lookup = union(enum) {
 
 /// 取图层的账。UI / `--demo-thumbs` 只读这个快照。
 pub const Stats = struct {
-    /// 真正进了队列的取图请求（能力门禁挡下的不算）。
+    /// 真正进了队列的取图请求。现在**所有可见行**都会入队一次，provider 的
+    /// 谢绝发生在工作线程上（不再有 UI 线程的能力门禁）。
     requested: u32 = 0,
     /// 取图成功、已放进缓存的次数（= `readyCount()`）。
     ready: u32 = 0,
-    /// 被能力门禁挡下的查询次数（每次都算，含负缓存）。
+    /// provider 全部谢绝且原因是 no_handler/unsupported 的次数；每条只记一次
+    /// （负缓存命中不再累加）。
     no_handler: u32 = 0,
     /// L2 缓存命中次数。
     cached: u32 = 0,
-    /// 调了 `thumb.get` 但失败的次数（含文件不存在、Shell 出错）。
+    /// provider 返回 failed/file_missing（含 OOM、Shell 出错）的次数；每条只记一次。
     failed: u32 = 0,
     /// 队列满时被顶掉的最旧请求数。
     dropped: u32 = 0,
@@ -90,10 +97,11 @@ pub const Stats = struct {
     l3_corrupt: u64 = 0,
 };
 
-/// 一个待取的请求。key / path 都是本层复制的，跨线程传递安全。
+/// 一个待取的请求。key / 样本都是本层复制的，跨线程传递安全。
 pub const Job = struct {
     key: []u8,
-    path: []u8,
+    /// 深拷贝后的样本；工作线程用它问 provider 注册表。
+    sample: icon.Snapshot,
     size_px: u32,
     /// 入队时算好的 L3 摘要；`null` = 本次没有磁盘缓存。
     disk_key: ?l3.Key,

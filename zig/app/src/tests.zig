@@ -6,6 +6,8 @@
 //!   * `live.zig` / `live_adapt.zig` —— `Live` 的驱动与 ports 事件 → core.Change 的
 //!                         适配（合成事件，不碰磁盘）；
 //!   * `thumbs_test.zig`—— 缓存键与载荷头的纯函数（线程与真实 Shell 由 `--demo-thumbs` 覆盖）；
+//!   * `thumbs_icon.zig` / `thumbs_keys.zig` / `audio/coarse.zig` —— 行内小图的
+//!     provider 入口、深拷贝与有界负缓存、WAV 图标粗采样（真实取图由快照/`--bench` 覆盖）；
 //!   * `selection.zig`  —— 普通/Ctrl/Shift 点击、拖拽取集合、行号 → 路径；
 //!   * `filter.zig`     —— 搜索的行→样本映射、↑↓ 越界不环绕、过滤后光标保持/回落；
 //!   * `transport.zig`  —— 帧里的拖拽快照、取消、无窗口执行（真拖拽由人工验收）；
@@ -32,6 +34,10 @@ test {
     _ = @import("rescan_ui.zig");
     _ = @import("rescan_test.zig");
     _ = @import("thumbs_test.zig");
+    // 行内小图的 provider 入口、深拷贝快照与失败/谢绝键表（缓存键在 thumbs_test）。
+    _ = @import("thumbs_icon.zig");
+    _ = @import("thumbs_keys.zig");
+    _ = @import("audio/coarse.zig");
     _ = @import("selection.zig");
     _ = @import("filter.zig");
     _ = @import("transport.zig");

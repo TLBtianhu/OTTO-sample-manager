@@ -80,8 +80,11 @@ pub fn run(
     if (options.demo_rescan_dir) |dir_path| return try demo_rescan.run(init, dir_path);
 
     // 预览注册表自检：和 UI 走同一个 registry，但不开窗、不碰 nanoui。
-    // `--no-shell-preview` 只换这张表（去掉 Shell 缩略图），解码链本身不动。
-    if (options.preview_path) |path| return try demo_preview.run(init, init.gpa, path, options.no_shell_preview);
+    // `--no-shell-preview` 只换这张表（去掉 Shell 缩略图），解码链本身不动；
+    // `--no-isolation` 让 Shell provider 不尝试 helper，和列表行内小图同一条语义。
+    if (options.preview_path) |path| {
+        return try demo_preview.run(init, init.gpa, path, options.no_shell_preview, !options.no_isolation);
+    }
 
     // 音频试听自检：真解码、真播放、真 sleep；没有端点时以 0 退出。
     if (options.play_test_path) |path| return try demo_play.run(init, init.gpa, path, options.seek_at_ms);

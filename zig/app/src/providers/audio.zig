@@ -13,6 +13,11 @@
 //!   3. 把 `AudioSession` 交给视图；播放/停止/position 都在 `preview.AudioSession`
 //!      的方法里，波形是会话里一张已经画好的位图，视图不认识 WASAPI，也不认识解码。
 //!
+//! 图标请求（`Request.icon = true`）走**第二条、不重叠的路**：`audio/coarse.zig`
+//! 只读 WAV 头部 + 32 个等距窗口（每窗两帧），拼成 min/max 包络 → 64×64 波形条。
+//! 它不读整段 PCM、不初始化 WASAPI、不建 Player；40 秒的 WAV 也只读几 KB。图标是
+//! 身份指纹，不是预览的缩小版——单张预算 15ms，实测 0–1ms。
+//!
 //! 为什么排在 `shell-thumbnail` 前面（`providers/root.zig`）：顺序表达偏好——
 //! 能播就播；thumb 的静态图不该抢在"真的能试听"前面。谢绝语义保证音频失败时
 //! thumb 仍然有机会。
@@ -24,17 +29,22 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("otto_core");
 const audio_file = @import("../audio/file.zig");
+const coarse = @import("../audio/coarse.zig");
 const player = @import("../audio/player.zig");
 const session_mod = @import("../audio/session.zig");
 const wav = @import("../audio/wav.zig");
 const preview = @import("../preview.zig");
 
-/// 注册表里的这一项。`kind = .audio`：产出可播放的会话。
+/// 注册表里的这一项。`kind = .audio`：预览请求产出可播放的会话；
+/// 图标请求（`Request.icon`）产出**粗采样波形位图**。
 pub const provider: preview.Provider = .{
     .name = "wasapi-pcm",
     .kind = .audio,
     .supports = supports,
     .open = open,
+    // 行内图标用 32 个等距窗口各读两帧（`audio/coarse.zig`），不整段解码。
+    // 实测单张远低于 15ms 预算，所以 WAV 参与图标表。
+    .icon_capable = true,
 };
 
 pub fn supports(sample: *const core.model.Sample) bool {
@@ -69,6 +79,8 @@ pub fn sessionFromWav(
 
 fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!preview.Outcome {
     if (builtin.os.tag != .windows) return .{ .none = .unsupported };
+    // 行内小图：粗采样 32 个窗口，不读整段 PCM、不初始化 WASAPI / Player。
+    if (request.icon) return openIcon(allocator, request);
 
     var decoded = load(allocator, request.sample.file_path) catch |err| return decline(err);
     defer decoded.deinit(allocator);
@@ -93,6 +105,24 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
     };
 
     return .{ .audio = session };
+}
+
+/// 图标请求：读头部 + 32 个等距窗口，渲染波形条。错误按四态映射，`none.*` 仍是
+/// 谢绝（Shell 可以继续兜底静态图）。
+fn openIcon(allocator: std.mem.Allocator, request: preview.Request) preview.Error!preview.Outcome {
+    const bitmap = coarse.wavIcon(allocator, request.sample.file_path, request.max_px) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileNotFound => return .{ .none = .file_missing },
+        error.InvalidPath => return .{ .none = .unsupported },
+        error.Empty, error.Truncated, error.IoFailure, error.AccessDenied, error.FileTooLarge, error.NotRiff, error.NotWave, error.MissingFmt, error.MissingData, error.DataBeforeFmt, error.UnsupportedFormat, error.BadFmt => {
+            std.debug.print(
+                "otto-lite: WAV 图标粗采样失败 {s}（{s}）\n",
+                .{ request.sample.file_path, @errorName(err) },
+            );
+            return .{ .none = .failed };
+        },
+    };
+    return .{ .image = bitmap };
 }
 
 /// 读取/解码错误 → 谢绝原因。只有 OOM 是 `preview.Error`。
@@ -171,5 +201,32 @@ test "open 一个不存在的 wav：none.file_missing，不碰音频设备" {
     switch (outcome) {
         .none => |reason| try testing.expectEqual(preview.Reason.file_missing, reason),
         else => return error.ExpectedNone,
+    }
+}
+
+test "图标请求：真 WAV → image（粗采样波形），不解整段、不建 Player" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const path = "C:\\src\\otto-testkit\\samples\\tone_440.wav";
+    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.SkipZigTest;
+    const sample = core.model.Sample{
+        .id = "tone",
+        .file_name = "tone_440",
+        .file_ext = ".wav",
+        .file_path = path,
+    };
+    const outcome = try open(testing.allocator, .{
+        .sample = &sample,
+        .max_px = 64,
+        .icon = true,
+    });
+    defer outcome.deinit(testing.allocator);
+    switch (outcome) {
+        .image => |bitmap| {
+            try testing.expectEqual(@as(u32, 64), bitmap.width);
+            try testing.expectEqual(@as(u32, 64), bitmap.height);
+            try testing.expectEqual(@as(usize, 64 * 4), bitmap.stride);
+        },
+        else => return error.ExpectedImage,
     }
 }

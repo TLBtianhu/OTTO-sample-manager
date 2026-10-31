@@ -316,7 +316,7 @@ fn printSamples(label: []const u8, values: []const f64) void {
 
 fn printThumbReport(report: bench_thumbs.Report) void {
     std.debug.print(
-        "bench: 缩略图冷 {d} 张 p50={d:.2} p95={d:.2} max={d:.2} ms（首张含 helper 启动 {d:.2} ms，失败 {d}）\n",
+        "bench: 缩略图冷 {d} 张 p50={d:.2} p95={d:.2} max={d:.2} ms（首张含 provider 初始化/helper 启动 {d:.2} ms，失败 {d}）\n",
         .{ report.cold.n, report.cold.p50, report.cold.p95, report.cold.max, report.cold_first_ms, report.cold_failures },
     );
     std.debug.print(
@@ -439,7 +439,7 @@ fn printTable(input: TableInput) u8 {
             thumb_text = text(&buf, "冷 p95 {d:.2} / 热 p95 {d:.2} ms", .{ report.cold.p95, report.hot.p95 });
             thumb_note_text = text(
                 &thumb_note,
-                "冷 100 新路径（首张 {d:.2} ms 含 helper 启动）/ 热 100 同路径；L3 未启",
+                "冷 100 新路径（首张 {d:.2} ms 含 provider 初始化）/ 热 100 同路径；L3 未启",
                 .{report.cold_first_ms},
             );
         } else {
