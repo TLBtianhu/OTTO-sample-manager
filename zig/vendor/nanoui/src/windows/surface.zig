@@ -21,6 +21,7 @@ const Context = ctx_mod.Context;
 const Window = @import("window.zig").Window;
 const d3d = @import("d3d.zig");
 const ime = @import("ime.zig");
+const frame_log_mod = @import("../ui/frame_log.zig");
 
 /// Posted for a frame requested from outside the view.
 pub const WM_FRAME = w.WM_APP + 1;
@@ -53,6 +54,14 @@ pub const Surface = struct {
     /// Frames go to the screen through this, once made; GDI if it can't be.
     presenter: ?d3d.Presenter = null,
     no_d3d: bool = false,
+    /// Per-frame times, when a caller asks with `recordFrames`: one null
+    /// check a frame and nothing else until then.
+    frame_log: ?frame_log_mod.FrameLog = null,
+    /// The frame record the next `WM_PAINT` belongs to.
+    log_index: usize = 0,
+    log_pending: bool = false,
+    /// When the last frame's painting ended: what the next frame waited for.
+    log_last_end: f64 = 0,
 
     pub fn create(window: *Window, view: ui.View, theme_override: ?Theme) !*Surface {
         const gpa = window.app.gpa;
@@ -68,12 +77,21 @@ pub const Surface = struct {
 
     pub fn destroy(self: *Surface) void {
         self.ime.deinit(self.gpa);
+        if (self.frame_log) |*fl| fl.deinit();
         if (self.presenter) |*p| p.deinit();
         self.instances.deinit(self.gpa);
         self.pixels.deinit(self.gpa);
         self.ctx.deinit();
         self.text.deinit();
         self.gpa.destroy(self);
+    }
+
+    /// Starts logging every frame's times (a warm-up can run first: records
+    /// begin at the call). The log is in memory unless `FrameLog.path` is
+    /// set afterwards; one allocation, no file written here.
+    pub fn recordFrames(self: *Surface, gpa: std.mem.Allocator) !*frame_log_mod.FrameLog {
+        if (self.frame_log == null) self.frame_log = try frame_log_mod.FrameLog.init(gpa, null);
+        return &self.frame_log.?;
     }
 
     fn hwnd(self: *Surface) ?w.HWND {
@@ -107,6 +125,34 @@ pub const Surface = struct {
             _ = w.SetTimer(h, later_timer, @intFromFloat(@max(1, s * 1000)), null);
         };
         if (!c.animating) self.last_frame_time = 0;
+        if (self.frame_log) |*fl| {
+            // The frame asked for the window to be painted; `paint` fills in
+            // the canvas and the presentation, and moves `log_last_end`
+            // past them, when it runs.
+            const end = clock.now();
+            const phases_ms = c.stats.build_ms + c.stats.layout_ms + c.stats.paint_ms;
+            const wait_ms = if (self.log_last_end > 0) @max(0, (now - self.log_last_end) * 1000) else 0;
+            self.log_index = fl.append(.{
+                .t = now,
+                .kind = .input,
+                .interval_ms = if (fl.last_t > 0) @max(0, (now - fl.last_t) * 1000) else 0,
+                .duration = if (dt > 0) dt else 1.0 / 60.0,
+                .dt = dt,
+                .build_ms = c.stats.build_ms,
+                .layout_ms = c.stats.layout_ms,
+                .paint_ms = c.stats.paint_ms,
+                .after_frame_ms = @max(0, (end - now) * 1000 - phases_ms),
+                .drawable_wait_ms = wait_ms,
+                .encode_ms = 0,
+                .sync = !self.no_d3d,
+                .nodes = c.stats.nodes,
+                .instances = c.stats.instances,
+                .atlas_reset = false,
+                .animating = c.animating,
+            });
+            self.log_pending = true;
+            self.log_last_end = end;
+        }
     }
 
     pub fn requestFrame(self: *Surface) void {
@@ -121,17 +167,41 @@ pub const Surface = struct {
     }
 
     fn paint(self: *Surface, h: w.HWND) void {
+        const logging = self.frame_log != null;
+        const t_paint = if (logging) clock.now() else 0;
         var ps: w.PAINTSTRUCT = undefined;
         const dc = w.BeginPaint(h, &ps) orelse return;
         defer _ = w.EndPaint(h, &ps);
         self.pixels.draw(self.gpa, self.shown());
+        const t_raster = if (logging) clock.now() else 0;
         const px = &self.pixels;
-        if (px.bytes.len == 0) return;
-        if (self.present(h)) return;
+        if (px.bytes.len == 0) {
+            if (logging) self.logPaint(t_paint, t_raster);
+            return;
+        }
+        if (self.present(h)) {
+            if (logging) self.logPaint(t_paint, t_raster);
+            return;
+        }
         // A negative height: rows from the top, as the renderer writes them.
         // GDI copies only what was invalidated.
         const info: w.BITMAPINFOHEADER = .{ .biWidth = @intCast(px.width), .biHeight = -@as(i32, @intCast(px.height)) };
         _ = w.SetDIBitsToDevice(dc, 0, 0, @intCast(px.width), @intCast(px.height), 0, 0, 0, @intCast(px.height), px.bytes.ptr, &info, 0);
+        if (logging) self.logPaint(t_paint, t_raster);
+    }
+
+    /// One frame's canvas and presentation: the canvas is what
+    /// `pixels.draw` took, the presentation what followed it in this
+    /// `WM_PAINT` (the blit, or the upload and `Present`; for a flip swap
+    /// chain, the wait for the next vertical blank is in it). `BeginPaint`
+    /// and `EndPaint` are outside both, as they were outside the frame.
+    fn logPaint(self: *Surface, t_paint: f64, t_raster: f64) void {
+        const fl = if (self.frame_log) |*log| log else return;
+        if (!self.log_pending) return;
+        const end = clock.now();
+        fl.setPresent(self.log_index, @max(0, (t_raster - t_paint) * 1000), @max(0, (end - t_raster) * 1000));
+        self.log_pending = false;
+        self.log_last_end = end;
     }
 
     /// Presents the frame through the swap chain (made the first time);

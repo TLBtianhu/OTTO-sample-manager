@@ -56,6 +56,16 @@ pub const Options = struct {
     thumb_bench_dir: ?[]const u8 = null,
     /// `--bench <library>`：宪章六项性能基准，打印一张表后退出（不开窗）。
     bench: ?[]const u8 = null,
+    /// `--bench-scroll <library>`：真实窗口（屏外、不抢焦点）的滚动帧率基准；
+    /// 需要可见窗口才能收到 `WM_PAINT`，所以走完整 UI 初始化（见 `bench_scroll.zig`）。
+    bench_scroll: ?[]const u8 = null,
+    /// `--frames N`：`--bench-scroll` 注入并计时的帧数（默认 300，约 5 秒）。
+    frames: u32 = 300,
+    /// `--bench-scroll-edge`：把探针窗口贴到主屏右下角 1 像素处（DWM 会合成它，
+    /// 用来对照「屏外」）；默认在 -4000,0，完全离屏。
+    bench_scroll_edge: bool = false,
+    /// `--scroll-notches=N`：每帧注入几个滚轮格（默认 1；1 格 = 48 点 ≈ 1.1 行）。
+    scroll_notches: u32 = 1,
     /// `--bench-samples <dir>`：缩略图 / 音频基准用的真实素材目录。
     bench_samples: ?[]const u8 = null,
     /// `--bench-first-frame`：只建一次离屏首帧并打印耗时（由 `--bench` 起的
@@ -200,6 +210,30 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.bench_samples = args[index];
         } else if (std.mem.startsWith(u8, arg, "--bench-samples=")) {
             options.bench_samples = arg["--bench-samples=".len..];
+        } else if (std.mem.eql(u8, arg, "--bench-scroll")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.bench_scroll = args[index];
+            // 真实窗口的基准要加载同一个库：它不走 `--bench` 那条自读库的路，
+            // 而是照常启动 UI，所以这里把库路径一并给 `main`。
+            options.library_path = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--bench-scroll=")) {
+            options.bench_scroll = arg["--bench-scroll=".len..];
+            options.library_path = options.bench_scroll;
+        } else if (std.mem.eql(u8, arg, "--bench-scroll-edge")) {
+            options.bench_scroll_edge = true;
+        } else if (std.mem.eql(u8, arg, "--frames")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.frames = try parseCount(args[index]);
+        } else if (std.mem.startsWith(u8, arg, "--frames=")) {
+            options.frames = try parseCount(arg["--frames=".len..]);
+        } else if (std.mem.eql(u8, arg, "--scroll-notches")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.scroll_notches = try parseCount(args[index]);
+        } else if (std.mem.startsWith(u8, arg, "--scroll-notches=")) {
+            options.scroll_notches = try parseCount(arg["--scroll-notches=".len..]);
         } else if (std.mem.eql(u8, arg, "--bench-first-frame")) {
             options.bench_first_frame = true;
         } else if (std.mem.eql(u8, arg, "--mem-probe")) {
@@ -234,6 +268,14 @@ fn kibToBytes(text: []const u8) error{InvalidValue}!u64 {
     return kib *| 1024;
 }
 
+/// `--frames` / `--scroll-notches`：正整数。0 不是"跑得很快"，是一张空表，
+/// 所以按非法值拒绝，不静默。
+fn parseCount(text: []const u8) error{InvalidValue}!u32 {
+    const count = std.fmt.parseInt(u32, text, 10) catch return error.InvalidValue;
+    if (count == 0) return error.InvalidValue;
+    return count;
+}
+
 /// 命令行用法。放在这里（而不是 `main.zig`）是为了让 `main` 保持在 600 行以内：
 /// 这段是纯数据，和解析器贴身放也不会漂移。
 pub fn printUsage() void {
@@ -244,6 +286,7 @@ pub fn printUsage() void {
             "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
             "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
             "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
+            "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge]\n" ++
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
             "      otto-lite --preview <file> | --play-test <file>\n" ++
             "      otto-lite --copy-now <file>\n" ++

@@ -220,7 +220,7 @@ release 相对 debug（2000 条）：
 
 | 想要 | 为什么 `--bench` 测不到 | 现在能给的替代证据 |
 | --- | --- | --- |
-| **滚动 60 fps** | `ui.Tester` 没有 surface / D3D / DWM / vsync；`frame()` 只做 view+layout+display list，不做光栅化与上屏。测一帧循环只能得到 CPU 布局成本，不是 fps | 无。必须真实窗口（见第 7 节） |
+| **滚动 60 fps** | `ui.Tester` 没有 surface / D3D / DWM / vsync；`frame()` 只做 view+layout+display list，不做光栅化与上屏。测一帧循环只能得到 CPU 布局成本，不是 fps | §7：真实窗口（屏外、不抢焦点）GDI/D3D 均 62.50 fps、单帧做工 p95 3.13 / 3.30 ms（300 帧） |
 | **真实首帧（用户看见）** | 同上：`frame_ms` 不含 CPU 光栅化、D3D 上传、present、DWM 合成；`307.69 ms` 是下界 | `first_frame_ms` 的 setup/frame 拆分 |
 | **真·冷启动（重启后第一次）** | 子进程反复起，exe/DLL/字体/库都在 OS 文件缓存里；5 次库加载也是热盘 | 首样可看冷盘影响，但中位数按任务要求不取它 |
 | **真实常驻内存** | `--bench` 进程没有窗口/字体图集/D3D 表面；内存行只覆盖「库 + 100 缩略图」 | 首帧子进程 WS：release 2000 = **70.28 MiB**、12 条 = 61.91 MiB（同一 API）；手工隐藏窗口实例 77–97 MiB（PowerShell `Get-Process`，仅旁证） |
@@ -251,27 +251,145 @@ release 相对 debug（2000 条）：
 > 缩略图，优化后真实窗口是 **42.63 MiB**（不含 L2 39.11），**50 MiB 达标**。
 > 本节其余文字保持原样——它们是当时的真实测量，不改写。
 
-## 7. 滚动帧率为什么 headless 测不了，下一轮怎么测
+## 7. 滚动帧率：真实窗口实测（分支 `feat/scroll-bench`）
 
-**为什么不行**：帧率不是「一帧代码跑多快」，而是
-`min(CPU 构帧, CPU/GPU 光栅化, D3D present, DWM 合成, 显示器刷新)` 的倒数。
-headless 的 `ui.Tester` 只做第一项的一部分（view + layout + display list），
-没有窗口、没有交换链、没有 vsync；在它上面循环 `frame()` 得到的毫秒数既不能
-换算成 fps，也发现不了「GPU 上传慢」「DWM 掉帧」「窗口被遮挡」这些真实原因。
+> 这一节把上一版"下一轮怎么测"的计划换成了实测：`--bench-scroll` 已经实现。
+> 数字是 **release（ReleaseSafe）**、本机、2000 行 / 100 张真实图片的库。
+> 结论先说：**60 fps 达标，GDI 与 D3D 都达标；默认 GDI 上屏不用改。**
 
-**下一轮的脚本（不在本块交付）**：
+### 7.1 为什么 headless 还是测不了
 
-1. 新增 `--bench-scroll <library>`：开一个 380×700 的真实 nanoui 窗口，
-   `visible=true` 但用 `SetWindowPos(SWP_NOACTIVATE)` + 屏幕外位置，避免抢焦点；
-2. 用 `nanoui.App.after` 或脚本注入滚轮事件，让列表在 2000 行上连续滚动
-   （例如每帧 delta 40 点，跑 300–600 帧），并分别在「缩略图未加载 / 已加载」
-   两种状态下跑；
-3. 在 present 路径上记 QPC：nanoui 已有 `ui.frame_log` 与 `ctx.frame_stats`，
-   优先用它们；不够就在 `windows/surface.zig` 加一个只读回调（保持补丁通用）；
-4. 报表：帧间隔 p50/p95、有效 fps、`CPU 构帧` 与 `present` 分列；目标按 60 Hz
-   的 16.7 ms 预算判 PASS/FAIL（有 vsync 时要同时报"被 60 封顶"与"真的超时"）；
-5. 同时把内存测量搬进这个真实窗口进程，用同一个 `K32GetProcessMemoryInfo`
-   读 UI + 字体 + D3D + 缩略图 L2 的总账。
+帧率不是「一帧代码跑多快」，而是
+`min(CPU 构帧, 光栅化, 上屏, DWM 合成, 显示器刷新)` 的倒数。`ui.Tester` 只做
+view + layout + display list，没有窗口、没有交换链、没有 `WM_PAINT`/vsync；在它
+上面循环 `frame()` 只能得到 CPU 布局成本。本轮不再用它量 fps。
+
+### 7.2 怎么跑
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\scroll.ps1 -Release
+# 等价于各跑一次：
+zig\app\zig-out\bin\otto-lite.exe --bench-scroll <library.json> --frames 300
+zig\app\zig-out\bin\otto-lite.exe --bench-scroll <library.json> --frames 300 --d3d
+```
+
+`scroll.ps1` 建一份「2000 行循环指向 100 个真实图片副本」的库（和 `mem.ps1`
+同一个思路），所以滚过去每屏都有缩略图。窗口与注入的约定：
+
+* **窗口**：真实 `HWND`，客户区 380×700（本机 96 DPI → 380×700 像素），位置
+  **-4000,0（完全屏外）**；`WS_EX_NOACTIVATE`（实测 `ex_style=0x8000100`）+
+  `SW_SHOWNOACTIVATE`。窗口是"可见"的（`IsWindowVisible=1`、`cloaked=0`），所以
+  `WM_PAINT` 真的会来；但它从来不是前台窗口，也不进任务栏。前后
+  `GetForegroundWindow` 相同、外部每 100 ms 采样 62 次也只有一个前台窗口
+  （浏览器），`stolen=false`。
+* **注入**：每 **16.0 ms**（62.5 Hz，比 60 Hz 高 4%，理由见 7.5）向窗口
+  `PostMessage(WM_MOUSEWHEEL)`（1 格 = 48 点 ≈ 1.09 行），同一拍把消息泵空并用
+  `UpdateWindow` 强制把这一帧画完，再等下一拍。`--frames 300` = 300 次注入。
+* **预热**：先滚 100 拍（≈109 行，覆盖 100 个不同图片文件），等取图线程
+  `pending=0`（最多 5 秒），再画 2 帧收尾；计时窗口里没有"新图第一次进图集"。
+* **计时**：nanoui 本轮新增的通用帧日志（`Surface.recordFrames` + `ui.frame_log`，
+  默认关闭）：每帧 QPC 时间戳 + `build/layout/paint/raster/present/wait/after`。
+  只统计**滚轮消息引起的那一帧**；nanoui 自己的 16 ms 动画定时器若插帧，记在
+  `extra_frames` 里，不算进滚轮帧间隔。
+* **上屏**：默认 GDI（`SetDIBitsToDevice`）；`--d3d` 切回 D3D11 flip-sequential
+  `Present(1,0)`。两条路都在同一个 `paint` 里。
+
+### 7.3 结果（release，2000 行 / 100 张真图，300 帧）
+
+| 指标 | GDI（默认） | D3D11（`--d3d`） |
+| --- | ---: | ---: |
+| 有效 fps（滚轮帧） | **62.50** | **62.50** |
+| 帧间隔 p50 / p95 / max（ms） | 16.00 / 16.37 / 17.00 | 16.01 / 16.44 / 16.93 |
+| 丢帧 `interval > 16.7 ms` | 5/299（1.7%） | 2/299（0.7%） |
+| 真掉一拍 `> 25 ms` | **0** | **0** |
+| 超预算帧 `work > 16.67 ms` | **0/300** | **0/300** |
+| 单帧做工 p50 / p95 / max（ms） | 2.25 / **3.11** / 3.91 | 2.31 / **3.19** / 3.78 |
+| 分解 p50：build / layout / paint | 0.06 / 0.03 / 0.06 | 0.06 / 0.03 / 0.05 |
+| 分解 p50：raster / present | 2.00 / 0.03 | 1.96 / 0.14 |
+| 分解 p50：wait（阻塞） / after | 13.68 / 0.04 | 13.61 / 0.04 |
+| 注入间隔 p50 / p95 / max（ms） | 16.01 / 16.35 / 16.79 | 16.00 / 16.44 / 16.59 |
+| post→frame 延迟 p50 / p95（ms） | 0.02 / 0.24 | 0.03 / 0.32 |
+| WorkingSet | **41.81 MiB** | **71.12 MiB** |
+| private | 30.58 MiB | 82.15 MiB |
+| 缩略图 | 100 张 / 3.52 MiB | 同左 |
+| 结论 | **PASS** | **PASS** |
+
+原始输出（`scroll.ps1 -Release` 的汇总）：
+
+```text
+  gdi  fps= 62.50  p95=16.37 ms  max= 17.00 ms  drops=5/299   1.7%  work_p95= 3.11 ms  ws= 41.81 MiB  PASS
+  d3d  fps= 62.50  p95=16.44 ms  max= 16.93 ms  drops=2/299   0.7%  work_p95= 3.19 ms  ws= 71.12 MiB  PASS
+```
+
+同一天复跑多次：fps 恒 62.50；work p95 2.92–3.19 ms；WS GDI 41.81–42.02 /
+D3D 70.98–71.12 MiB。
+
+### 7.4 结论：60 fps 达标；默认 GDI 上屏不用重新评估
+
+1. **帧产量**：两种上屏都稳定在 62.50 fps（注入 62.5 Hz），比 60 的目标高 4%；
+   300 拍里没有一次"掉一拍"（`>25 ms = 0`）。
+2. **预算**：单帧全部做工 p95 是 **3.11 ms（GDI）/ 3.19 ms（D3D）**，占 60 Hz
+   16.67 ms 预算的 **19% / 19%**，余量约 5 倍；`work > 16.67 ms` 的帧 **0/300**。
+3. **分解**：几乎全部是 CPU 光栅化（raster 2.00 / 1.96 ms p50；build+layout+paint
+   合计约 0.15 ms）；`present` GDI 0.03 ms、D3D 0.14 ms；`wait` ≈13.7 ms 是在等
+   下一拍。
+4. **GDI vs D3D**：fps / 帧间隔 / 做工三项相同（差异在噪声内）；D3D 的 present
+   贵 0.11 ms，代价却是 **+29.3 MiB WorkingSet**（71.12 vs 41.81）。所以在
+   "60 fps"这一项上 D3D 没有收益，**默认保持 GDI**；要 vsync/GPU 合成时才用
+   `--d3d`（那时内存按 71 MiB 算，不是 50 MiB）。
+5. **交叉核对**：GDI 41.81 MiB、D3D 71.12 MiB 与 `MEMORY.md` 的 42.63 / 72.63
+   （同口径：真实窗口 + 100 缩略图）在 1 MiB 内一致。
+
+### 7.5 测量边界（这些数字不是"用户屏幕上的 fps"）
+
+1. **窗口在屏外**：`monitor_attached=false`，DWM 有 redirection surface 但没有
+   显示器输出可合成；DWM 的遮挡/降频路径不一定走到。贴主屏右下角 1 像素的对照
+   （`--bench-scroll-edge`，`monitor_attached=true`）数字一样：GDI 62.50 fps /
+   p95 16.31 / 丢帧 1/299 / WS 42.02，D3D 62.50 / p95 16.38 / 2/299 / WS 72.23。
+   所以"离屏"没有让窗口不画，但它确实不是前台窗口。
+2. **D3D 的 present 没有等垂直同步**：本轮窗口（屏外或 1 像素）的 `Present(1,0)`
+   p50 只有 0.14 ms，而 `DwmFlush` 的合成节拍是 4.0–4.2 ms（≈240 Hz）。真实前台
+   窗口的 D3D present 还要加最多一个刷新周期；`MEMORY.md` 在隐藏窗口上单独量到
+   4.17 ms。按 4.17 + 3.2 ≈ 7.4 ms 算仍在 16.67 预算内，但**本轮没有直接量到
+   前台窗口的 D3D present**。
+3. **注入是软件节拍器**：16.0 ms 的注入本身 p95 是 16.25–16.44 ms（±0.4 ms 唤醒
+   抖动）。`interval > 16.7` 的 0.3–1.7%（1–5 帧）全部落在这段抖动里，不是
+   帧没做完；真正的判据是 `>25 ms = 0`、`work > 16.67 = 0`、p95 16.4 ms。
+   把注入按 16.667 ms 摆会得到"10% 丢帧"的假象（第一版就是这样），所以过驱动 4%。
+   节拍器最后 3 ms 在同一个线程上自旋（约一个核的 19%，只跑 5 秒）：它不改帧的
+   做工，但会占一点 CPU / 功耗，跨机器比较时要知道这一点。
+4. **动画定时器**：计时窗口里 nanoui 的 16 ms 动画定时器只插了 1–2 帧
+   （`extra_frames`），因为节拍器在等待时不泵消息。真实用户滚动时 hover 动画可能
+   插更多帧（Debug 下测到过约 2 帧/拍、总帧率约 100 fps）；那些是额外帧，会让总
+   帧产量更高，但滚轮帧的间隔不受影响。
+5. **机器负载**：以上是安静窗口的取数（构建结束后没有并行任务）。同一份代码几次
+   复跑，work p95 在 2.92–3.19 ms 之间、fps 恒 62.50；负载更高时会到 3.3 ms。
+   首帧/字体扫描的抖动比滚动稳态大一个数量级。
+6. **没测**：DWM 真正把像素送上显示器的 photon 时间；遮挡 / 最小化 / 多显示器
+   DPI；拖动滚动条（只测滚轮）；触摸板精确滚动与惯性；滚动过程中缩略图首次加载
+   （预热后计时）；长时间热降频。
+
+### 7.6 钩子与代码（都保持通用、默认关闭）
+
+* `vendor/nanoui/src/ui/frame_log.zig`：`Record` 增加 `raster_ms` / `present_ms`
+  与 `setPresent` / `workMs`，JSONL 多两个字段；macOS 路径不动（默认 0）。
+* `vendor/nanoui/src/windows/surface.zig`：`Surface.recordFrames(gpa)` 打开内存
+  日志（不传路径就不写文件）；`frame()` 记 QPC 与 build/layout/paint/wait/after，
+  `WM_PAINT` 的 `paint()` 记 raster 与 present。默认路径只多一次 `null` 判断。
+* `vendor/nanoui/src/windows/window.zig` + `window_types.zig`：新增
+  `no_activate` 选项与 `showNoActivate()`（`WS_EX_NOACTIVATE` /
+  `SW_SHOWNOACTIVATE`），通用能力（不抢焦点、不进任务栏的探针/浮层）。
+* `app/src/bench_scroll.zig` + `bench_scroll_stats.zig` + `options.zig`：命令行、
+  注入节拍器（高分辨率可等待计时器 + 最后 3 ms 自旋）、消息泵、帧日志取数、报表。
+* `zig/scroll.ps1`：一条命令建库 + 跑 GDI/D3D 两份并汇总。
+
+### 7.7 本轮没做
+
+* 前台可见窗口的 D3D present/合成实测（会打断用户，见边界 2）；
+* 滚动中缩略图首次加载的帧时间（本轮预热后计时）；
+* 遮挡 / 最小化 / 多显示器 DPI / 拖动滚动条 / 精确滚动与惯性；
+* 与 `--mem-probe` 合流成一个进程（内存仍是两个探针各测各的）；
+* 分钟级热降频与 120/240 Hz 高刷下的上限（本轮只按 60 Hz 判）。
 
 ## 8. 验收快照
 

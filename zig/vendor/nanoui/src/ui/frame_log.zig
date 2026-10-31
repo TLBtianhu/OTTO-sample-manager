@@ -1,6 +1,14 @@
 //! Per-frame timing and presentation log (`Surface.frame_log`).
 //! Off by default (a single null check); enabled by `NANOUI_FRAMES=<path>`
 //! or `Surface.recordFrames(gpa)`.
+//!
+//! Each record is one frame, stamped with the monotonic clock (`ui.clock`,
+//! QueryPerformanceCounter on Windows): when it ran, how long it had waited,
+//! and what each phase cost. Platforms fill the phases they have: macOS adds
+//! `encode_ms`/`gpu_ms`/`drawable_wait_ms` from Metal; Windows adds
+//! `raster_ms` (the CPU canvas) and `present_ms` (the blit, or upload +
+//! Present) through `setPresent`. A phase a platform does not run stays 0,
+//! so the records of both are the same type and the same summary.
 const std = @import("std");
 
 pub const Kind = enum {
@@ -18,6 +26,10 @@ pub const Record = struct {
     build_ms: f64,
     layout_ms: f64,
     paint_ms: f64,
+    /// The CPU canvas rasterized from the paint's instances (Windows).
+    raster_ms: f64 = 0,
+    /// The frame handed to the screen: the blit, or the upload and Present.
+    present_ms: f64 = 0,
     after_frame_ms: f64,
     drawable_wait_ms: f64,
     encode_ms: f64,
@@ -30,7 +42,14 @@ pub const Record = struct {
     queued: u8 = 0,
 
     pub fn cpuMs(r: Record) f64 {
-        return r.build_ms + r.layout_ms + r.paint_ms + r.after_frame_ms + r.encode_ms;
+        return r.build_ms + r.layout_ms + r.paint_ms + r.raster_ms + r.present_ms + r.after_frame_ms + r.encode_ms;
+    }
+
+    /// One frame's whole cost on the thread that makes it: the view, its
+    /// layout, the display list, the canvas, the presentation and what
+    /// followed it. Not the wait before it.
+    pub fn workMs(r: Record) f64 {
+        return r.build_ms + r.layout_ms + r.paint_ms + r.raster_ms + r.present_ms + r.after_frame_ms;
     }
 };
 
@@ -140,6 +159,17 @@ pub const FrameLog = struct {
             self.records.items[idx].queued = queued;
         }
     }
+
+    /// The frame's canvas and presentation, timed on the thread that ran
+    /// them (Windows paints in `WM_PAINT`, after the frame that asked for it).
+    pub fn setPresent(self: *FrameLog, idx: usize, raster_ms: f64, present_ms: f64) void {
+        self.acquire();
+        defer self.release();
+        if (idx < self.records.items.len) {
+            self.records.items[idx].raster_ms = raster_ms;
+            self.records.items[idx].present_ms = present_ms;
+        }
+    }
     pub fn mark(self: *FrameLog) usize {
         self.acquire();
         defer self.release();
@@ -165,13 +195,13 @@ pub const FrameLog = struct {
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &self.jsonl);
         for (self.records.items[self.flushed..]) |r| {
             aw.writer.print(
-                "{{\"t\":{d:.6},\"kind\":\"{s}\",\"interval_ms\":{d:.3},\"duration\":{d:.6},\"dt\":{d:.6},\"build_ms\":{d:.3},\"layout_ms\":{d:.3},\"paint_ms\":{d:.3},\"after_frame_ms\":{d:.3},\"drawable_wait_ms\":{d:.3},\"encode_ms\":{d:.3},\"sync\":{},\"gpu_ms\":{d:.3},\"nodes\":{d},\"instances\":{d},\"atlas_reset\":{},\"queued\":{d}}}\n",
+                "{{\"t\":{d:.6},\"kind\":\"{s}\",\"interval_ms\":{d:.3},\"duration\":{d:.6},\"dt\":{d:.6},\"build_ms\":{d:.3},\"layout_ms\":{d:.3},\"paint_ms\":{d:.3},\"raster_ms\":{d:.3},\"present_ms\":{d:.3},\"after_frame_ms\":{d:.3},\"drawable_wait_ms\":{d:.3},\"encode_ms\":{d:.3},\"sync\":{},\"gpu_ms\":{d:.3},\"nodes\":{d},\"instances\":{d},\"atlas_reset\":{},\"queued\":{d}}}\n",
                 .{
                     r.t,              @tagName(r.kind), r.interval_ms,    r.duration,
                     r.dt,             r.build_ms,       r.layout_ms,      r.paint_ms,
-                    r.after_frame_ms, r.drawable_wait_ms, r.encode_ms,    r.sync,
-                    r.gpu_ms,         r.nodes,          r.instances,      r.atlas_reset,
-                    r.queued,
+                    r.raster_ms,      r.present_ms,     r.after_frame_ms, r.drawable_wait_ms,
+                    r.encode_ms,      r.sync,           r.gpu_ms,         r.nodes,
+                    r.instances,      r.atlas_reset,    r.queued,
                 },
             ) catch break;
         }
@@ -328,4 +358,36 @@ test "FrameLog summary computes percentiles and missed vsyncs" {
     try std.testing.expectEqual(@as(usize, 1), s.missed_vsyncs);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), s.sync_share, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f64, 1.1), s.cpu.steady_max, 1e-6);
+}
+
+test "the canvas and the presentation fill in after the frame, and add up to work" {
+    var log = try FrameLog.init(std.testing.allocator, null);
+    defer log.deinit();
+    const idx = log.append(.{
+        .t = 2.0,
+        .kind = .input,
+        .interval_ms = 16.7,
+        .duration = 1.0 / 60.0,
+        .dt = 1.0 / 60.0,
+        .build_ms = 0.5,
+        .layout_ms = 0.4,
+        .paint_ms = 0.3,
+        .after_frame_ms = 0.1,
+        .drawable_wait_ms = 14.2,
+        .encode_ms = 0,
+        .sync = true,
+        .nodes = 20,
+        .instances = 14,
+        .atlas_reset = false,
+    });
+    // Before the paint the record says nothing about it.
+    try std.testing.expectApproxEqAbs(@as(f64, 1.3), log.spanFrom(0)[0].workMs(), 1e-9);
+    log.setPresent(idx, 0.7, 0.2);
+    const rec = log.spanFrom(0)[0];
+    try std.testing.expectApproxEqAbs(@as(f64, 0.7), rec.raster_ms, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.2), rec.present_ms, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.2), rec.workMs(), 1e-9);
+    // A stale index (a log that started over) writes nothing and cannot panic.
+    log.setPresent(idx + 100, 9, 9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.7), log.spanFrom(0)[0].raster_ms, 1e-9);
 }
