@@ -8,13 +8,17 @@
 #   1. zig build (debug, then release; -Release runs release only)
 #   2. core / ports / app `zig build test`
 #   3. verify-distribution.ps1 against the real %APPDATA% (it snapshots/restores)
-#   4. bench.ps1 (-Big, six rows), scroll.ps1, mem.ps1
-#   5. opacity.ps1
-#   6. --demo / --demo-rescan / --demo-thumbs / --demo-transport
-#   7. verify-minisign.js on the newest portable.zip + setup.exe in zig\dist
+#   4. provider-matrix.ps1: `--preview` on six samples, default and
+#      `--no-shell-preview`, asserting which provider answers (the 0.9.0
+#      "each format is self-sufficient" claim; also runs under -Quick)
+#   5. bench.ps1 (-Big, six rows), scroll.ps1, mem.ps1
+#   6. opacity.ps1
+#   7. --demo / --demo-rescan / --demo-thumbs / --demo-transport
+#   8. verify-minisign.js on the newest portable.zip + setup.exe in zig\dist
 #
 # -Quick keeps the pre-commit subset: builds + tests + distribution audit +
-# signatures (bench / scroll / mem / opacity / self-checks are skipped).
+# provider matrix + signatures (bench / scroll / mem / opacity / self-checks are
+# skipped).
 # -Release skips the debug build; release is what ships.
 #
 # A sub-script failure is recorded and the run continues; the exit code is
@@ -385,7 +389,57 @@ function Invoke-Audit {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Performance
+# 4. Provider matrix (the 0.9.0 self-sufficient-provider claim)
+# ---------------------------------------------------------------------------
+
+# Six samples, two rounds each: the default registry and the one without
+# shell-thumbnail. The row fails if any `--preview` names a provider other than
+# the expected one, exits non-zero, or (no-shell round) does not print
+# `shell-preview=disabled`. This is the only check that notices "MP3 preview
+# quietly regressed to a Shell static image": the app tests prove each provider
+# in isolation with fixtures, but never run a real file through the real
+# registry in a real process.
+function Invoke-ProviderMatrix {
+  $item = 'provider 矩阵'
+  Write-Step $item
+  if (-not $script:releaseBuildOk) {
+    # A failed release build leaves whatever exe an older run produced; a green
+    # matrix over a stale binary would prove nothing.
+    Add-Row $item 'SKIP' '—' 'release 构建失败'
+    return
+  }
+
+  $matrixArgs = @('-Exe', $script:exe, '-Samples', $Samples)
+  $result = Invoke-Child (Join-Path $script:root 'provider-matrix.ps1') $matrixArgs
+  $text = $result.Text
+
+  $summary = [regex]::Match($text, 'provider-matrix: assets=(\d+) pass=(\d+) fail=(\d+) rounds=(\d+) runs=(\d+) open_ms_max=([0-9.]+)')
+  if (-not $summary.Success) {
+    Add-Row $item 'FAIL' '—' ('matrix exit {0}；没有汇总行；{1:N1} s' -f $result.Code, $result.Seconds)
+    Write-FailureTail $result.Lines 40
+    return
+  }
+
+  $assets = [int]$summary.Groups[1].Value
+  $passed = [int]$summary.Groups[2].Value
+  $failed = [int]$summary.Groups[3].Value
+  $rounds = [int]$summary.Groups[4].Value
+  $runs = [int]$summary.Groups[5].Value
+  $slowest = $summary.Groups[6].Value
+
+  $stat = '{0}/{1} 两轮' -f $passed, $assets
+  $ok = ($result.Code -eq 0 -and $failed -eq 0 -and $assets -gt 0 -and
+    $passed -eq $assets -and $rounds -eq 2 -and $runs -eq $assets * 2)
+  if ($ok) {
+    Add-Row $item 'PASS' $stat ('{0} 次 --preview；最慢 {1} ms；{2:N1} s' -f $runs, $slowest, $result.Seconds)
+  } else {
+    Add-Row $item 'FAIL' $stat ('fail {0}；exit {1}；{2:N1} s' -f $failed, $result.Code, $result.Seconds)
+    Write-FailureTail $result.Lines 40
+  }
+}
+
+# ---------------------------------------------------------------------------
+# 5. Performance
 # ---------------------------------------------------------------------------
 
 function Invoke-Bench {
@@ -522,7 +576,7 @@ function Invoke-Mem {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Opacity
+# 6. Opacity
 # ---------------------------------------------------------------------------
 
 function Invoke-Opacity {
@@ -561,7 +615,7 @@ function Invoke-Opacity {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Demo self-checks
+# 7. Demo self-checks
 # ---------------------------------------------------------------------------
 
 function Invoke-SelfChecks {
@@ -609,7 +663,7 @@ function Invoke-SelfChecks {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Signatures (newest zig\dist artifacts)
+# 8. Signatures (newest zig\dist artifacts)
 # ---------------------------------------------------------------------------
 
 function Invoke-Signing {
@@ -724,6 +778,7 @@ Invoke-TestSuite 'ports'
 Invoke-TestSuite 'app'
 
 Invoke-Audit
+Invoke-ProviderMatrix
 
 if (-not $Quick) {
   Invoke-Bench
