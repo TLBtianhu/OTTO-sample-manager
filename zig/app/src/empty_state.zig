@@ -5,8 +5,9 @@
 //! 空的判定也只有一条——库里有几条样本（`sample_count == 0`），与搜索过滤的
 //! "0 命中"不是一回事：过滤掉了所有行时列表照旧是列表，不显示这个空状态。
 //!
-//! 文案里的「把文件夹拖进来」是产品口径：拖入导入还没接线（见交付说明），
-//! 写在这里是为了下一轮接 `IDropTarget` 时不用再改文案。
+//! 文案里的「把文件夹拖进来」是真的：`drop_ui.zig` 把 nanoui 的
+//! `WM_DROPFILES` 接到同一条 `import_ui.Import.start` 上；拖入文件只会打一行
+//! 「只接受文件夹」，列表不变。
 
 const nanoui = @import("nanoui");
 const import_ui = @import("import_ui.zig");

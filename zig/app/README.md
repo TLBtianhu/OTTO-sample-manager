@@ -71,6 +71,14 @@ saved as the sibling `<stem>.otto` and the header flashes 「已转为 OTTOLIB�
 `error.Cancelled` before COM is touched, so `--nanoui-script` can click the
 button without a real dialog (the real dialog itself needs a human).
 
+Folders can also be dropped on the window (nanoui's `WM_DROPFILES` event,
+`drop_ui.zig`): a dropped folder enters `Import.start` — the same worker
+thread, state machine and reload as the button. Dropped files are ignored with
+one `只接受文件夹` log line; when several folders are dropped, the first is
+imported and the rest are logged. `--drop-probe=<path>` posts a synthetic
+`DROPFILES` (`fWide`) message to a hidden window and exits when the import is
+done, so the whole chain is testable without a mouse.
+
 The pipeline is scan (L0) → probe (L1, header only) → dedupe → merge → atomic
 write; it never creates a window or touches nanoui:
 

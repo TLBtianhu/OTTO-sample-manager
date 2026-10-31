@@ -48,6 +48,15 @@ pub fn ShouldClose(comptime Window: type) type {
     };
 }
 
+/// Files and folders dropped on a window, in the order the system listed
+/// them. `paths` are UTF-8 and owned by the caller of the event: they are
+/// valid only during `onPaths` (copy what is kept). Windows only for now;
+/// nothing fires where a platform has no drop event.
+pub const DropHandler = struct {
+    context: *anyopaque,
+    onPaths: *const fn (context: *anyopaque, paths: []const []const u8) void,
+};
+
 /// A window, or a panel (`NSPanel`: a floating palette, a popover's window).
 pub const Kind = enum { window, panel };
 
