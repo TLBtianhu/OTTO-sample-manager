@@ -43,6 +43,8 @@ pub const Action = struct {
     check_clicked: bool = false,
     /// 更新状态那一行被点了（这一版只打印 URL）。
     status_clicked: bool = false,
+    /// 右上角「设置」被点了。
+    settings_clicked: bool = false,
 };
 
 pub fn draw(c: *ui.Context, info: Info) Action {
@@ -71,12 +73,18 @@ pub fn draw(c: *ui.Context, info: Info) Action {
     }
     if (info.dirty) ui.text(c, "· 有事件丢失，视图可能不完整", .{ .size = 11 });
     // 「不显眼」：没有底色、没有边框，只是一段小字 + hover 才出现的浅底。
+    // 380 点宽时计数文字占掉左边，两个小按钮共约 70 点，不会挤到搜索框
+    // （搜索框在上一行，宽度本来就不受表头影响）。
     ui.spacer(c);
     const check_button = smallPressable(c);
     ui.text(c, "检查更新", .{ .size = 10, .color = c.theme.muted });
     ui.end(c);
+    const settings_button = smallPressable(c);
+    ui.text(c, "设置", .{ .size = 10, .color = c.theme.muted });
+    ui.end(c);
     row.end();
     if (check_button.clicked) action.check_clicked = true;
+    if (settings_button.clicked) action.settings_clicked = true;
 
     // 第二行：更新结果。只有检查过（或被点击）才出现，默认什么都不显示。
     // 文案走 `ui.textf`（c.print 复制进帧 arena）：`update_status` 指向调用方的

@@ -105,6 +105,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(folder_picker_library);
 
+    // 窗口置顶口岸：手写 SetWindowPos / GetWindowLongPtrW（user32）。
+    // 只碰已存在的 HWND，不认识 nanoui 的 Window；app 用来实现设置里的置顶开关。
+    const win_window_module = b.addModule("otto_win_window", .{
+        .root_source_file = b.path("src/win_window.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    win_window_module.linkSystemLibrary("user32", .{});
+    const win_window_library = b.addLibrary(.{
+        .linkage = .static,
+        .name = "otto_win_window",
+        .root_module = win_window_module,
+    });
+    b.installArtifact(win_window_library);
+
     // 拖出口岸：公共 API（drag.zig）+ OLE / Shell 后端（drag_win.zig）。
     // user32 是隐藏源窗口与鼠标捕获的落点；ole32 / shell32 是拖放、PIDL 与
     // 剪贴板的落点。同样挂在模块上，消费方链接 otto_drag 自动带上。
@@ -347,4 +362,16 @@ pub fn build(b: *std.Build) void {
     const run_feed_tests = b.addRunArtifact(b.addTest(.{ .root_module = feed_test_module }));
     run_feed_tests.step.dependOn(&run_thumb_host_tests.step);
     test_step.dependOn(&run_feed_tests.step);
+
+    // 窗口置顶口岸：真建一个从不显示的 STATIC 窗口，断言 WS_EX_TOPMOST 位。
+    // 不需要 COM / Shell，串在最后只为 `--summary all` 的输出能直接贴。
+    const win_window_test_module = b.createModule(.{
+        .root_source_file = b.path("src/win_window_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    win_window_test_module.linkSystemLibrary("user32", .{});
+    const run_win_window_tests = b.addRunArtifact(b.addTest(.{ .root_module = win_window_test_module }));
+    run_win_window_tests.step.dependOn(&run_feed_tests.step);
+    test_step.dependOn(&run_win_window_tests.step);
 }

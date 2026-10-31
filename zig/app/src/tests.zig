@@ -39,6 +39,8 @@ test {
     _ = @import("import_target.zig");
     _ = @import("import_ui.zig");
     _ = @import("mode.zig");
+    // 设置文件的 JSON 编解码 / 原子写 / 路径（真临时目录；坏文件必须回默认值）。
+    _ = @import("settings_store.zig");
     _ = @import("version.zig");
     // 预览契约与注册表顺序；`providers/root.zig` 里的 comptime 检查也会在这里跑。
     _ = @import("preview.zig");
