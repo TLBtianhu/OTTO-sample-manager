@@ -32,6 +32,7 @@ const live_mod = @import("live.zig");
 const mem_probe = @import("mem_probe.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
+const opacity_probe = @import("opacity_probe.zig");
 const preview_panel = @import("preview_panel.zig");
 const preview_providers = @import("providers/root.zig");
 const row_thumb = @import("row_thumb.zig");
@@ -478,10 +479,7 @@ pub fn main(init: std.process.Init) !void {
     trace.begin(init);
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    const options = options_mod.parse(args) catch {
-        options_mod.printUsage();
-        return error.InvalidArguments;
-    };
+    const options = options_mod.parse(args) catch |err| return opacity_probe.parseError(err);
     // 所有不开窗的模式（--version / 自检 / 转换 / 查库）都在这里返回；
     // null 才继续走 UI。顺序与实现见 `commands.zig`。
     if (try commands.run(init, allocator, options)) |code| {
@@ -535,7 +533,7 @@ pub fn main(init: std.process.Init) !void {
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });
     trace.mark("setup.app");
     // 验收探针：快照默认不开真实窗口，但置顶断言需要真 HWND；仍然 hidden。
-    if (options.settings_probe or options.drop_probe != null) {
+    if (options.settings_probe or options.drop_probe != null or options.set_opacity != null) {
         app.gui = true;
         app.flags.hidden = true;
     }
@@ -575,7 +573,7 @@ pub fn main(init: std.process.Init) !void {
         .width = 380,
         .height = 700,
         // 设置验收的脚本要真 HWND，但仍然绝不激活。
-        .no_activate = options.settings_probe or options.drop_probe != null,
+        .no_activate = options.settings_probe or options.drop_probe != null or options.set_opacity != null,
         .content = .{ .view = .init(&state, State.view) },
     });
     // 文件拖入：目录走「导入文件夹」同一条 `Import.start`；`--drop-probe` 时
@@ -585,7 +583,8 @@ pub fn main(init: std.process.Init) !void {
     trace.mark("setup.window");
     probe.mark("window", .{ .window = state.window, .thumbs = thumbs });
     // 窗口状态启动时应用一次：置顶（true 才碰 Win32）+ 不透明度（重启后恢复）。
-    state.settings.applyWindowState(window_util.nativeHandle(state.window));
+    // `--set-opacity` 走同一处：先应用启动状态，再按滑块路径改一次并落盘退出。
+    opacity_probe.applyStartup(&state.settings, window_util.nativeHandle(state.window), options.set_opacity);
     if (options.bench_first_frame) {
         try bench_mod.firstFrame(init, app, started);
         // 一次性探针：打印完就退出，不 join 工作线程（冷启动取图不能算进首帧墙钟）。

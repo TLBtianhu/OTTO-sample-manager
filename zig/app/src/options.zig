@@ -68,6 +68,8 @@ pub const Options = struct {
     /// `--settings-probe`：`--nanoui-snapshot` 时也建真实 HWND（仍然隐藏、不激活），
     /// 让无头脚本能断言 `WS_EX_TOPMOST` 与不透明度。普通用户不需要。
     settings_probe: bool = false,
+    /// `--set-opacity=<0..100>`：验收探针的百分数（见 `opacity_probe.zig`）。
+    set_opacity: ?u8 = null,
     /// `--drop-probe=<path>`：隐藏窗口里合成一次文件/文件夹拖入，等导入结束后
     /// 打印 `drop-probe: done …` 并退出。文件路径用来验收「只接受文件夹」。
     drop_probe: ?[]const u8 = null,
@@ -111,7 +113,7 @@ pub const Options = struct {
     update_url: ?[]const u8 = null,
 };
 
-pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
+pub fn parse(args: anytype) error{ MissingValue, InvalidValue, InvalidOpacity }!Options {
     var options = Options{};
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -232,6 +234,12 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
             options.cache_budget_set = true;
         } else if (std.mem.eql(u8, arg, "--settings-probe")) {
             options.settings_probe = true;
+        } else if (std.mem.eql(u8, arg, "--set-opacity")) {
+            index += 1;
+            if (index == args.len) return error.MissingValue;
+            options.set_opacity = try parsePercent(args[index]);
+        } else if (std.mem.startsWith(u8, arg, "--set-opacity=")) {
+            options.set_opacity = try parsePercent(arg["--set-opacity=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--drop-probe=")) {
             options.drop_probe = arg["--drop-probe=".len..];
         } else if (std.mem.eql(u8, arg, "--thumb-bench")) {
@@ -317,6 +325,13 @@ pub fn parse(args: anytype) error{ MissingValue, InvalidValue }!Options {
     return options;
 }
 
+/// `--set-opacity` 的百分数：0..100 的整数（0 合法）；非数字/越界是 `InvalidOpacity`。
+fn parsePercent(text: []const u8) error{InvalidOpacity}!u8 {
+    const percent = std.fmt.parseInt(u8, text, 10) catch return error.InvalidOpacity;
+    if (percent > 100) return error.InvalidOpacity;
+    return percent;
+}
+
 /// `--cache-budget-kib` 的值：非负 KiB → 字节。溢出按 u64 饱和（预算没有上限语义，
 /// 饱和到天文数字等价于「不淘汰」，不会回绕成 0 把缓存删光）。
 fn kibToBytes(text: []const u8) error{InvalidValue}!u64 {
@@ -324,8 +339,7 @@ fn kibToBytes(text: []const u8) error{InvalidValue}!u64 {
     return kib *| 1024;
 }
 
-/// `--frames` / `--scroll-notches`：正整数。0 不是"跑得很快"，是一张空表，
-/// 所以按非法值拒绝，不静默。
+/// `--frames` / `--scroll-notches`：正整数；0 是一张空表，按非法值拒绝，不静默。
 fn parseCount(text: []const u8) error{InvalidValue}!u32 {
     const count = std.fmt.parseInt(u32, text, 10) catch return error.InvalidValue;
     if (count == 0) return error.InvalidValue;
@@ -337,9 +351,7 @@ fn parseMillis(text: []const u8) error{InvalidValue}!u64 {
     return std.fmt.parseInt(u64, text, 10) catch error.InvalidValue;
 }
 
-/// 命令行用法。搬到了 `usage.zig`：合并三条分支的参数后本文件贴着 600 行上限
-/// （AGENTS.md），而用法是纯数据、和解析器没有逻辑耦合。入口留在这里，调用方
-/// （`main.zig`）不用改。
+/// 命令行用法（`usage.zig`：纯数据，和解析器没有逻辑耦合；入口和调用方都不变）。
 pub const printUsage = usage.printUsage;
 
 // ---------------------------------------------------------------------------
@@ -526,13 +538,16 @@ test "--no-isolation 是开关；--thumb-bench 两种写法都收" {
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--thumb-bench" }));
 }
 
-test "--settings-probe 是开关，不吞下一个参数" {
+test "--settings-probe / --set-opacity：开关 + 探针值，不吞下一个参数" {
     const plain = try parse(&[_][]const u8{"otto-lite"});
     try testing.expect(!plain.settings_probe);
+    try testing.expect(plain.set_opacity == null);
 
-    const probe = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--settings-probe" });
+    const probe = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--settings-probe", "--set-opacity=60" });
     try testing.expect(probe.settings_probe);
+    try testing.expectEqual(@as(u8, 60), probe.set_opacity.?);
     try testing.expectEqualStrings("lib.json", probe.library_path.?);
+    try testing.expectError(error.InvalidOpacity, parse(&[_][]const u8{ "otto-lite", "--set-opacity=150" }));
 }
 
 test "更新检查：--check-update / --update-url 两种写法都收，默认两个都是 null（不联网）" {
