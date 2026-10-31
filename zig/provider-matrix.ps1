@@ -13,7 +13,8 @@
 #   2. `preview: provider=<name>` names the provider the table expects. That is
 #      the architecture claim: `img00.png` -> image-wic (our own WIC decode, not
 #      the Shell thumbnail), `viper.mp3` -> mf-audio, `tone_440.wav` ->
-#      wasapi-pcm, `rabbit320.mp4` -> mf-video;
+#      wasapi-pcm, `tone_660.flac` -> native-audio (the vendored zig-audio
+#      decoder), `rabbit320.mp4` -> mf-video;
 #   3. the second round really ran with the trimmed registry: it must print
 #      `preview: shell-preview=disabled`. Without this assertion a typo in the
 #      flag would silently run the default table twice and the row would still be
@@ -32,13 +33,15 @@
 #   viper.mp3        mf-audio    mf-audio
 #   rabbit320.mp4    mf-video    mf-video
 #   tone_440.wav     wasapi-pcm  wasapi-pcm
+#   tone_660.flac    native-audio native-audio  (vendored zig-audio, pure Zig)
 #   mystery.xyz      none        none
 #
-# The two audio rows need an audio endpoint: `wasapi-pcm` / `mf-audio` initialise
-# the shared-mode device inside `open`, and a box with no endpoint makes them
-# decline (then shell-thumbnail may answer, or nothing). bench.ps1 calls that
-# SKIP; here it is a FAIL by design -- the point of the gate is that audio preview
-# works on this machine, not that it would work on one where it cannot.
+# The three audio rows need an audio endpoint: `wasapi-pcm` / `native-audio` /
+# `mf-audio` initialise the shared-mode device inside `open`, and a box with no
+# endpoint makes them decline (then shell-thumbnail may answer, or nothing).
+# bench.ps1 calls that SKIP; here it is a FAIL by design -- the point of the gate
+# is that audio preview works on this machine, not that it would work on one
+# where it cannot.
 #
 # open_ms is printed for every round but has **no threshold**: a cold Media
 # Foundation or a busy audio endpoint legitimately varies by hundreds of ms
@@ -95,6 +98,7 @@ $script:cases = @(
   [pscustomobject]@{ Name = 'viper.mp3';     Default = 'mf-audio';   NoShell = 'mf-audio';   Reason = '' },
   [pscustomobject]@{ Name = 'rabbit320.mp4'; Default = 'mf-video';   NoShell = 'mf-video';   Reason = '' },
   [pscustomobject]@{ Name = 'tone_440.wav';  Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },
+  [pscustomobject]@{ Name = 'tone_660.flac'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
   [pscustomobject]@{ Name = 'mystery.xyz';   Default = 'none';       NoShell = 'none';       Reason = 'unsupported' }
 )
 

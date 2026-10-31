@@ -1,13 +1,14 @@
-//! 预览 provider 的唯一一份顺序表：`[wasapi-pcm, mf-audio, image-wic, mf-video,
-//! shell-thumbnail]`。
+//! 预览 provider 的唯一一份顺序表：`[wasapi-pcm, native-audio, mf-audio,
+//! image-wic, mf-video, shell-thumbnail]`。
 //!
 //! 每一项负责的是"产出哪一种载荷"，不是"一种文件类型"：
 //!
 //!   1. `wasapi-pcm`      WAV 试听（自写 RIFF 解析 + WASAPI）；
-//!   2. `mf-audio`        MP3 / M4A / AAC / WMA 试听（Media Foundation）；
-//!   3. `image-wic`       PNG / JPEG / BMP / GIF / TIFF（自己写的 WIC 解码，不经过 Shell）；
-//!   4. `mf-video`        MP4 / M4V / MOV / WMV 首帧（Media Foundation，产出 image）；
-//!   5. `shell-thumbnail` 系统缩略图（第三方 handler，最后的静态图兜底）。
+//!   2. `native-audio`    FLAC 试听（vendor 的 zig-audio，纯 Zig 解码）；
+//!   3. `mf-audio`        MP3 / M4A / AAC / WMA 试听（Media Foundation）；
+//!   4. `image-wic`       PNG / JPEG / BMP / GIF / TIFF（自己写的 WIC 解码，不经过 Shell）；
+//!   5. `mf-video`        MP4 / M4V / MOV / WMV 首帧（Media Foundation，产出 image）；
+//!   6. `shell-thumbnail` 系统缩略图（第三方 handler，最后的静态图兜底）。
 //!
 //! **元数据不是 provider**——名称/大小/时长/路径是 `Sample` 自带的事实，由
 //! `sample_facts.zig` 无条件显示，不参与 `preview.Outcome`。一个永远成功的 provider
@@ -17,15 +18,18 @@
 //! 的项；`open` 返回 `none.*` 只是一次谢绝，会继续问下一个（见 `preview.zig` 的
 //! decline 规则）。
 //!
-//! ## 为什么是 `[wasapi-pcm, mf-audio, image-wic, mf-video, shell-thumbnail]`
+//! ## 为什么是 `[wasapi-pcm, native-audio, mf-audio, image-wic, mf-video, shell-thumbnail]`
 //!
 //! 每种媒体有**自给自足**的 provider 时，它必须排在 Shell 前面——Shell 是兜底，
 //! 不是任何格式的默认路径：
 //!
 //!   * 音频在最前：能播就播。某些机器给 `.wav` 登记了影子 handler 并返回静态图，
 //!     排在后面会让"真的能试听"被一张波形截图抢走；`.mp3` 在 Windows 上更是常常
-//!     有 Shell 静态图。MF 音频谢绝（没有端点 / 解码失败）时，注册表仍会继续问
-//!     thumb 兜底——这正是 decline 规则存在的理由；
+//!     有 Shell 静态图。`native-audio` 紧跟 WAV：FLAC 由我们 vendor 的纯 Zig 解码器
+//!     解，不借系统组件；它排在 `mf-audio` 之前，因为 MF 在部分机器上也能解 FLAC，
+//!     但多一层 COM/系统依赖，能用自家解码器时先用自家的。两条音频 provider 谢绝
+//!     （没有端点 / 解码失败）时，注册表仍会继续问 thumb 兜底——这正是 decline
+//!     规则存在的理由；
 //!   * 图片在视频与 Shell 之前：PNG/JPEG/BMP/GIF/TIFF 由 `image-wic` 自己解，不查
 //!     注册表、不加载第三方 DLL。只有 PSD/AI/BLEND 这类**没有系统解码器**的格式才
 //!     轮到 Shell。视频首帧同理：抽帧由 `mf-video` 用 MF 自己解，不借 Shell 的
@@ -52,6 +56,7 @@
 //! `icon_capable == false` 的项。当前结果是
 //! `[wasapi-pcm, image-wic, mf-video, shell-thumbnail]`：WAV 用粗采样（不整段解码），
 //! `mf-audio` 因 MF 打开容器 + seek 实测超 15ms/张 预算而**不参与**（见报告），
+//! `native-audio` 因 FLAC 没有便宜的粗采样路径（要真实包络就得整段解码）同样不参与，
 //! 音频行显示占位。`--no-shell-preview` 时再少一项 Shell，行内小图同样**不再问
 //! Shell**，与预览的语义逐字一致。
 //!
@@ -61,13 +66,14 @@
 //!
 //! `main.zig` 只 import 这里的 `registry` / `registryFor`，它不认识任何具体
 //! provider；以后加 provider 只改这张表（ROADMAP M1 的验收）。依赖方向：
-//! `main → providers/root → {audio, mf_audio, image, mf_video, thumb} → preview`；
-//! `preview.zig` 不认识具体 provider。
+//! `main → providers/root → {audio, native_audio, mf_audio, image, mf_video, thumb}
+//! → preview`；`preview.zig` 不认识具体 provider。
 
 const std = @import("std");
 const preview = @import("../preview.zig");
 
 pub const audio = @import("audio.zig");
+pub const native_audio = @import("native_audio.zig");
 pub const mf_audio = @import("mf_audio.zig");
 pub const image = @import("image.zig");
 pub const mf_video = @import("mf_video.zig");
@@ -76,6 +82,7 @@ pub const thumb = @import("thumb.zig");
 /// 完整表。顺序即偏好；`shell-thumbnail` 永远在最后。
 const ordered = [_]*const preview.Provider{
     &audio.provider,
+    &native_audio.provider,
     &mf_audio.provider,
     &image.provider,
     &mf_video.provider,
@@ -86,6 +93,7 @@ const ordered = [_]*const preview.Provider{
 /// 数组单独一份（不是运行期过滤），所以 `registryFor` 返回的指针是静态生命周期。
 const without_shell = [_]*const preview.Provider{
     &audio.provider,
+    &native_audio.provider,
     &mf_audio.provider,
     &image.provider,
     &mf_video.provider,
@@ -144,6 +152,7 @@ comptime {
     // 只要求"在表里"，不要求"排在第一个"：顺序表达的是偏好，decline 规则保证
     // 能力不会被前面的 provider 永久堵死。存在性检查不写死下标——位置以后还会变。
     var has_audio = false;
+    var has_native_audio = false;
     var has_mf_audio = false;
     var has_image = false;
     var has_mf_video = false;
@@ -151,6 +160,7 @@ comptime {
     var thumb_index: usize = 0;
     for (ordered, 0..) |provider, index| {
         if (provider == &audio.provider) has_audio = true;
+        if (provider == &native_audio.provider) has_native_audio = true;
         if (provider == &mf_audio.provider) has_mf_audio = true;
         if (provider == &image.provider) has_image = true;
         if (provider == &mf_video.provider) has_mf_video = true;
@@ -160,6 +170,7 @@ comptime {
         }
     }
     if (!has_audio) @compileError("WAV 音频 provider 必须在这张表里");
+    if (!has_native_audio) @compileError("FLAC 音频 provider 必须在这张表里");
     if (!has_mf_audio) @compileError("MF 音频 provider 必须在这张表里");
     if (!has_image) @compileError("图片 provider 必须在这张表里");
     if (!has_mf_video) @compileError("MF 视频 provider 必须在这张表里");
@@ -168,21 +179,23 @@ comptime {
     // 用算出来的位置比较（`ordered.len - 1`），不写死某个下标。
     if (thumb_index != ordered.len - 1) @compileError("Shell 缩略图必须排在最后");
 
-    // `--no-shell-preview` 的表必须真的没有 Shell，且仍然包含四项自给自足的
+    // `--no-shell-preview` 的表必须真的没有 Shell，且仍然包含五项自给自足的
     // provider；少一项就说明"证明不依赖 shell"的验收是假的。
     if (without_shell.len != ordered.len - 1) @compileError("--no-shell-preview 只应少一项");
     var no_shell_audio = false;
+    var no_shell_native_audio = false;
     var no_shell_mf_audio = false;
     var no_shell_image = false;
     var no_shell_mf_video = false;
     for (without_shell) |provider| {
         if (provider == &thumb.provider) @compileError("--no-shell-preview 里不能有 Shell 缩略图");
         if (provider == &audio.provider) no_shell_audio = true;
+        if (provider == &native_audio.provider) no_shell_native_audio = true;
         if (provider == &mf_audio.provider) no_shell_mf_audio = true;
         if (provider == &image.provider) no_shell_image = true;
         if (provider == &mf_video.provider) no_shell_mf_video = true;
     }
-    if (!no_shell_audio or !no_shell_mf_audio or !no_shell_image or !no_shell_mf_video) {
+    if (!no_shell_audio or !no_shell_native_audio or !no_shell_mf_audio or !no_shell_image or !no_shell_mf_video) {
         @compileError("--no-shell-preview 必须保留音频 / 图片 / 视频 provider");
     }
 
@@ -208,6 +221,9 @@ comptime {
     // 图标表里的每一项都声明了能力；WAV 的窗口采样走粗采样，MF 音频实测超预算
     // 所以保持 false，由各 provider 自己保证"不整段解码"。
     if (!audio.provider.icon_capable) @compileError("WAV 粗采样已实现，wasapi-pcm 应参与图标表");
+    // FLAC 没有便宜的粗采样：真实包络必须整段解码，15ms 预算内做不到。保持 false，
+    // 让 `registryForIcon` 自然把它过滤掉——这正是"不为图标解码整段"的落点。
+    if (native_audio.provider.icon_capable) @compileError("FLAC 图标不能整段解码，native-audio 必须保持 icon_capable=false");
 
     // 去掉 Shell 的 icon 表 = icon 表少一项，且少的必须正好是 Shell。
     if (icon_without_shell.len != icon_ordered.len - 1) {
@@ -229,34 +245,38 @@ comptime {
 
 const testing = std.testing;
 
-test "注册表顺序：wav → mf-audio → image-wic → mf-video → shell，Shell 在最后" {
+test "注册表顺序：wav → flac → mf-audio → image-wic → mf-video → shell，Shell 在最后" {
     const full = registryFor(false);
-    try testing.expectEqual(@as(usize, 5), full.providers.len);
+    try testing.expectEqual(@as(usize, 6), full.providers.len);
     try testing.expectEqualStrings("wasapi-pcm", full.providers[0].name);
-    try testing.expectEqualStrings("mf-audio", full.providers[1].name);
-    try testing.expectEqualStrings("image-wic", full.providers[2].name);
-    try testing.expectEqualStrings("mf-video", full.providers[3].name);
-    try testing.expectEqualStrings("shell-thumbnail", full.providers[4].name);
+    try testing.expectEqualStrings("native-audio", full.providers[1].name);
+    try testing.expectEqualStrings("mf-audio", full.providers[2].name);
+    try testing.expectEqualStrings("image-wic", full.providers[3].name);
+    try testing.expectEqualStrings("mf-video", full.providers[4].name);
+    try testing.expectEqualStrings("shell-thumbnail", full.providers[5].name);
     // `registry` 与 `registryFor(false)` 是同一张表，不是两份独立的副本。
     try testing.expectEqual(registry.providers.ptr, full.providers.ptr);
 }
 
-test "--no-shell-preview：去掉 Shell，其余四项顺序不变，Shell 连 supports 都不会被问" {
+test "--no-shell-preview：去掉 Shell，其余五项顺序不变，Shell 连 supports 都不会被问" {
     const trimmed = registryFor(true);
-    try testing.expectEqual(@as(usize, 4), trimmed.providers.len);
+    try testing.expectEqual(@as(usize, 5), trimmed.providers.len);
     try testing.expectEqualStrings("wasapi-pcm", trimmed.providers[0].name);
-    try testing.expectEqualStrings("mf-audio", trimmed.providers[1].name);
-    try testing.expectEqualStrings("image-wic", trimmed.providers[2].name);
-    try testing.expectEqualStrings("mf-video", trimmed.providers[3].name);
+    try testing.expectEqualStrings("native-audio", trimmed.providers[1].name);
+    try testing.expectEqualStrings("mf-audio", trimmed.providers[2].name);
+    try testing.expectEqualStrings("image-wic", trimmed.providers[3].name);
+    try testing.expectEqualStrings("mf-video", trimmed.providers[4].name);
 
     for (trimmed.providers) |provider| {
         try testing.expect(provider != &thumb.provider);
     }
-    // 同一个指针返回同一份静态表，生命周期与进程相同；指向的仍是同一批 provider。
+    // 同一个指针返回同一份静态表，生命周期与进程相同；指向的仍是同一批 provider，
+    // 顺序也逐项一致（只少最后一项 Shell）。
     try testing.expect(registryFor(true) == registryFor(true));
     try testing.expect(registryFor(false) == &registry);
-    try testing.expect(trimmed.providers[2] == registry.providers[2]);
-    try testing.expect(trimmed.providers[3] == registry.providers[3]);
+    for (trimmed.providers, 0..) |provider, index| {
+        try testing.expect(provider == registry.providers[index]);
+    }
 }
 
 test "icon 注册表：wasapi → image-wic → mf-video → shell，顺序与预览一致" {
@@ -292,7 +312,15 @@ test "--no-shell-preview 的 icon 表：png/bmp 仍有 image-wic，Shell 不在�
     }
 }
 
-test "图标级音频：WAV 参与（粗采样），MF 音频因超预算不参与" {
+test "图标级音频：WAV 参与（粗采样），FLAC / MF 音频因超预算不参与" {
     try testing.expect(audio.provider.icon_capable);
+    try testing.expect(!native_audio.provider.icon_capable);
     try testing.expect(!mf_audio.provider.icon_capable);
+    // 两张 icon 表里都不应出现 native-audio：它是按 icon_capable 过滤的自然结果。
+    for (registryForIcon(false).providers) |provider| {
+        try testing.expect(provider != &native_audio.provider);
+    }
+    for (registryForIcon(true).providers) |provider| {
+        try testing.expect(provider != &native_audio.provider);
+    }
 }

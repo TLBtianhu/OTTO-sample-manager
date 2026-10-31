@@ -5,6 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .nanoui = .{ .path = "../vendor/nanoui" },
+        // 纯 Zig 的音频解码库（FLAC）；vendor 的规矩见 vendor/zig-audio/VENDOR.md。
+        .zig_audio = .{ .path = "../vendor/zig-audio" },
         .otto_core = .{ .path = "../core" },
         // zig/ports 是一个 package、五个 module：监听 / 缩略图 / 能力表 / 拖出 / 库文件。
         // 五个依赖名里 ports 是主入口：`ports_dep.module("otto_watch")` 之类。

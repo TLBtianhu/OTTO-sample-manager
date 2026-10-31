@@ -19,9 +19,10 @@
 //!
 //! 解码按扩展名分流，但**装配与会话类型只有一种**：
 //!   * `.wav` → `providers/audio.zig`（自写 RIFF/WAVE 解析）；
+//!   * `.flac` → `providers/native_audio.zig`（vendor 的 zig-audio，纯 Zig 解码）；
 //!   * `.mp3` / `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media
 //!     Foundation，16-bit PCM）；
-//! 两条路都落到 `audio/session.zig` 的 `build`，所以播放/seek/停止的断言是同一套
+//! 三条路都落到 `audio/session.zig` 的 `build`，所以播放/seek/停止的断言是同一套
 //! 代码，不存在"MF 的测试松一点"。
 //!
 //! 退出码：格式/解码/设备/断言失败 1；没有端点或 MF 不可用 0；全部通过 0。
@@ -33,6 +34,7 @@ const core = @import("otto_core");
 const player_mod = @import("audio/player.zig");
 const session_mod = @import("audio/session.zig");
 const mf_audio = @import("providers/mf_audio.zig");
+const native_audio = @import("providers/native_audio.zig");
 const preview = @import("preview.zig");
 const audio_provider = @import("providers/audio.zig");
 
@@ -58,6 +60,9 @@ pub fn run(
 
     if (mf_audio.supportsExtension(core.model.fileExtFromPath(path))) {
         return runMf(init, allocator, path, seek_at_ms);
+    }
+    if (native_audio.supportsExtension(core.model.fileExtFromPath(path))) {
+        return runNative(init, allocator, path, seek_at_ms);
     }
 
     var decoded = audio_provider.load(allocator, path) catch |err| {
@@ -106,6 +111,37 @@ fn runMf(
     defer decoded.deinit(allocator);
 
     printFormat("pcm", decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
+
+    var session = session_mod.build(allocator, &decoded) catch |err| return sessionFailed(err);
+    defer session.deinit(allocator);
+    return playSession(init, &session, seek_at_ms);
+}
+
+fn runNative(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    seek_at_ms: ?u64,
+) !u8 {
+    var decoded = native_audio.decode(allocator, path) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => blk: {
+                std.debug.print("play-test: FAIL 分配 PCM 失败（OOM）\n", .{});
+                break :blk 1;
+            },
+            error.FileNotFound, error.InvalidPath => blk: {
+                std.debug.print("play-test: FAIL 文件不存在或路径非法（{s}）\n", .{@errorName(err)});
+                break :blk 1;
+            },
+            else => blk: {
+                std.debug.print("play-test: FAIL FLAC 解码失败（{s}）\n", .{@errorName(err)});
+                break :blk 1;
+            },
+        };
+    };
+    defer decoded.deinit(allocator);
+
+    printFormat("flac", decoded.sample_rate, decoded.channels, decoded.bits, decoded.duration_ms, decoded.frames, decoded.byteLen());
 
     var session = session_mod.build(allocator, &decoded) catch |err| return sessionFailed(err);
     defer session.deinit(allocator);
