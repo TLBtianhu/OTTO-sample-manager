@@ -6,8 +6,9 @@
 //!
 //! **整段解码不在这里**：WAV/FLAC/MP3/AIFF 都交给 vendor 的 zig-audio
 //! （`zig/app/src/audio/decode.zig`），app 侧已经没有 WAV 解码器。本文件只服务
-//! "不读整段 PCM"的头部读取，所以**不需要**支持 ADPCM / G.711 的负载布局——遇到
-//! 这些编码返回 `UnsupportedFormat`，由调用方决定是谢绝还是让 Shell 兜底。
+//! "不读整段 PCM"的头部读取，所以只解析 `fmt ` 的**容器事实**（tag / 声道 /
+//! 采样率 / block_align / 位深），不碰 ADPCM / G.711 的负载布局。压缩编码的
+//! 帧数由 `wav_info.zig` 按块公式算，`frameBytes()` 对这些编码返回 0。
 //!
 //! 复制两份块扫描逻辑迟早会漂移（奇数块 padding、未知块、`fmt ` 在 `data` 之后、
 //! EXTENSIBLE 子格式），所以这里定义唯一的规则集，两处都从这里拿。
@@ -22,9 +23,14 @@
 //! 其余块（`fmt ` 与未知块）必须完整落在给定字节里，否则无法可靠地继续找
 //! `data`，返回 `Truncated`——不猜。
 //!
-//! 支持面：PCM 8/16/24/32、IEEE float 32、WAVE_FORMAT_EXTENSIBLE 里的这两种子格式；
-//! 别的（ADPCM / A-law / µ-law / float64…）返回 `UnsupportedFormat`。本文件是
-//! **纯字节解析**：不读文件、不分配、不 import 任何平台模块。
+//! 支持面：PCM 8/16/24/32、IEEE float 32、A-law、µ-law、IMA ADPCM、MS ADPCM，
+//! 以及 WAVE_FORMAT_EXTENSIBLE 里的 PCM / float 子格式；别的（float64、12 位
+//! PCM、MP3-in-WAV…）返回 `UnsupportedFormat`。本文件是**纯字节解析**：不读
+//! 文件、不分配、不 import 任何平台模块。
+//!
+//! `Codec` 是"负载怎么解码"的标签，`format_tag` 是 `fmt ` 里原样的 `wFormatTag`
+//! （EXTENSIBLE 时就是 0xFFFE），`block_align` 是原样的 `nBlockAlign`——PCM/float
+//! 的一帧，或者 ADPCM 的一个块。压缩编码的时长公式在 `wav_info.zig`。
 
 const std = @import("std");
 
@@ -39,10 +45,19 @@ pub const Error = error{
     BadFmt,
 };
 
+/// 整数 PCM 还是 float 的**字节含义**；只对 `.pcm` / `.float` 两种 codec 成立。
+/// 下混（`audio/downmix.zig`）与 peaks 仍按这个枚举分派，不为压缩编码扩展它。
 pub const SampleFormat = enum { pcm, float };
 
-pub const format_pcm: u16 = 1;
-pub const format_float: u16 = 3;
+/// `fmt ` 里 `wFormatTag` 对应的负载编码。压缩编码没有"定长帧"，帧数要按块算。
+pub const Codec = enum { pcm, float, alaw, mulaw, ima_adpcm, ms_adpcm };
+
+pub const format_pcm: u16 = 0x0001;
+pub const format_ms_adpcm: u16 = 0x0002;
+pub const format_float: u16 = 0x0003;
+pub const format_alaw: u16 = 0x0006;
+pub const format_mulaw: u16 = 0x0007;
+pub const format_ima_adpcm: u16 = 0x0011;
 pub const format_extensible: u16 = 0xFFFE;
 
 /// KSDATAFORMAT_SUBTYPE_PCM / _IEEE_FLOAT 的磁盘字节序（GUID 的 Data1..Data4
@@ -54,15 +69,33 @@ pub const Header = struct {
     sample_rate: u32,
     channels: u16,
     bits: u16,
-    format: SampleFormat,
+    codec: Codec,
+    /// `fmt ` 里原样的 `wFormatTag`（EXTENSIBLE 时是 0xFFFE，子格式看 `codec`）。
+    format_tag: u16,
+    /// `fmt ` 里原样的 `nBlockAlign`：PCM/float 是一帧的字节数，ADPCM 是一块的
+    /// 字节数，G.711 是每帧的字节数（= 声道数）。
+    block_align: u16,
     /// `data` 负载在整份字节里的起点（块头之后）。
     data_offset: usize,
     /// `data` 块声明的负载长度（可能大于给定字节的长度）。
     data_size: u64,
 
-    /// 一帧的字节数。0 = 头部自相矛盾（调用方应当拒绝）。
+    /// **线性** PCM / float 一帧的字节数；压缩编码（G.711 / ADPCM）返回 0——
+    /// 它们没有定长帧，时长必须按 `wav_info.frameCount` 的块公式算。
     pub fn frameBytes(self: Header) usize {
-        return @as(usize, self.channels) * @as(usize, self.bits / 8);
+        return switch (self.codec) {
+            .pcm, .float => @as(usize, self.channels) * @as(usize, self.bits / 8),
+            .alaw, .mulaw, .ima_adpcm, .ms_adpcm => 0,
+        };
+    }
+
+    /// 这个头部能不能按 `SampleFormat` 解释负载；压缩编码返回 null。
+    pub fn sampleFormat(self: Header) ?SampleFormat {
+        return switch (self.codec) {
+            .pcm => .pcm,
+            .float => .float,
+            .alaw, .mulaw, .ima_adpcm, .ms_adpcm => null,
+        };
     }
 };
 
@@ -70,7 +103,9 @@ const Fmt = struct {
     channels: u16,
     sample_rate: u32,
     bits: u16,
-    format: SampleFormat,
+    codec: Codec,
+    format_tag: u16,
+    block_align: u16,
 };
 
 /// 解析 RIFF/WAVE 头部。`bytes` 可以只有文件的前一小段（见文件头）。
@@ -114,7 +149,9 @@ pub fn parse(bytes: []const u8) Error!Header {
         .sample_rate = fmt.sample_rate,
         .channels = fmt.channels,
         .bits = fmt.bits,
-        .format = fmt.format,
+        .codec = fmt.codec,
+        .format_tag = fmt.format_tag,
+        .block_align = fmt.block_align,
         .data_offset = data_start,
         .data_size = data_size,
     };
@@ -126,43 +163,58 @@ fn parseFmt(chunk: []const u8) Error!Fmt {
     const tag = readU16(chunk, 0);
     const channels = readU16(chunk, 2);
     const sample_rate = readU32(chunk, 4);
+    const block_align = readU16(chunk, 12);
     const bits = readU16(chunk, 14);
     if (channels == 0 or sample_rate == 0) return error.BadFmt;
 
-    var format: SampleFormat = undefined;
+    var codec: Codec = undefined;
     if (tag == format_extensible) {
         if (chunk.len < 40) return error.BadFmt;
         const cb_size = readU16(chunk, 16);
         if (cb_size < 22) return error.BadFmt;
         const sub = chunk[24..40];
         if (std.mem.eql(u8, sub, &guid_pcm)) {
-            format = .pcm;
+            codec = .pcm;
         } else if (std.mem.eql(u8, sub, &guid_float)) {
-            format = .float;
+            codec = .float;
         } else {
             return error.UnsupportedFormat;
         }
-    } else if (tag == format_pcm) {
-        format = .pcm;
-    } else if (tag == format_float) {
-        format = .float;
     } else {
-        return error.UnsupportedFormat;
+        codec = switch (tag) {
+            format_pcm => .pcm,
+            format_float => .float,
+            format_alaw => .alaw,
+            format_mulaw => .mulaw,
+            format_ima_adpcm => .ima_adpcm,
+            format_ms_adpcm => .ms_adpcm,
+            else => return error.UnsupportedFormat,
+        };
     }
 
-    switch (format) {
+    switch (codec) {
         .pcm => switch (bits) {
             8, 16, 24, 32 => {},
             else => return error.UnsupportedFormat,
         },
         .float => if (bits != 32) return error.UnsupportedFormat,
+        // G.711 每样本 1 字节，跟 wBitsPerSample 无关（有的写入器写 8，有的写 0）。
+        .alaw, .mulaw => {},
+        // ADPCM 的块头至少 4（IMA）/ 7（MS）字节 × 声道；装不下就没法按块算帧数。
+        .ima_adpcm, .ms_adpcm => {
+            const per_channel: u32 = if (codec == .ima_adpcm) 4 else 7;
+            const header_bytes = per_channel * @as(u32, channels);
+            if (block_align <= header_bytes) return error.BadFmt;
+        },
     }
 
     return .{
         .channels = channels,
         .sample_rate = sample_rate,
         .bits = bits,
-        .format = format,
+        .codec = codec,
+        .format_tag = tag,
+        .block_align = block_align,
     };
 }
 
@@ -225,7 +277,10 @@ test "完整头：fmt + data 声明长度，负载可以不在窗口里" {
     try testing.expectEqual(@as(u32, 22_050), header.sample_rate);
     try testing.expectEqual(@as(u16, 1), header.channels);
     try testing.expectEqual(@as(u16, 16), header.bits);
-    try testing.expectEqual(SampleFormat.pcm, header.format);
+    try testing.expectEqual(Codec.pcm, header.codec);
+    try testing.expectEqual(format_pcm, header.format_tag);
+    try testing.expectEqual(@as(u16, 2), header.block_align);
+    try testing.expectEqual(SampleFormat.pcm, header.sampleFormat().?);
     try testing.expectEqual(@as(usize, 44), header.data_offset);
     try testing.expectEqual(@as(u64, 22_050 * 2 * 4), header.data_size);
     try testing.expectEqual(@as(usize, 2), header.frameBytes());
@@ -290,7 +345,7 @@ test "截断 / 非 WAV / data 在 fmt 前：具名错误" {
     try testing.expectError(error.MissingData, parse(built[0 .. built.len - 8]));
 }
 
-test "EXTENSIBLE：认 PCM 子格式；A-law / 12 位 PCM 不支持" {
+test "EXTENSIBLE：认 PCM 子格式；12 位 PCM 不支持" {
     var bytes: [128]u8 = undefined;
     var length: usize = 0;
     @memcpy(bytes[0..4], "RIFF");
@@ -321,11 +376,51 @@ test "EXTENSIBLE：认 PCM 子格式；A-law / 12 位 PCM 不支持" {
 
     const header = try parse(bytes[0..length]);
     try testing.expectEqual(@as(u16, 32), header.bits);
-    try testing.expectEqual(SampleFormat.pcm, header.format);
+    try testing.expectEqual(Codec.pcm, header.codec);
+    try testing.expectEqual(format_extensible, header.format_tag);
+    try testing.expectEqual(SampleFormat.pcm, header.sampleFormat().?);
 
-    // A-law（0x0006）不支持。
+    // 12 位 PCM 不支持。
     var plain: [64]u8 = undefined;
-    const alaw = build(&plain, true, 2, 2);
-    std.mem.writeInt(u16, plain[20..22], 6, .little);
-    try testing.expectError(error.UnsupportedFormat, parse(alaw));
+    const pcm12 = build(&plain, true, 2, 2);
+    std.mem.writeInt(u16, plain[34..36], 12, .little);
+    try testing.expectError(error.UnsupportedFormat, parse(pcm12));
+}
+
+test "G.711 / ADPCM：format_tag、block_align 暴露出来，codec 可区分" {
+    const cases = [_]struct {
+        tag: u16,
+        block_align: u16,
+        bits: u16,
+        codec: Codec,
+    }{
+        .{ .tag = format_alaw, .block_align = 1, .bits = 8, .codec = .alaw },
+        .{ .tag = format_mulaw, .block_align = 1, .bits = 8, .codec = .mulaw },
+        .{ .tag = format_ima_adpcm, .block_align = 1024, .bits = 4, .codec = .ima_adpcm },
+        .{ .tag = format_ms_adpcm, .block_align = 1024, .bits = 4, .codec = .ms_adpcm },
+    };
+
+    for (cases) |case| {
+        var bytes: [64]u8 = undefined;
+        const file = build(&bytes, true, 1024, 0);
+        std.mem.writeInt(u16, bytes[20..22], case.tag, .little);
+        std.mem.writeInt(u16, bytes[32..34], case.block_align, .little);
+        std.mem.writeInt(u16, bytes[34..36], case.bits, .little);
+
+        const header = try parse(file);
+        try testing.expectEqual(case.codec, header.codec);
+        try testing.expectEqual(case.tag, header.format_tag);
+        try testing.expectEqual(case.block_align, header.block_align);
+        // 压缩编码没有定长帧：frameBytes 返回 0，sampleFormat 返回 null。
+        try testing.expectEqual(@as(usize, 0), header.frameBytes());
+        try testing.expect(header.sampleFormat() == null);
+    }
+
+    // ADPCM 的块必须装得下每声道 4 / 7 字节的块头。
+    var bytes: [64]u8 = undefined;
+    const tiny = build(&bytes, true, 1024, 0);
+    std.mem.writeInt(u16, bytes[20..22], format_ima_adpcm, .little);
+    std.mem.writeInt(u16, bytes[32..34], 4, .little);
+    std.mem.writeInt(u16, bytes[34..36], 4, .little);
+    try testing.expectError(error.BadFmt, parse(tiny));
 }
