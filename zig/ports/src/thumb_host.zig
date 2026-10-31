@@ -141,6 +141,12 @@ pub fn ensurePresent(allocator: std.mem.Allocator, options: Options) Error!void 
 }
 
 /// 停掉 helper（可重复调用）。下一次 `get()` 会重新懒启动。
+///
+/// **每个进程在退出前都必须调用一次**：单例里还留着 `helper_path` 的堆副本
+/// （`thumb_host_win.startLocked` 分配、`terminateLocked` 释放），不调用它，
+/// debug / ReleaseSafe 的 SafeAllocator 就会在进程退出时报一条 `leaked`。
+/// GUI 在 `thumbs.deinit()` 里调用，无窗口命令（`--preview` 等）在
+/// `zig/app/src/commands.zig` 里调用——**CLI 与 GUI 都必须收尾**。
 pub fn deinit() void {
     if (builtin.os.tag != .windows) return;
     win.deinit();
