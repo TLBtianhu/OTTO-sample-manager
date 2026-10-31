@@ -9,6 +9,12 @@
 //!   otto-lite --check-update <url>     （无窗口更新检查，见 `update_ui.zig`）
 //!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点；更新检查默认不联网。
 //!
+//! 本文件只留三件事：**参数分派**（`options` + `commands`）、**生命周期**
+//! （`tick` / `refresh` / 重载 / 拖拽定时器）、**`State` 组装**。其余在各枝：
+//!   * `app_boot.zig` —— 启动装配：库 / Live / 设置 / 缩略图 / 预览条 / 字体与上屏后端；
+//!   * `row_ui.zig`   —— 列表行的绘制、点击与拖拽、复制与选择表；
+//!   * `live.zig` / `live_adapt.zig` / `live_rescan.zig` —— 监听、翻译、重扫协作。
+//!
 //! 列表下方是预览区（`preview_panel.zig`）：本文件不认识任何媒体类型（ROADMAP M1）。
 //!
 //! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
@@ -19,26 +25,22 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
+const app_boot = @import("app_boot.zig");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const commands = @import("commands.zig");
 const drop_ui = @import("drop_ui.zig");
 const empty_state = @import("empty_state.zig");
-const filter = @import("filter.zig");
 const import_ui = @import("import_ui.zig");
-const library_io = @import("library_io.zig");
 const list_header = @import("list_header.zig");
 const live_mod = @import("live.zig");
 const mem_probe = @import("mem_probe.zig");
-const mode_mod = @import("mode.zig");
-const options_mod = @import("options.zig");
 const opacity_probe = @import("opacity_probe.zig");
+const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
-const preview_providers = @import("providers/root.zig");
-const row_thumb = @import("row_thumb.zig");
+const row_ui = @import("row_ui.zig");
 const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
-const settings_store = @import("settings_store.zig");
 const settings_ui = @import("settings_ui.zig");
 const thumbs_mod = @import("thumbs.zig");
 const thumbs_report = @import("thumbs_report.zig");
@@ -51,13 +53,7 @@ const ui = nanoui.ui;
 /// 轮询间隔：150ms 是「人眼觉得即时」与「闲时几乎不耗 CPU」的折中（监听线程自己阻塞在 ReadDirectoryChangesW 上）。
 const tick_ms: u64 = 150;
 
-/// 按住行后移动多少点算拖拽。和资源管理器一样，小于阈值的手抖仍按点击处理。
-const drag_threshold: f32 = 6;
-
-/// Ctrl+C 成功后的提示闪几拍。一拍 = `tick_ms`，10 拍 = 1.5 秒。
-const flash_ticks: u32 = 10;
-
-const State = struct {
+pub const State = struct {
     /// 选择表与拖拽快照的分配器（`init.gpa`，长生命周期；不是帧 arena）。
     gpa: std.mem.Allocator,
     live: *live_mod.Live,
@@ -103,10 +99,10 @@ const State = struct {
         // 不调用任何口岸。`Transport.execute` 返回后 `busy` 才落回 false。
         const busy = s.transport.busy;
         if (!busy) {
-            s.syncSelection();
-            s.resyncInput(c);
+            row_ui.syncSelection(s);
+            row_ui.resyncInput(s, c);
             // Ctrl+C：在构建树之前处理，`c.changed` 会让这一帧重建出表头提示。
-            if (c.shortcut(.{ .key = 'c', .ctrl = true })) s.copySelection(c);
+            if (c.shortcut(.{ .key = 'c', .ctrl = true })) row_ui.copySelection(s, c);
         }
 
         ui.column(c, .{ .width = .fill, .height = .fill });
@@ -121,9 +117,9 @@ const State = struct {
         };
         if (!busy) {
             const action = s.search.frame(c, s.samples, &s.selection, import_button);
-            if (action.filter_changed) s.noteSelection();
-            if (action.activate) s.activateCursor(c);
-            if (action.toggle_play) c.changed = s.preview.togglePlay(s.previewRow()) or c.changed;
+            if (action.filter_changed) row_ui.noteSelection(s);
+            if (action.activate) row_ui.activateCursor(s, c);
+            if (action.toggle_play) c.changed = s.preview.togglePlay(row_ui.previewRow(s)) or c.changed;
             // 模态选择框在 UI 线程上跑；取消不进状态机（见 `import_ui.begin`）。
             if (action.trailing_clicked) s.import.begin(window_util.nativeHandle(s.window));
         } else {
@@ -161,8 +157,8 @@ const State = struct {
         var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44 });
         while (rows.next()) |row| {
             const index = s.search.sampleAt(row) orelse continue;
-            const it = s.drawRow(c, row, index, s.samples[index]);
-            if (!busy) s.rowInput(c, index, it);
+            const it = row_ui.drawRow(s, c, row, index, s.samples[index]);
+            if (!busy) row_ui.rowInput(s, c, index, it);
         }
         rows.end();
 
@@ -176,183 +172,23 @@ const State = struct {
         if (!busy) {
             if (body_it.clicked) {
                 s.selection.clear();
-                s.cancelPress();
-                s.noteSelection();
+                row_ui.cancelPress(s);
+                row_ui.noteSelection(s);
                 c.changed = true;
             }
             // 松手（或按钮已经不在了）就放弃这次按压：定时器若还没跑，会看到空计划。
-            if (c.input.released or !c.input.down) s.cancelPress();
+            if (c.input.released or !c.input.down) row_ui.cancelPress(s);
         }
         // 列表到此为止：预览条必须是它的兄弟，不能变成列表的子节点。
         body.end();
 
         // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由 `tick` 接手。
-        s.preview.sync(s.previewRow());
+        s.preview.sync(row_ui.previewRow(s));
         s.preview.draw(c);
 
         s.reporter.report(s.thumbs, s.rows_with_image);
         // 设置面板是最后一层：遮罩 + 卡片覆盖列表，点击优先级由树序保证。
         s.settings.draw(c, s.thumbs, &s.update, window_util.nativeHandle(s.window));
-    }
-
-    /// 一行的绘制 + 交互。`row` 是过滤结果里的行号（显示用），`index` 是样本
-    /// 下标（选择/预览/拖拽用）。返回 pressable 的 Interaction 给 `rowInput`。
-    fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core.model.Sample) ui.Interaction {
-        const selected = s.selection.isSelected(index);
-        // 光标行：过滤后选择会被清空，但光标还要停在一个样本上（预览也跟着它）；选中底色更重。
-        const is_cursor = s.selection.cursor == index;
-        const style: ui.Style = .{
-            .direction = .row,
-            .width = .fill,
-            .height = .{ .px = 44 },
-            .padding = .xy(12, 0),
-            .gap = 10,
-            .align_items = .center,
-            // 选中底色：主题强调色的低透明度版本；未选中交给 hover 动画。
-            .background = if (selected) c.theme.accent.alpha(0.16) else if (is_cursor) c.theme.accent.alpha(0.07) else null,
-        };
-        // 选中行悬停时加深底色而不是换成 surface_hover——否则刚点过的行看起来像没选中。
-        const hover_color = if (selected) c.theme.accent.alpha(0.26) else if (is_cursor) c.theme.accent.alpha(0.14) else c.theme.surface_hover;
-        const it = ui.pressable(c, style, hover_color);
-        defer ui.end(c);
-
-        if (row_thumb.draw(c, s.thumbs, sample)) s.rows_with_image += 1;
-        // 行号是**过滤结果里的位置**（第 1 行是当前列表的第一行），不是样本下标。
-        ui.textf(c, .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
-        // 名字是唯一可截断的：后缀用次要色贴在名字后面，长名字先被省略号吃掉，后缀永远完整。
-        ui.text(c, sample.file_name, .{ .size = 13, .truncate = .ellipsis });
-        const ext = filter.trimExt(sample.file_ext);
-        if (ext.len > 0) ui.textf(c, .{ .size = 11, .color = c.theme.muted }, ".{s}", .{ext});
-        ui.textf(c, .{ .size = 11 }, "{d:.2}s", .{sample.duration});
-        return it;
-    }
-
-    /// 点击语义、拖拽阈值。Ctrl+点击在 nanoui 里不算 clicked（它被当成右键按下，
-    /// 见 `interact` 的 `right_pressed`），所以这里单独认。
-    fn rowInput(s: *State, c: *ui.Context, index: usize, it: ui.Interaction) void {
-        if (it.right_pressed and c.input.button == .left and c.input.ctrl) {
-            s.selection.click(index, .{ .ctrl = true });
-            s.cancelPress();
-            s.noteSelection();
-            c.changed = true;
-            return;
-        }
-        if (it.clicked) {
-            if (c.input.shift) {
-                s.search.selectVisible(c, &s.selection, index);
-            } else {
-                s.selection.click(index, .{});
-            }
-            s.cancelPress();
-            s.noteSelection();
-            c.changed = true;
-            return;
-        }
-        if (s.drag_ended or s.drag_armed or !it.pressed) return;
-        if (s.press_row == null) {
-            s.press_row = index;
-            s.press_origin = c.input.mouse;
-        }
-        if (s.press_row != index) return;
-        const dx = c.input.mouse.x - s.press_origin.x;
-        const dy = c.input.mouse.y - s.press_origin.y;
-        if (dx * dx + dy * dy <= drag_threshold * drag_threshold) return;
-        s.armDrag(c, index);
-    }
-
-    /// 选择集合变了就打一行：无头验收（`--nanoui-script` + snapshot）也能从
-    /// stdout 读到选中数，不用只靠看图。
-    fn noteSelection(s: *State) void {
-        std.debug.print("otto-lite: selected={d}/{d}\n", .{ s.selection.count(), s.samples.len });
-    }
-
-    /// 帧里：决定拖哪些行，把路径复制进 `Transport` 的快照，并挂一个 0ms 定时器。
-    /// 不在这里调 `drag.start`（它会阻塞到松手）。
-    fn armDrag(s: *State, c: *ui.Context, row: usize) void {
-        s.drag_armed = true;
-        const from_selection = s.selection.isSelected(row);
-        const indices = s.selection.dragIndices(c.alloc(), row) catch {
-            std.debug.print("otto-lite: 收集拖拽行号失败（OOM）\n", .{});
-            return;
-        };
-        s.transport.stage(s.samples, indices, row, from_selection) catch |err| {
-            std.debug.print("otto-lite: 拖拽快照失败（{s}）\n", .{@errorName(err)});
-            return;
-        };
-        std.debug.print(
-            "otto-lite: 待拖拽 row={d} files={d} from_selection={}\n",
-            .{ row, s.transport.stagedFiles(), from_selection },
-        );
-        nanoui.App.after(0, s, State.dragTimer);
-    }
-
-    /// 清掉一次按压的状态（松手、拖拽结束、空白点击）。定时器若之后才跑，
-    /// 会看到 `plan == null` 直接返回——这就是"松手前没拖成"的取消路径。
-    fn cancelPress(s: *State) void {
-        s.press_row = null;
-        s.drag_armed = false;
-        s.transport.cancel();
-    }
-
-    /// 拖拽刚结束时同步 nanoui 的鼠标状态。
-    ///
-    /// 为什么需要：OLE 的拖放循环把 `WM_LBUTTONUP` 交给了它自己创建的隐藏源窗口
-    /// （`zig/ports/src/drag_win.zig` 的 `createSourceWindow` + `SetCapture`），
-    /// nanoui 的 surface 收不到，`input.down` 会停在 true。于是"松手后移动鼠标"
-    /// 会被误判成还按着。这里只在**这一帧不是由新按下触发**时清掉，若 `pressed`
-    /// 为真说明用户已经重新按下，保留这次真实输入。
-    fn resyncInput(s: *State, c: *ui.Context) void {
-        if (!s.drag_ended) return;
-        s.drag_ended = false;
-        if (!c.input.pressed and c.input.down) {
-            c.input.down = false;
-            c.active = 0;
-        }
-        s.cancelPress();
-    }
-
-    /// Ctrl+C：复制选中集合；没有选中就用当前行；都没有就什么也不做。
-    fn copySelection(s: *State, c: *ui.Context) void {
-        const indices = s.selection.copyIndices(c.alloc()) catch return;
-        if (indices.len == 0) return;
-        const count = transport_mod.copy(c.alloc(), s.samples, indices) catch |err| {
-            std.debug.print(
-                "otto-lite: 复制失败 {s}（hresult=0x{x:0>8}）\n",
-                .{ @errorName(err), @as(u32, @bitCast(transport_mod.lastFailureCode())) },
-            );
-            return;
-        };
-        s.flash_left = flash_ticks;
-        s.flash_count = count;
-        c.changed = true;
-        std.debug.print("otto-lite: 已复制 {d} 个素材到剪贴板\n", .{count});
-    }
-
-    /// 选择表长度跟着样本数走；缩短时越界的锚点/当前行作废。
-    fn syncSelection(s: *State) void {
-        s.selection.resize(s.gpa, s.samples.len) catch {
-            std.debug.print("otto-lite: 选择表扩容失败（OOM）\n", .{});
-        };
-    }
-
-    /// 底部预览条要预览的那一行：最近点击的"当前行"；没有选中/越界就是 null。
-    /// 用 `cursor` 而不是"选中集合的第一个"，这样 Ctrl+点取消选中时预览条不闪。
-    fn previewRow(s: *const State) ?*const core.model.Sample {
-        const row = s.selection.cursor orelse return null;
-        if (row >= s.samples.len) return null;
-        return &s.samples[row];
-    }
-
-    /// Enter：预览当前行。预览条已经跟着光标装载；如果它是音频，这里开始播放。
-    fn activateCursor(s: *State, c: *ui.Context) void {
-        const sample = s.selection.cursor orelse return;
-        if (sample >= s.samples.len) return;
-        const playing = s.preview.playCurrent();
-        c.changed = true;
-        std.debug.print(
-            "otto-lite: enter row={d} sample={d} name={s} playing={}\n",
-            .{ (s.search.rowOfSample(sample) orelse 0) + 1, sample, s.samples[sample].file_name, playing },
-        );
     }
 
     /// 自续期定时器回调：poll 一次，有实际变更就重画；然后重新挂 150ms。
@@ -438,7 +274,8 @@ const State = struct {
     }
 
     /// 帧外（定时器）执行一次待拖拽。进入前把计划从 `Transport` 摘下来。
-    fn dragTimer(ctx: ?*anyopaque) callconv(.c) void {
+    /// `pub` 是因为 `row_ui.armDrag` 要拿它当定时器回调（跨文件引用声明）。
+    pub fn dragTimer(ctx: ?*anyopaque) callconv(.c) void {
         const s: *State = @ptrCast(@alignCast(ctx.?));
         if (s.transport.busy) return;
         const result = s.transport.execute(window_util.nativeHandle(s.window));
@@ -467,7 +304,7 @@ const State = struct {
                 );
             },
         }
-        s.cancelPress();
+        row_ui.cancelPress(s);
         if (s.window) |window| window.redraw();
     }
 };
@@ -488,69 +325,20 @@ pub fn main(init: std.process.Init) !void {
     }
     // `--mem-probe`：真实窗口形态的内存分解（隐藏窗口）；没开时 `begin`/`mark` 只是 bool 判断。
     var probe = mem_probe.Probe.begin(init, options);
-    // 位置参数优先；没有就按运行形态给默认库（见文件头）。格式按 magic 判断。
-    const library_path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
-    var library = try init.gpa.create(core.store.Library);
-    const opened = library_io.open(init, init.gpa, library_path) catch |err| {
-        // 存在但读不了 / 损坏：一行具名错误 + 退出 1（"不存在"已在 open 里变成空库）。
-        std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ library_path, @errorName(err) });
-        std.process.exit(1);
-    };
-    // 文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态。
-    library.* = opened.library;
-    if (opened.empty) std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{library_path});
-    trace.mark("setup.library");
-    probe.mark("library", .{});
-    defer {
-        library.deinit();
-        init.gpa.destroy(library);
-    }
-    const root = try mode_mod.watchRoot(allocator, init.io, options.watch_dir, library_path);
-    var live = try init.gpa.create(live_mod.Live);
-    errdefer init.gpa.destroy(live);
-    live.* = try live_mod.Live.init(init.gpa, init.io, library, root, options.watch_dir != null);
-    trace.mark("setup.live");
-    defer {
-        live.deinit();
-        init.gpa.destroy(live);
-    }
-    // 设置：dev 写 exe 旁边的 `.otto-settings.json`（不碰用户目录），
-    // portable / installed 写数据目录；读不到 / 坏了都用默认值（见 settings_store）。
-    const settings_path = settings_store.resolvePath(allocator, init.io) catch null;
-    const settings = settings_store.load(init.gpa, init.io, settings_path);
-    // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
-    // 运行形态决定：dev 没有 dataDir → null（不写盘）。预算来自设置；显式
-    // `--cache-budget-kib` 仍优先于设置里的 L3 值。
-    const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{ .isolation = !options.no_isolation, .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null, .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(), .budget_bytes = settings.l2BudgetBytes() });
-    defer thumbs.deinit();
-    // 预览条也用 `init.gpa`（工作线程分配位图/文本）。注册表只有一张
-    // （`providers/root.zig`）：UI、`--preview`、`--no-shell-preview` 共用同一份顺序。
-    const panel = try preview_panel.Panel.init(init.gpa, init.io, preview_providers.registryFor(options.no_shell_preview), .{});
-    defer panel.deinit();
-    // 字体索引只写进数据目录形态（portable/installed）；dev 传 null → 每次重扫。
-    // 上屏：默认 GDI（`--mem-probe` 实测比 D3D11 翻转交换链少 29 MiB 常驻、
-    // present 便宜一个数量级）；`--d3d` 回到旧的 D3D 路径（要 vsync 时用）。
-    const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });
-    trace.mark("setup.app");
-    // 验收探针：快照默认不开真实窗口，但置顶断言需要真 HWND；仍然 hidden。
-    if (options.settings_probe or options.drop_probe != null or options.set_opacity != null) {
-        app.gui = true;
-        app.flags.hidden = true;
-    }
-    // 探针窗口必须隐藏：不弹窗、不抢焦点、不进任务栏。
-    if (probe.active) app.flags.hidden = true;
-    probe.mark("app", .{});
-    defer app.destroy();
+    // 库 / Live / 设置 / 缩略图 / 预览条 / 字体与上屏后端：见 `app_boot.zig`。
+    var boot = try app_boot.boot(init, allocator, options, &probe);
+    defer boot.deinit();
+
     var state = State{
         .gpa = init.gpa,
-        .live = live,
-        .samples = live.samples(),
-        .thumbs = thumbs,
-        .preview = panel,
+        .live = boot.live,
+        .samples = boot.live.samples(),
+        .thumbs = boot.thumbs,
+        .preview = boot.preview,
         .search = search_ui.Search.init(init.gpa),
-        .import = try import_ui.Import.init(init.gpa, init.io, &library, &live, library_path),
-        .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse settings.update_url, options.no_exec, options.update_current),
-        .settings = try settings_ui.Panel.init(init.gpa, init.io, settings, settings_path, .{ .d3d = options.d3d }),
+        .import = try import_ui.Import.init(init.gpa, init.io, &boot.library, &boot.live, boot.library_path),
+        .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse boot.settings.update_url, options.no_exec, options.update_current),
+        .settings = try settings_ui.Panel.init(init.gpa, init.io, boot.settings, boot.settings_path, .{ .d3d = options.d3d }),
         .transport = transport_mod.Transport.init(init.gpa),
     };
     trace.mark("setup.state");
@@ -565,10 +353,10 @@ pub fn main(init: std.process.Init) !void {
     var title_buffer: [96]u8 = undefined;
     const title = version_mod.windowTitle(&title_buffer, state.samples.len);
     // `--bench-first-frame` 是离屏探针：不建真实 HWND，也不 show。
-    if (options.bench_first_frame) app.gui = false;
+    if (options.bench_first_frame) boot.app.gui = false;
     // `--bench-scroll`：真实窗口、屏外、从不激活；窗口由基准自己建，进程交给它。
-    if (options.bench_scroll != null) try bench_scroll.runCli(init, app, thumbs, options, .init(&state, State.view), title);
-    state.window = try app.newWindow(.{
+    if (options.bench_scroll != null) try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title);
+    state.window = try boot.app.newWindow(.{
         .title = title,
         .width = 380,
         .height = 700,
@@ -581,18 +369,18 @@ pub fn main(init: std.process.Init) !void {
     var drop: drop_ui.Drop = .{};
     drop.install(init.io, &state.import, options.drop_probe, state.window.?, nanoui.App.after);
     trace.mark("setup.window");
-    probe.mark("window", .{ .window = state.window, .thumbs = thumbs });
+    probe.mark("window", .{ .window = state.window, .thumbs = boot.thumbs });
     // 窗口状态启动时应用一次：置顶（true 才碰 Win32）+ 不透明度（重启后恢复）。
     // `--set-opacity` 走同一处：先应用启动状态，再按滑块路径改一次并落盘退出。
     opacity_probe.applyStartup(&state.settings, window_util.nativeHandle(state.window), options.set_opacity);
     if (options.bench_first_frame) {
-        try bench_mod.firstFrame(init, app, started);
+        try bench_mod.firstFrame(init, boot.app, started);
         // 一次性探针：打印完就退出，不 join 工作线程（冷启动取图不能算进首帧墙钟）。
         std.process.exit(0);
     }
     // snapshot 模式没有消息循环（`--nanoui-wait=<秒>` 才会跑事件循环、tick 重画）。
     nanoui.App.after(tick_ms, &state, State.tick);
     // 探针：D3D、8/50/100 张缩略图、空闲 10 秒，打完表就退出（不 join 工作线程）。
-    if (probe.active) probe.finish(state.window.?, thumbs);
-    try app.run();
+    if (probe.active) probe.finish(state.window.?, boot.thumbs);
+    try boot.app.run();
 }

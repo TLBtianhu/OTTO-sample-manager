@@ -23,7 +23,7 @@ fn testUpdate(phase: Phase) Update {
         .io = testing.io,
         .url = null,
         .updates_dir = null,
-        .phase = phase,
+        .state = .{ .phase = phase },
     };
 }
 
@@ -51,7 +51,7 @@ test "表头文案：available 带版本且按钮是「下载」" {
 
     var available = testUpdate(.available);
     const version = try semver.parse("0.2.0");
-    available.remote_len = (try version.formatInto(&available.remote)).len;
+    available.state.remote_len = (try version.formatInto(&available.state.remote)).len;
     try testing.expectEqualStrings("有新版本 0.2.0", available.status(&buffer).?);
     try testing.expectEqual(update_ui.Action.download, available.action());
     try testing.expectEqualStrings("下载", available.actionLabel(&buffer).?);
@@ -68,7 +68,7 @@ test "表头文案：up_to_date / ahead 不提示降级，也没有按钮" {
 
     var ahead = testUpdate(.ahead);
     const older = try semver.parse("0.0.9");
-    ahead.remote_len = (try older.formatInto(&ahead.remote)).len;
+    ahead.state.remote_len = (try older.formatInto(&ahead.state.remote)).len;
     try testing.expectEqualStrings("本地版本更新 (0.0.9)", ahead.status(&buffer).?);
     try testing.expectEqual(update_ui.Action.none, ahead.action());
 }
@@ -77,22 +77,22 @@ test "表头文案：downloading 显示百分比或字节；verified 是「已�
     var buffer: [160]u8 = undefined;
 
     var downloading = testUpdate(.downloading);
-    downloading.progress.total.store(1_629_043, .monotonic);
-    downloading.progress.written.store(407_260, .monotonic);
+    downloading.state.progress.total.store(1_629_043, .monotonic);
+    downloading.state.progress.written.store(407_260, .monotonic);
     try testing.expectEqualStrings("正在下载… 24%（397/1590 KiB）", downloading.status(&buffer).?);
     try testing.expectEqual(update_ui.Action.none, downloading.action());
 
     // 对方没给 Content-Length：只报已下载字节。
     var unknown = testUpdate(.downloading);
-    unknown.progress.written.store(2048, .monotonic);
+    unknown.state.progress.written.store(2048, .monotonic);
     try testing.expectEqualStrings("正在下载… 2048 字节", unknown.status(&buffer).?);
 
     var verified = testUpdate(.verified);
     const version = try semver.parse("0.3.0");
-    verified.package_version_len = (try version.formatInto(&verified.package_version)).len;
+    verified.state.package_version_len = (try version.formatInto(&verified.state.package_version)).len;
     const path = "C:\\Users\\me\\AppData\\Roaming\\OTTO\\updates\\otto-lite-0.3.0-setup.exe";
-    verified.package_path_len = path.len;
-    @memcpy(verified.package_path[0..path.len], path);
+    verified.state.package_path_len = path.len;
+    @memcpy(verified.state.package_path[0..path.len], path);
 
     try testing.expectEqualStrings("已下载，可安装", verified.status(&buffer).?);
     try testing.expectEqual(update_ui.Action.install, verified.action());
@@ -111,7 +111,7 @@ test "poll：检查线程的结果落地成 available + 可下载 URL" {
     update.report = report;
     update.finished.store(true, .release);
     try testing.expect(update.poll());
-    try testing.expectEqual(Phase.available, update.phase);
+    try testing.expectEqual(Phase.available, update.state.phase);
 
     var buffer: [160]u8 = undefined;
     try testing.expectEqualStrings("有新版本 0.2.0", update.status(&buffer).?);
@@ -132,7 +132,7 @@ test "poll：下载线程成功 → verified；失败 → failed 且文案是「
     update.download_report = report;
     update.finished.store(true, .release);
     try testing.expect(update.poll());
-    try testing.expectEqual(Phase.verified, update.phase);
+    try testing.expectEqual(Phase.verified, update.state.phase);
 
     var buffer: [160]u8 = undefined;
     try testing.expectEqualStrings("已下载，可安装", update.status(&buffer).?);
@@ -143,7 +143,7 @@ test "poll：下载线程成功 → verified；失败 → failed 且文案是「
     failed.download_report = .{ .ok = false, .error_name = "SignatureMismatch" };
     failed.finished.store(true, .release);
     try testing.expect(failed.poll());
-    try testing.expectEqual(Phase.failed, failed.phase);
+    try testing.expectEqual(Phase.failed, failed.state.phase);
     try testing.expectEqualStrings("签名不匹配", failed.status(&buffer).?);
     try testing.expectEqual(update_ui.Action.none, failed.action());
 }
@@ -152,14 +152,14 @@ test "install：--no-exec 只打印路径；文件不存在是 failed 且不执�
     var update = testUpdate(.verified);
     update.no_exec = true;
     const version = try semver.parse("0.3.0");
-    update.package_version_len = (try version.formatInto(&update.package_version)).len;
+    update.state.package_version_len = (try version.formatInto(&update.state.package_version)).len;
 
     // 不存在的路径：install 先 access 再决定，返回 false 且状态是 failed。
     const missing = "C:\\definitely-not-here\\otto-lite-0.3.0-setup.exe";
-    update.package_path_len = missing.len;
-    @memcpy(update.package_path[0..missing.len], missing);
+    update.state.package_path_len = missing.len;
+    @memcpy(update.state.package_path[0..missing.len], missing);
     try testing.expect(!update.install());
-    try testing.expectEqual(Phase.failed, update.phase);
+    try testing.expectEqual(Phase.failed, update.state.phase);
     var buffer: [160]u8 = undefined;
     try testing.expectEqualStrings("安装文件不存在", update.status(&buffer).?);
 }

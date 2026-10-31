@@ -1,5 +1,9 @@
 //! 命令行选项：只消费 app 自己的带值标志，`--nanoui-*` 留给 nanoui 自己解析。
-//! 放在单独文件里，是为了让 `main.zig` 只保留 UI 与生命周期（单文件 ≤600 行）。
+//! 放在单独文件里，是为了让 `main.zig` 只保留 UI 与生命周期。
+//!
+//! 本文件只有三样东西：`Options` 结构（**字段名是契约**，别的模块按名取）、
+//! 遍历参数的总 dispatch、以及解析层的单元测试。每个族的解析函数在
+//! `options_parse.zig`（标志字符串也只写在那里，这里没有第二份）。
 //!
 //! `library_path` 是 `null` 表示"调用方没指定位置参数"：实际路径由
 //! `mode.defaultLibraryPath` 按运行形态给出（dev 用 fixtures，便携/安装用数据目录）。
@@ -7,6 +11,7 @@
 
 const std = @import("std");
 const usage = @import("usage.zig");
+const options_parse = @import("options_parse.zig");
 
 /// `--convert <in.json> <out.otto>` 的两个位置值。用 struct 而不是两个可选字段，
 /// 避免"有输入没输出"这种只可能来自解析 bug 的中间状态。
@@ -113,242 +118,29 @@ pub const Options = struct {
     update_url: ?[]const u8 = null,
 };
 
-pub fn parse(args: anytype) error{ MissingValue, InvalidValue, InvalidOpacity }!Options {
+/// `parse` 可能失败的三件事：标志缺值、值非法、`--set-opacity` 的百分数越界。
+pub const ParseError = options_parse.Error;
+
+/// 遍历参数，按功能族依次问一遍（`options_parse` 里每组一个函数）；
+/// 一族都没认领、又不以 `--` 开头的，就是位置参数（库路径）。
+///
+/// `continue` 会照常执行 `while` 的 `index += 1`，所以消费了值的那次由族函数
+/// 把游标多推一格——和原来逐分支 `index += 1` 的推进完全一致。
+pub fn parse(args: anytype) ParseError!Options {
     var options = Options{};
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg: []const u8 = args[index];
-        if (std.mem.eql(u8, arg, "--version")) {
-            options.version_requested = true;
-        } else if (std.mem.eql(u8, arg, "--demo-transport")) {
-            options.demo_transport = true;
-        } else if (std.mem.eql(u8, arg, "--demo-thumbs")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.demo_thumbs_dir = args[index];
-        } else if (std.mem.eql(u8, arg, "--preview")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.preview_path = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--preview=")) {
-            options.preview_path = arg["--preview=".len..];
-        } else if (std.mem.eql(u8, arg, "--play-test")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.play_test_path = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--play-test=")) {
-            options.play_test_path = arg["--play-test=".len..];
-        } else if (std.mem.eql(u8, arg, "--seek-at")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.seek_at_ms = try parseMillis(args[index]);
-        } else if (std.mem.startsWith(u8, arg, "--seek-at=")) {
-            options.seek_at_ms = try parseMillis(arg["--seek-at=".len..]);
-        } else if (std.mem.eql(u8, arg, "--demo")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.demo_dir = args[index];
-        } else if (std.mem.eql(u8, arg, "--demo-rescan")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.demo_rescan_dir = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--demo-rescan=")) {
-            options.demo_rescan_dir = arg["--demo-rescan=".len..];
-        } else if (std.mem.eql(u8, arg, "--watch")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.watch_dir = args[index];
-        } else if (std.mem.eql(u8, arg, "--copy-now")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.copy_now = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--copy-now=")) {
-            options.copy_now = arg["--copy-now=".len..];
-        } else if (std.mem.eql(u8, arg, "--select")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.select = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--select=")) {
-            options.select = arg["--select=".len..];
-        } else if (std.mem.eql(u8, arg, "--filter") or std.mem.eql(u8, arg, "--filter-ext")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            if (std.mem.eql(u8, arg, "--filter")) options.filter = args[index] else options.filter_ext = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--filter=")) {
-            options.filter = arg["--filter=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--filter-ext=")) {
-            options.filter_ext = arg["--filter-ext=".len..];
-        } else if (std.mem.eql(u8, arg, "--convert")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            const input = args[index];
-            index += 1;
-            if (index == args.len or std.mem.startsWith(u8, args[index], "--")) return error.MissingValue;
-            options.convert = .{ .input = input, .output = args[index] };
-        } else if (std.mem.startsWith(u8, arg, "--convert=")) {
-            const input = arg["--convert=".len..];
-            index += 1;
-            if (index == args.len or std.mem.startsWith(u8, args[index], "--")) return error.MissingValue;
-            options.convert = .{ .input = input, .output = args[index] };
-        } else if (std.mem.eql(u8, arg, "--library-info")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.library_info = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--library-info=")) {
-            options.library_info = arg["--library-info=".len..];
-        } else if (std.mem.eql(u8, arg, "--import")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.import_dir = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--import=")) {
-            options.import_dir = arg["--import=".len..];
-        } else if (std.mem.eql(u8, arg, "--import-into")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.import_into = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--import-into=")) {
-            options.import_into = arg["--import-into=".len..];
-        } else if (std.mem.eql(u8, arg, "--library")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.import_library = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--library=")) {
-            options.import_library = arg["--library=".len..];
-        } else if (std.mem.eql(u8, arg, "--save")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.save_path = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--save=")) {
-            options.save_path = arg["--save=".len..];
-        } else if (std.mem.eql(u8, arg, "--no-isolation")) {
-            options.no_isolation = true;
-        } else if (std.mem.eql(u8, arg, "--no-shell-preview")) {
-            options.no_shell_preview = true;
-        } else if (std.mem.eql(u8, arg, "--cache-budget-kib")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.disk_cache_budget_bytes = try kibToBytes(args[index]);
-            options.cache_budget_set = true;
-        } else if (std.mem.startsWith(u8, arg, "--cache-budget-kib=")) {
-            options.disk_cache_budget_bytes = try kibToBytes(arg["--cache-budget-kib=".len..]);
-            options.cache_budget_set = true;
-        } else if (std.mem.eql(u8, arg, "--settings-probe")) {
-            options.settings_probe = true;
-        } else if (std.mem.eql(u8, arg, "--set-opacity")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.set_opacity = try parsePercent(args[index]);
-        } else if (std.mem.startsWith(u8, arg, "--set-opacity=")) {
-            options.set_opacity = try parsePercent(arg["--set-opacity=".len..]);
-        } else if (std.mem.startsWith(u8, arg, "--drop-probe=")) {
-            options.drop_probe = arg["--drop-probe=".len..];
-        } else if (std.mem.eql(u8, arg, "--thumb-bench")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.thumb_bench_dir = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--thumb-bench=")) {
-            options.thumb_bench_dir = arg["--thumb-bench=".len..];
-        } else if (std.mem.eql(u8, arg, "--bench")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.bench = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--bench=")) {
-            options.bench = arg["--bench=".len..];
-        } else if (std.mem.eql(u8, arg, "--bench-samples")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.bench_samples = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--bench-samples=")) {
-            options.bench_samples = arg["--bench-samples=".len..];
-        } else if (std.mem.eql(u8, arg, "--bench-scroll")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.bench_scroll = args[index];
-            // 真实窗口的基准要加载同一个库：它不走 `--bench` 那条自读库的路，
-            // 而是照常启动 UI，所以这里把库路径一并给 `main`。
-            options.library_path = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--bench-scroll=")) {
-            options.bench_scroll = arg["--bench-scroll=".len..];
-            options.library_path = options.bench_scroll;
-        } else if (std.mem.eql(u8, arg, "--bench-scroll-edge")) {
-            options.bench_scroll_edge = true;
-        } else if (std.mem.eql(u8, arg, "--frames")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.frames = try parseCount(args[index]);
-        } else if (std.mem.startsWith(u8, arg, "--frames=")) {
-            options.frames = try parseCount(arg["--frames=".len..]);
-        } else if (std.mem.eql(u8, arg, "--scroll-notches")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.scroll_notches = try parseCount(args[index]);
-        } else if (std.mem.startsWith(u8, arg, "--scroll-notches=")) {
-            options.scroll_notches = try parseCount(arg["--scroll-notches=".len..]);
-        } else if (std.mem.eql(u8, arg, "--bench-first-frame")) {
-            options.bench_first_frame = true;
-        } else if (std.mem.eql(u8, arg, "--mem-probe")) {
-            options.mem_probe = true;
-        } else if (std.mem.eql(u8, arg, "--d3d")) {
-            options.d3d = true;
-        } else if (std.mem.startsWith(u8, arg, "--mem-probe-idle=")) {
-            options.mem_probe_idle = std.fmt.parseFloat(f64, arg["--mem-probe-idle=".len..]) catch 10;
-        } else if (std.mem.eql(u8, arg, "--check-update")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.check_update = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--check-update=")) {
-            options.check_update = arg["--check-update=".len..];
-        } else if (std.mem.eql(u8, arg, "--update-download")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.update_download = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--update-download=")) {
-            options.update_download = arg["--update-download=".len..];
-        } else if (std.mem.eql(u8, arg, "--no-exec")) {
-            options.no_exec = true;
-        } else if (std.mem.eql(u8, arg, "--update-current")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.update_current = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--update-current=")) {
-            options.update_current = arg["--update-current=".len..];
-        } else if (std.mem.eql(u8, arg, "--update-url")) {
-            index += 1;
-            if (index == args.len) return error.MissingValue;
-            options.update_url = args[index];
-        } else if (std.mem.startsWith(u8, arg, "--update-url=")) {
-            options.update_url = arg["--update-url=".len..];
-        } else if (!std.mem.startsWith(u8, arg, "--")) {
-            options.library_path = arg;
-        }
+        if (try options_parse.demo(&options, args, &index, arg)) continue;
+        if (try options_parse.preview(&options, args, &index, arg)) continue;
+        if (try options_parse.importing(&options, args, &index, arg)) continue;
+        if (try options_parse.update(&options, args, &index, arg)) continue;
+        if (try options_parse.bench(&options, args, &index, arg)) continue;
+        if (try options_parse.filter(&options, args, &index, arg)) continue;
+        if (try options_parse.misc(&options, args, &index, arg)) continue;
+        if (!std.mem.startsWith(u8, arg, "--")) options.library_path = arg;
     }
     return options;
-}
-
-/// `--set-opacity` 的百分数：0..100 的整数（0 合法）；非数字/越界是 `InvalidOpacity`。
-fn parsePercent(text: []const u8) error{InvalidOpacity}!u8 {
-    const percent = std.fmt.parseInt(u8, text, 10) catch return error.InvalidOpacity;
-    if (percent > 100) return error.InvalidOpacity;
-    return percent;
-}
-
-/// `--cache-budget-kib` 的值：非负 KiB → 字节。溢出按 u64 饱和（预算没有上限语义，
-/// 饱和到天文数字等价于「不淘汰」，不会回绕成 0 把缓存删光）。
-fn kibToBytes(text: []const u8) error{InvalidValue}!u64 {
-    const kib = std.fmt.parseInt(u64, text, 10) catch return error.InvalidValue;
-    return kib *| 1024;
-}
-
-/// `--frames` / `--scroll-notches`：正整数；0 是一张空表，按非法值拒绝，不静默。
-fn parseCount(text: []const u8) error{InvalidValue}!u32 {
-    const count = std.fmt.parseInt(u32, text, 10) catch return error.InvalidValue;
-    if (count == 0) return error.InvalidValue;
-    return count;
-}
-
-/// `--seek-at` 的毫秒数：0 合法（跳回开头），负数/非数字报 InvalidValue。
-fn parseMillis(text: []const u8) error{InvalidValue}!u64 {
-    return std.fmt.parseInt(u64, text, 10) catch error.InvalidValue;
 }
 
 /// 命令行用法（`usage.zig`：纯数据，和解析器没有逻辑耦合；入口和调用方都不变）。
