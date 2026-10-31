@@ -54,4 +54,13 @@ test {
     _ = @import("update_check.zig");
     // 更新检查的接线：表头文案、poll 落地、本地 feed 的三种判定与信封失败。
     _ = @import("update_ui.zig");
+    _ = @import("update_ui_test.zig");
+    // `--check-update` 的一行格式。
+    _ = @import("update_cli.zig");
+    // 下载 → 流式哈希 → 验签 → 落盘（真安装包 + 真 .sig；缺失时 Skip）。
+    _ = @import("update_download.zig");
+    _ = @import("update_download_test.zig");
+    // 启动安装包的判断（>32 才算成功）；真的 ShellExecute 只由 --no-exec 之外的
+    // 人工验收触发，测试进程绝不执行安装包。
+    _ = @import("installer.zig");
 }

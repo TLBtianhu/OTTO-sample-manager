@@ -38,9 +38,13 @@
 //!     说明这份 feed 不是我们签的，检查直接失败。
 //!
 //! `verifySignatureFile` 是真正的整包验证（Ed25519 + BLAKE2b-512），已经用真实的
-//! `otto-lite-0.1.1-setup.exe` 与 `.sig` 钉住；它要等下载到安装包之后才会被调用，
-//! **本轮不下载、不替换**。所以"检查通过"只代表"feed 自称的版本更高、且签名信封
-//! 出自我们的密钥"，不代表"安装包可信"——后者必须是下载之后对**文件内容**的验签。
+//! `otto-lite-0.1.1-setup.exe` 与 `.sig` 钉住。下载链路（`update_download.zig`）
+//! 不把 64 MiB 的安装包读进内存，而是分块喂 BLAKE2b-512，最后用
+//! `verifyPrehashedSignature` 对摘要验 Ed25519；两个函数共用同一套信封/公钥
+//! 解码，`verifySignatureFile` 只是"先整段哈希，再走摘要入口"的薄封装。
+//!
+//! 所以"检查通过"只代表"feed 自称的版本更高、且签名信封出自我们的密钥"，
+//! 不代表"安装包可信"——后者必须是下载之后对**文件内容**的验签。
 //!
 //! ## 判定
 //!
@@ -309,26 +313,55 @@ pub fn inspectSignature(pubkey_b64: []const u8, sig_b64: []const u8) SignatureCh
     return .ok;
 }
 
+/// BLAKE2b-512 摘要长度。`ED` 变体签的就是这 64 字节。
+pub const digest_length = std.crypto.hash.blake2.Blake2b512.digest_length;
+
 /// 真正的整包验证（纯函数）：`ED` 先对内容做 BLAKE2b-512 再验 Ed25519，
 /// `Ed` 直接对内容验。任何结构问题、key id 不匹配、签名不符都返回 `false`。
 ///
-/// 本轮**没有调用点**：它要等下载到安装包之后才用得上；现在先用真实
-/// `otto-lite-0.1.1-setup.exe` + `.sig` 的测试向量把它钉住。
+/// 大文件请用 `verifyPrehashedSignature`：先分块哈希，再拿摘要进来，避免把
+/// 整个安装包读进内存。本函数保留给"内容已经在手里"的调用方与测试向量。
 pub fn verifySignatureFile(
     pubkey_b64: []const u8,
     sig_b64: []const u8,
     file_bytes: []const u8,
 ) bool {
+    const signature = decodeSignature(sig_b64) orelse return false;
     if (inspectSignature(pubkey_b64, sig_b64) != .ok) return false;
+
+    if (algorithmPrehashed(signature.algorithm)) {
+        var digest: [digest_length]u8 = undefined;
+        std.crypto.hash.blake2.Blake2b512.hash(file_bytes, &digest, .{});
+        return verifyPrehashedSignature(pubkey_b64, sig_b64, &digest);
+    }
+    return verifyMessage(pubkey_b64, sig_b64, file_bytes);
+}
+
+/// 对**预先算好的 BLAKE2b-512 摘要**验 Ed25519（minisign 的 `ED` 变体）。
+///
+/// 这是下载链路的入口：文件分块读一遍，摘要由 `update_download.zig` 流式算出，
+/// 这里不再碰文件。`Ed`（直接签）没有可用的预哈希形式，返回 `false`——我们的
+/// 发行物都是 `ED`（Tauri 的默认），这个边界写在 README 里。
+pub fn verifyPrehashedSignature(
+    pubkey_b64: []const u8,
+    sig_b64: []const u8,
+    digest: *const [digest_length]u8,
+) bool {
+    if (inspectSignature(pubkey_b64, sig_b64) != .ok) return false;
+    const signature = decodeSignature(sig_b64) orelse return false;
+    if (!algorithmPrehashed(signature.algorithm)) return false;
+
+    const public = decodePublicKey(pubkey_b64) orelse return false;
+    const key = std.crypto.sign.Ed25519.PublicKey.fromBytes(public.bytes) catch return false;
+    const sig = std.crypto.sign.Ed25519.Signature.fromBytes(signature.bytes);
+    sig.verify(digest[0..], key) catch return false;
+    return true;
+}
+
+/// `Ed`（直接签）：消息必须完整在手里。只有 `verifySignatureFile` 会走这里。
+fn verifyMessage(pubkey_b64: []const u8, sig_b64: []const u8, message: []const u8) bool {
     const public = decodePublicKey(pubkey_b64) orelse return false;
     const signature = decodeSignature(sig_b64) orelse return false;
-
-    var digest: [std.crypto.hash.blake2.Blake2b512.digest_length]u8 = undefined;
-    const message: []const u8 = if (algorithmPrehashed(signature.algorithm)) blk: {
-        std.crypto.hash.blake2.Blake2b512.hash(file_bytes, &digest, .{});
-        break :blk &digest;
-    } else file_bytes;
-
     const key = std.crypto.sign.Ed25519.PublicKey.fromBytes(public.bytes) catch return false;
     const sig = std.crypto.sign.Ed25519.Signature.fromBytes(signature.bytes);
     sig.verify(message, key) catch return false;
@@ -528,6 +561,23 @@ test "真安装包 + 真 .sig：内置公钥验过；改一个字节就不过（
     // 预哈希变体：先 BLAKE2b-512 再验 Ed25519——与 tools/verify-minisign.js 一致。
     try testing.expectEqual(SignatureCheck.ok, inspectSignature(public_key_b64, signature));
     try testing.expect(verifySignatureFile(public_key_b64, signature, exe_bytes));
+
+    // 流式路径：分块 update，最后拿摘要验签——和整段哈希必须得到同一个结论。
+    // 下载链路用的就是这条路径（64 MiB 安装包不整读进内存）。
+    var hasher = std.crypto.hash.blake2.Blake2b512.init(.{});
+    var offset: usize = 0;
+    while (offset < exe_bytes.len) {
+        const end = @min(offset + 64 * 1024, exe_bytes.len);
+        hasher.update(exe_bytes[offset..end]);
+        offset = end;
+    }
+    const digest = hasher.finalResult();
+    try testing.expect(verifyPrehashedSignature(public_key_b64, signature, &digest));
+
+    // 摘要错一个字节也不行。
+    var wrong_digest = digest;
+    wrong_digest[0] ^= 0x01;
+    try testing.expect(!verifyPrehashedSignature(public_key_b64, signature, &wrong_digest));
 
     // 篡改一个字节：验的是内容，不是"文件存在"。
     const tampered = try testing.allocator.dupe(u8, exe_bytes);
