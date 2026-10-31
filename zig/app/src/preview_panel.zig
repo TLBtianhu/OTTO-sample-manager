@@ -122,10 +122,13 @@ pub const Panel = struct {
 
     /// 每帧调一次，告诉预览条"现在选中的是哪一条"（null = 没有选中）。
     ///
+    /// `estimated` = 选中样本的时长是不是估算的：事实摘要与列表行用同一个 `≈`
+    /// 口径。指纹（路径 + mtime + size）不变时不重建，所以正常播放/重画不会重读。
+    ///
     /// 只在**指纹变化**时提交新请求：路径 + mtime + size 都没变就什么都不做，
     /// 避免每帧重复打开同一个文件。变化时先清掉旧画面（不拿上一个文件的图冒充
     /// 当前文件），再交给工作线程；事实（`sample_facts`）同时换掉，与 Outcome 无关。
-    pub fn sync(self: *Panel, sample: ?*const core.model.Sample) void {
+    pub fn sync(self: *Panel, sample: ?*const core.model.Sample, estimated: bool) void {
         if (self.matches(sample)) return;
 
         self.clearCurrent();
@@ -144,7 +147,7 @@ pub const Panel = struct {
             self.requested_mtime = s.mtime;
             self.requested_size = s.file_size;
             // 事实无条件显示：即使随后 OOM / provider 全部谢绝，名字和路径还在。
-            self.facts = sample_facts.init(self.allocator, s) catch null;
+            self.facts = sample_facts.init(self.allocator, s, estimated) catch null;
         }
 
         var snapshot: ?Snapshot = null;

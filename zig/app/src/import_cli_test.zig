@@ -106,7 +106,8 @@ test "去重：同一路径优先于身份；没有身份时身份规则不误�
 
     // 没有身份的旧样本：只按路径去重，不会被"同大小同 mtime"误判。
     var legacy = try core.store.load(allocator, "{\"samples\":{\"old\":{\"filePath\":\"C:\\\\x\\\\a.wav\"}}}");
-    defer legacy.deinit();    var legacy_dedupe = try import_cli.Dedupe.init(allocator, &legacy);
+    defer legacy.deinit();
+    var legacy_dedupe = try import_cli.Dedupe.init(allocator, &legacy);
     defer legacy_dedupe.deinit(allocator);
     try testing.expectEqual(import_cli.Verdict.duplicate_path, legacy_dedupe.classify(.{
         .path = "C:\\x\\a.wav",
@@ -141,6 +142,7 @@ test "buildSample：名称去扩展名、时长换算、无 L1 时 pending_metad
         .channels = 1,
         .bits = 16,
         .kind = .wav,
+        .estimated = false,
     };
     const sample = import_cli.buildSample(fact, metadata, "im_test", 1_800_000_000_000);
 
@@ -196,7 +198,8 @@ fn escapeBackslashes(path: []const u8, buffer: []u8) []const u8 {
 }
 
 /// 16 位单声道 WAV；`frames` 决定时长。
-fn buildWav(sample_rate: u32, frames: usize) ![]u8 {    const data_bytes: u32 = @intCast(frames * 2);
+fn buildWav(sample_rate: u32, frames: usize) ![]u8 {
+    const data_bytes: u32 = @intCast(frames * 2);
     const bytes = try allocator.alloc(u8, 44 + data_bytes);
     @memcpy(bytes[0..4], "RIFF");
     std.mem.writeInt(u32, bytes[4..8], @intCast(bytes.len - 8), .little);
@@ -386,8 +389,7 @@ test "端到端：--library 载入旧 JSON 后合并，只追加缺的那条" {
     var escaped_buffer: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
     const escaped = escapeBackslashes(a_path, &escaped_buffer);
     var json_buffer: [std.Io.Dir.max_path_bytes * 2 + 128]u8 = undefined;
-    const json = try std.fmt.bufPrint(&json_buffer,
-        "{{\"samples\":{{\"old_a\":{{\"id\":\"old_a\",\"filePath\":\"{s}\"}}}}}}", .{escaped});
+    const json = try std.fmt.bufPrint(&json_buffer, "{{\"samples\":{{\"old_a\":{{\"id\":\"old_a\",\"filePath\":\"{s}\"}}}}}}", .{escaped});
     try output.tmp.dir.writeFile(io, .{ .sub_path = "old.json", .data = json });
 
     var out_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
