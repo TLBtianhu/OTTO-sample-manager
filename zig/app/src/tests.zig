@@ -34,6 +34,11 @@ test {
     _ = @import("rescan_ui.zig");
     _ = @import("rescan_test.zig");
     _ = @import("thumbs_test.zig");
+    // 取图队列的优先级规则（预取不能饿死可见请求）与空闲预取的窗口/节流。
+    _ = @import("thumbs_queue.zig");
+    _ = @import("thumbs_prefetch.zig");
+    // 行就绪探针（`--bench-scroll` 的 ready/visited 账）。
+    _ = @import("row_probe.zig");
     // 行内小图的 provider 入口、深拷贝快照与失败/谢绝键表（缓存键在 thumbs_test）。
     _ = @import("thumbs_icon.zig");
     _ = @import("thumbs_keys.zig");

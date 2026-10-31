@@ -26,8 +26,22 @@ param(
   [switch]$Release,
   [switch]$NoBuild,
   [switch]$Edge,
+  # Turn the idle prefetch off (--no-prefetch). The only difference from the
+  # default run; the A/B pair for the prefetch acceptance is
+  #   scroll.ps1 -NoBuild -Release -Frames 120 -DistinctFiles
+  #   scroll.ps1 -NoBuild -Release -Frames 120 -DistinctFiles -NoPrefetch
+  [switch]$NoPrefetch,
+  # Give every row its OWN copy of an image instead of reusing 100 files.
+  # With 100 shared files only 100 cache keys exist, so a 130-row window keeps
+  # hitting rows whose image was fetched earlier - the ready/visited ratio then
+  # saturates for both modes and says nothing about prefetch. Distinct copies
+  # make "first time this row is visible" the interesting moment.
+  [switch]$DistinctFiles,
   [int]$Frames = 300,
   [int]$Rows = 2000,
+  # Wheel notches per beat (1 = 48 pt = about 1.09 rows). -Notches 4 is the
+  # "fast scroll" case: ~4.4 rows per 16 ms frame.
+  [int]$Notches = 1,
   [string]$Zig = 'C:\Users\30680\zig\zig-x86_64-windows-0.17.0\zig.exe'
 )
 
@@ -60,32 +74,37 @@ if (-not $NoBuild) {
   }
 }
 
-# --- the benchmark's library: N rows over 100 real image files ----------------
+# --- the benchmark's library: N rows over real image files -------------------
+# Default: 100 copies reused by all rows (the historical setup). -DistinctFiles:
+# one copy per row, so every row owns a distinct cache key (see the param doc).
 if (Test-Path $benchRoot) { Remove-Item -Recurse -Force $benchRoot -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Path $filesDir -Force | Out-Null
 $sources = Get-ChildItem $Samples -File |
   Where-Object { $_.Extension -in '.bmp', '.png', '.jpg', '.jpeg', '.gif' } |
   Sort-Object Name
 if ($sources.Count -eq 0) { throw "no image files in $Samples" }
+$fileCount = if ($DistinctFiles) { $Rows } else { 100 }
 
-for ($i = 0; $i -lt 100; $i++) {
+for ($i = 0; $i -lt $fileCount; $i++) {
   $src = $sources[$i % $sources.Count]
-  $dst = Join-Path $filesDir ('f{0:D3}{1}' -f $i, $src.Extension)
+  $dst = Join-Path $filesDir ('f{0:D4}{1}' -f $i, $src.Extension)
   Copy-Item $src.FullName $dst
 }
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append('{"samples":{')
 for ($i = 0; $i -lt $Rows; $i++) {
-  $name = 'f{0:D3}{1}' -f ($i % 100), $sources[($i % 100) % $sources.Count].Extension
+  $fileIndex = if ($DistinctFiles) { $i } else { $i % $fileCount }
+  $ext = $sources[$fileIndex % $sources.Count].Extension
+  $name = 'f{0:D4}{1}' -f $fileIndex, $ext
   # JSON needs the backslashes escaped; the app wants a Windows path.
   $full = (Join-Path $filesDir $name).Replace('\', '\\')
   if ($i -gt 0) { [void]$sb.Append(',') }
-  [void]$sb.Append(('"s_{0}":{{"id":"s_{0}","fileName":"sample {0:D4}","fileExt":"{1}","filePath":"{2}","folderId":"folder_scroll","importedAt":{3},"duration":{4}}}' -f $i, $sources[($i % 100) % $sources.Count].Extension, $full, (1000 + $i), ([math]::Round(0.4 + ($i % 50) * 0.1, 2))))
+  [void]$sb.Append(('"s_{0}":{{"id":"s_{0}","fileName":"sample {0:D4}","fileExt":"{1}","filePath":"{2}","folderId":"folder_scroll","importedAt":{3},"duration":{4}}}' -f $i, $ext, $full, (1000 + $i), ([math]::Round(0.4 + ($i % 50) * 0.1, 2))))
 }
 [void]$sb.Append('},"groups":{"g_scroll":{"id":"g_scroll","name":"scroll"}}}')
 [System.IO.File]::WriteAllText($library, $sb.ToString())
-Write-Output ("== bench library: {0} rows, 100 image files under {1} ==" -f $Rows, $filesDir)
+Write-Output ("== bench library: {0} rows, {1} image files under {2} ==" -f $Rows, $fileCount, $filesDir)
 
 Add-Type -TypeDefinition @'
 using System;
@@ -157,8 +176,9 @@ $summary = @()
 foreach ($run in $runs) {
   Write-Output ''
   Write-Output ("== run: {0} ==" -f $run.Name)
-  $argv = @('--bench-scroll', $library, "--frames=$Frames", '--scroll-notches=1') + $run.Arg
+  $argv = @('--bench-scroll', $library, "--frames=$Frames", "--scroll-notches=$Notches") + $run.Arg
   if ($Edge) { $argv += '--bench-scroll-edge' }
+  if ($NoPrefetch) { $argv += '--no-prefetch' }
   $fgBefore = [ScrollFocus]::GetForegroundWindow()
   [ScrollFocus]::StartSampling()
   try {
@@ -181,23 +201,38 @@ foreach ($run in $runs) {
     (-not [ScrollFocus]::SawForeground([long]$ourHwnd)))
   Write-Output ("== exit={0} foreground before=0x{1:x} after=0x{2:x} samples={3} distinct={4} seen=[{5}] our_hwnd={6} never_foreground={7} ==" -f $code, $fgBefore.ToInt64(), $fgAfter.ToInt64(), [ScrollFocus]::SampleCount, [ScrollFocus]::DistinctCount, [ScrollFocus]::SeenText(), $ourText, $neverOurs)
   $line = $output | Where-Object { $_ -match '^scroll-bench: summary ' } | Select-Object -Last 1
+  # Prefetch acceptance: rows that became visible during the measured section and
+  # how many of them ALREADY had their icon on that first frame.
+  $pf = [regex]::Match(($output -join "`n"), 'prefetch enabled=(\S+) visited=(\d+) ready_arriving=(\d+) \(([0-9.]+)%\).*prefetched=(\d+)')
+  $pfVisited = $null; $pfReady = $null; $pfPct = $null; $pfEnqueued = $null; $pfOn = $null
+  if ($pf.Success) {
+    $pfOn = $pf.Groups[1].Value
+    $pfVisited = [int]$pf.Groups[2].Value
+    $pfReady = [int]$pf.Groups[3].Value
+    $pfPct = [double]$pf.Groups[4].Value
+    $pfEnqueued = [int]$pf.Groups[5].Value
+  }
   if ($line -match 'summary mode=(\S+) fps=([0-9.]+).*p95=([0-9.]+) max=([0-9.]+) drops=(\d+)/(\d+).*work_p95=([0-9.]+) ws_mib=([0-9.]+) verdict=(\S+)') {
     $summary += [pscustomobject]@{
       Mode = $Matches[1]; Fps = [double]$Matches[2]; P95 = [double]$Matches[3]; Max = [double]$Matches[4]
       Drops = [int]$Matches[5]; Intervals = [int]$Matches[6]; WorkP95 = [double]$Matches[7]
       WsMiB = [double]$Matches[8]; Verdict = $Matches[9]
+      PfOn = $pfOn; PfVisited = $pfVisited; PfReady = $pfReady; PfPct = $pfPct; PfEnqueued = $pfEnqueued
     }
   } else {
-    $summary += [pscustomobject]@{ Mode = $run.Name; Fps = $null; P95 = $null; Max = $null; Drops = $null; Intervals = $null; WorkP95 = $null; WsMiB = $null; Verdict = 'no-summary' }
+    $summary += [pscustomobject]@{ Mode = $run.Name; Fps = $null; P95 = $null; Max = $null; Drops = $null; Intervals = $null; WorkP95 = $null; WsMiB = $null; Verdict = 'no-summary'; PfOn = $pfOn; PfVisited = $pfVisited; PfReady = $pfReady; PfPct = $pfPct; PfEnqueued = $pfEnqueued }
     Write-Output ("run did not print a summary line (exit {0})" -f $code)
   }
 }
 
 Write-Output ''
-Write-Output '== summary: real-window scroll, 2000 rows with 100 images (60 Hz target) =='
+Write-Output '== summary: real-window scroll (60 Hz target) =='
 $summary | ForEach-Object {
   $dropPct = if ($null -eq $_.Intervals -or $_.Intervals -eq 0) { 'n/a' } else { '{0:N1}%' -f (100.0 * $_.Drops / $_.Intervals) }
-  Write-Output ("  {0,-4} fps={1,6:N2}  p95={2,5:N2} ms  max={3,6:N2} ms  drops={4}/{5} {6,6}  work_p95={7,5:N2} ms  ws={8,6:N2} MiB  {9}" -f $_.Mode, $_.Fps, $_.P95, $_.Max, $_.Drops, $_.Intervals, $dropPct, $_.WorkP95, $_.WsMiB, $_.Verdict)
+  $readyText = if ($null -eq $_.PfVisited) { 'ready=n/a' } else { 'ready={0}/{1} ({2:N1}%)' -f $_.PfReady, $_.PfVisited, $_.PfPct }
+  Write-Output ("  {0,-4} fps={1,6:N2}  p95={2,5:N2} ms  max={3,6:N2} ms  drops={4}/{5} {6,6}  work_p95={7,5:N2} ms  ws={8,6:N2} MiB  prefetch={9,-5} {10}  {11}" -f $_.Mode, $_.Fps, $_.P95, $_.Max, $_.Drops, $_.Intervals, $dropPct, $_.WorkP95, $_.WsMiB, $_.PfOn, $readyText, $_.Verdict)
 }
+Write-Output ''
+Write-Output ("== A/B: run again with -NoPrefetch to compare (rows={0} frames={1} distinct={2}) ==" -f $Rows, $Frames, [bool]$DistinctFiles)
 
 exit 0

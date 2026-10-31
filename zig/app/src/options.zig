@@ -61,6 +61,9 @@ pub const Options = struct {
     save_path: ?[]const u8 = null,
     /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
     no_isolation: bool = false,
+    /// `--no-prefetch`：关掉空闲预取（滚动停下后提前取视口上下几十行）。
+    /// 只影响"提前取"，可见行的取图路径完全不变——对比实验只差这一项。
+    no_prefetch: bool = false,
     /// `--no-shell-preview`：预览注册表去掉 Shell 缩略图，音频/图片/视频 provider
     /// 仍然自给自足（验收"不依赖系统缩略图"；见 `providers/root.zig`，不是日常选项）。
     no_shell_preview: bool = false,
