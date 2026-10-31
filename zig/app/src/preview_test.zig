@@ -183,12 +183,13 @@ test "跳过不支持的 provider，落到下一个" {
     }
 }
 
-test "谢绝（none.*）不是最终答案：继续问下一个，成功分支才终止" {
+test "谢绝（unsupported）不是最终答案：继续问下一个，成功分支才终止" {
     decline_calls = 0;
     second_open_calls = 0;
 
-    // thumb 声明"可能行"，open 却谢绝；后面那个 provider 才是真正能出答案的。
-    const providers = [_]*const preview.Provider{ &failed_provider, &second_provider };
+    // 一个 provider 声明"可能行"，open 却谢绝为 unsupported；后面那个才是真正
+    // 能出答案的。谢绝必须继续问，不能被前面的能力不足永久堵死。
+    const providers = [_]*const preview.Provider{ &unsupported_provider, &second_provider };
     const registry: preview.Registry = .{ .providers = &providers };
 
     const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
@@ -201,6 +202,38 @@ test "谢绝（none.*）不是最终答案：继续问下一个，成功分支�
         .text => |text| try testing.expectEqualStrings("second", text),
         else => return error.ExpectedText,
     }
+}
+
+test "认领后 failed：到此为止，后面的 provider 连 supports 都不再被问" {
+    decline_calls = 0;
+    second_open_calls = 0;
+    second_supports_calls = 0;
+
+    const providers = [_]*const preview.Provider{ &failed_provider, &second_provider };
+    const registry: preview.Registry = .{ .providers = &providers };
+
+    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
+
+    try testing.expectEqual(@as(u32, 1), decline_calls);
+    try testing.expectEqual(@as(u32, 0), second_supports_calls);
+    try testing.expectEqual(@as(u32, 0), second_open_calls);
+    try testing.expect(answered.provider == &failed_provider);
+    try testing.expectEqual(preview.Reason.failed, answered.outcome.none);
+}
+
+test "认领后 file_missing：同样到此为止，不被后面的 unsupported 降级" {
+    decline_calls = 0;
+    second_open_calls = 0;
+
+    const providers = [_]*const preview.Provider{ &file_missing_provider, &unsupported_provider };
+    const registry: preview.Registry = .{ .providers = &providers };
+
+    const answered = try registry.openAnswered(testing.allocator, .{ .sample = &fake_sample, .max_px = 64 });
+
+    try testing.expectEqual(@as(u32, 1), decline_calls);
+    try testing.expectEqual(@as(u32, 0), second_open_calls);
+    try testing.expect(answered.provider == &file_missing_provider);
+    try testing.expectEqual(preview.Reason.file_missing, answered.outcome.none);
 }
 
 test "no_handler 谢绝之后，后面的 provider 出图并赢" {
@@ -225,10 +258,11 @@ test "no_handler 谢绝之后，后面的 provider 出图并赢" {
     }
 }
 
-test "全部谢绝：最终原因按 file_missing > failed > no_handler > unsupported" {
+test "全部谢绝：最终原因按 no_handler > unsupported；认领后失败直接终止" {
     const request: preview.Request = .{ .sample = &fake_sample, .max_px = 64 };
 
     {
+        // 前两个只是谢绝，第三个认领后 failed：它就是最终答案，不再继续。
         const providers = [_]*const preview.Provider{ &unsupported_provider, &no_handler_provider, &failed_provider };
         const registry: preview.Registry = .{ .providers = &providers };
         const answered = try registry.openAnswered(testing.allocator, request);
@@ -236,6 +270,7 @@ test "全部谢绝：最终原因按 file_missing > failed > no_handler > unsupp
         try testing.expect(answered.provider == &failed_provider);
     }
     {
+        // 只有谢绝：no_handler 比 unsupported 更具体。
         const providers = [_]*const preview.Provider{ &unsupported_provider, &no_handler_provider };
         const registry: preview.Registry = .{ .providers = &providers };
         const answered = try registry.openAnswered(testing.allocator, request);
@@ -243,14 +278,15 @@ test "全部谢绝：最终原因按 file_missing > failed > no_handler > unsupp
         try testing.expect(answered.provider == &no_handler_provider);
     }
     {
-        const providers = [_]*const preview.Provider{ &unsupported_provider, &failed_provider, &file_missing_provider };
+        // file_missing 也是认领后失败：它先出现就终止，不会被后面补成 failed。
+        const providers = [_]*const preview.Provider{ &file_missing_provider, &failed_provider, &unsupported_provider };
         const registry: preview.Registry = .{ .providers = &providers };
         const answered = try registry.openAnswered(testing.allocator, request);
         try testing.expectEqual(preview.Reason.file_missing, answered.outcome.none);
         try testing.expect(answered.provider == &file_missing_provider);
     }
     {
-        // 出现顺序不影响优先级：最具体的那个赢。
+        // 出现顺序不影响终止：failed 在 unsupported 之前，答案仍是 failed。
         const providers = [_]*const preview.Provider{ &failed_provider, &unsupported_provider };
         const registry: preview.Registry = .{ .providers = &providers };
         const answered = try registry.openAnswered(testing.allocator, request);
@@ -263,6 +299,13 @@ test "全部谢绝：最终原因按 file_missing > failed > no_handler > unsupp
         const answered = try registry.openAnswered(testing.allocator, request);
         try testing.expectEqual(preview.Reason.unsupported, answered.outcome.none);
     }
+}
+
+test "isTerminal：只有 failed / file_missing 终止查找" {
+    try testing.expect(preview.isTerminal(.failed));
+    try testing.expect(preview.isTerminal(.file_missing));
+    try testing.expect(!preview.isTerminal(.unsupported));
+    try testing.expect(!preview.isTerminal(.no_handler));
 }
 
 test "唯一的 provider 谢绝 no_handler：最终原因仍是 no_handler，不会退化成 unsupported" {

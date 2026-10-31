@@ -10,6 +10,11 @@
 //! 的 PCM 搬进内存。`mf-audio` 走另一条 MF seek 采样，是否开启由实测开销决定
 //! （见 `providers/mf_audio.zig` 与报告）。
 //!
+//! 只做 **PCM / float** 的粗采样：ADPCM 与 G.711 的负载布局不同，窗口里的几个
+//! 字节不能复用同一个 `frameValue`。这类 WAV 的图标**谢绝为 `unsupported`**，
+//! 由 Shell 静态图或占位接手——绝不为一个 32px 图标解整段音频（音频预览本身
+//! 仍由 zig-audio 正常解码）。
+//!
 //! 颜色是中间调的蓝：浅色 / 深色两套轨道的底色上都能看见，不依赖主题。
 //! 本文件只碰音频文件与像素，不碰窗口、不 import nanoui。
 
@@ -57,6 +62,12 @@ pub fn wavIcon(allocator: std.mem.Allocator, path: []const u8, max_px: u32) Erro
 
     const frame_bytes = header.frameBytes();
     if (frame_bytes == 0) return error.Empty;
+    // wav_header 与 peaks 各有一个 pcm/float 枚举：粗采样是两者的边界，在这里
+    // 显式转换，而不是让任何一个模块去 import 对方的类型。
+    const sample_format: @import("pcm.zig").SampleFormat = switch (header.format) {
+        .pcm => .pcm,
+        .float => .float,
+    };
     const available = reader.size -| @as(u64, header.data_offset);
     const data_size = @min(header.data_size, available);
     const frames = data_size / frame_bytes;
@@ -87,7 +98,7 @@ pub fn wavIcon(allocator: std.mem.Allocator, path: []const u8, max_px: u32) Erro
         var index: usize = 0;
         while (index < want_frames) : (index += 1) {
             const frame = buffer[index * frame_bytes ..][0..frame_bytes];
-            const value = peaks_mod.frameValue(frame, 0, header.channels, header.bits, header.format);
+            const value = peaks_mod.frameValue(frame, 0, header.channels, header.bits, sample_format);
             low = @min(low, value);
             high = @max(high, value);
         }

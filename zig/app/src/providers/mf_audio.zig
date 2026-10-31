@@ -1,6 +1,6 @@
 //! Media Foundation 音频 provider：**MP3 / M4A / AAC / WMA 试听**。
 //!
-//! 与 `providers/audio.zig`（WAV，自写解析 + WASAPI）并列，两者产出同一种
+//! 与 `providers/audio.zig`（WAV，zig-audio 解码 + WASAPI）并列，两者产出同一种
 //! `preview.AudioSession`，视图不认识"这段 PCM 是 WAV 解的还是 MF 解的"。
 //!
 //! ## 调用链
@@ -26,16 +26,24 @@
 //!
 //! `supports` 只看扩展名（mp3 / m4a / aac / wma），**不读注册表、不查
 //! `MFGetAttribute`、不打开文件**。理由和 WAV provider 相同：MF 是系统组件，
-//! 装了就有；没装（`MFStartup` 失败）时 `open` 会给出 `none.failed`，注册表继续
-//! 问下一个 provider。能力表能提供的额外信息只有"这台机器会不会解这个扩展名"，
-//! 而那个答案在 `open` 里本来就拿到了——用不上第二张表，也不值得为它把
-//! 注册表读进 preview.zig。
+//! 装了就有；没装（`MFStartup` 失败）时 `open` 会给出 `none.unsupported`（这台
+//! 机器没有这个解码能力），注册表继续问下一个 provider。能力表能提供的额外信息
+//! 只有"这台机器会不会解这个扩展名"，而那个答案在 `open` 里本来就拿到了——用不上
+//! 第二张表，也不值得为它把注册表读进 preview.zig。
 //!
 //! ## 内存
 //!
 //! 整段 PCM 进内存（与 WAV provider 同一量级：一首 5 分钟 MP3 解出来约 50 MiB）。
-//! 硬上限 512 MiB 与 `audio/file.zig` 一致；超了就 `none.failed`，不赌分配器。
+//! 硬上限 512 MiB 与 `audio/decode.zig` 一致；超了就 `none.failed`，不赌分配器。
 //! 音频文件本身不被整个读进内存——SourceReader 自己流式读。
+//!
+//! ## 错误 → 四态（统一规则）
+//!
+//! `unsupported` / `no_handler` = 不是我的格式、或不是我能解的编码 → 谢绝，注册表
+//! 继续问下一个；`failed` / `file_missing` = 认领了、但文件损坏 / IO 出错 → 到此
+//! 为止。本 provider 把 `MFStartup` 不可用（`Unavailable`）归为 `unsupported`
+//! ——那是"这台机器没有这个解码能力"，不是文件损坏；`MediaTypeChanged` / `Failed`
+//! 才是认领后解码失败。读取完整的分类见 `decline`。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -306,11 +314,13 @@ fn decline(err: mf.Error, path: []const u8) preview.Error!preview.Outcome {
         error.FileNotFound => .{ .none = .file_missing },
         error.InvalidPath => .{ .none = .unsupported },
         error.Unavailable => blk: {
+            // 系统组件不可用 = 这台机器上没有这个解码能力，不是文件坏了：
+            // 按四态规则是 unsupported（谢绝），注册表继续问下一个。
             std.debug.print(
                 "otto-lite: Media Foundation 不可用，MF 音频预览谢绝（{s} hresult=0x{x:0>8}）\n",
                 .{ path, @as(u32, @bitCast(mf.lastHresult())) },
             );
-            break :blk .{ .none = .failed };
+            break :blk .{ .none = .unsupported };
         },
         error.MediaTypeChanged, error.Failed => blk: {
             std.debug.print(

@@ -1,26 +1,30 @@
 //! WAV（RIFF/WAVE）**头部**解析：只读块头与 `fmt `，不碰 `data` 的负载。
 //!
 //! 为什么单独一个文件：解析一份、两处使用——
-//!   * `zig/app/src/audio/wav.zig` 解码播放时用完整的块索引取 `data`；
+//!   * `zig/app/src/audio/coarse.zig` 的图标粗采样只读头部 + 32 个等距窗口；
 //!   * `zig/ports/src/probe.zig` 只读前 64 KiB 取 L1 元数据（时长/采样率/声道）。
 //!
+//! **整段解码不在这里**：WAV/FLAC/MP3/AIFF 都交给 vendor 的 zig-audio
+//! （`zig/app/src/audio/decode.zig`），app 侧已经没有 WAV 解码器。本文件只服务
+//! "不读整段 PCM"的头部读取，所以**不需要**支持 ADPCM / G.711 的负载布局——遇到
+//! 这些编码返回 `UnsupportedFormat`，由调用方决定是谢绝还是让 Shell 兜底。
+//!
 //! 复制两份块扫描逻辑迟早会漂移（奇数块 padding、未知块、`fmt ` 在 `data` 之后、
-//! EXTENSIBLE 子格式），所以这里定义唯一的规则集，两边都从这里拿。
+//! EXTENSIBLE 子格式），所以这里定义唯一的规则集，两处都从这里拿。
 //!
 //! ## 与完整解码的差别：`data` 的负载可以不在这段字节里
 //!
 //! probe 只读文件头，`data` 块声明的长度通常远大于窗口。因此 `parse` 遇到
 //! `data` 时**记下偏移与声明长度就停**，不要求负载存在；调用方自己决定：
-//!   * 解码器要求 `data_offset + data_size <= bytes.len`，否则 `Truncated`；
-//!   * probe 用 `stat` 的文件大小做同样的核对，声明大于实有就当作截断、返回 null。
+//!   * 图标粗采样用 `stat` 的文件大小核对，声明大于实有就当作截断；
+//!   * probe 用 `stat` 的文件大小做同样的核对，声明大于实有就返回 null。
 //!
 //! 其余块（`fmt ` 与未知块）必须完整落在给定字节里，否则无法可靠地继续找
 //! `data`，返回 `Truncated`——不猜。
 //!
-//! 支持面与 `audio/wav.zig` 一致：PCM 8/16/24/32、IEEE float 32、
-//! WAVE_FORMAT_EXTENSIBLE 里的这两种子格式；别的（ADPCM / A-law / float64…）
-//! 返回 `UnsupportedFormat`。本文件是**纯字节解析**：不读文件、不分配、不 import
-//! 任何平台模块。
+//! 支持面：PCM 8/16/24/32、IEEE float 32、WAVE_FORMAT_EXTENSIBLE 里的这两种子格式；
+//! 别的（ADPCM / A-law / µ-law / float64…）返回 `UnsupportedFormat`。本文件是
+//! **纯字节解析**：不读文件、不分配、不 import 任何平台模块。
 
 const std = @import("std");
 

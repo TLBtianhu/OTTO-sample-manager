@@ -22,8 +22,8 @@
 //!   * `audio/waveform.zig` —— 峰值到位图的尺寸、BGRA 顺序、静音细线与越界写；
 //!   * `providers/`     —— 缩略图 provider 的纯逻辑（真实 Shell 取图由
 //!                         `--preview` / `--demo-thumbs` 覆盖）与音频 provider 的
-//!                         `supports`/文件缺失分支；`audio/wav.zig` 的解析测试也随
-//!                         这个 import 一起进来（真实播放由 `--play-test` 覆盖）。
+//!                         `supports`/文件缺失分支；WAV/FLAC/MP3/AIFF 的整段解码
+//!                         测试在 `audio/decode_test.zig`（真实播放由 `--play-test` 覆盖）。
 //!   * `providers/image*.zig` —— WIC 解码链与图片 provider（真 PNG/BMP/缩放/坏文件）；
 //!                         WIC 是系统解码器，不需要窗口、Shell 或音频设备。
 test {
@@ -75,9 +75,13 @@ test {
     _ = @import("media_key.zig");
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");
+    // 解码层：zig-audio 的 WAV 全变体 / AIFF / 老编码，以及四态映射。
+    _ = @import("audio/decode_test.zig");
     // 多声道下混的文件级回归：真 FLAC/WAV（ffmpeg 现场生成，缺失时 Skip）。
     _ = @import("audio/downmix_files_test.zig");
     _ = @import("providers/root.zig");
+    // 真实注册表的 legacy 对照：.wav 里装 FLAC、截断 ADPCM、AIFF 改名 .xyz。
+    _ = @import("providers/legacy_registry_test.zig");
     // 纯 Zig 音频 provider 的两侧测试：FLAC（含 ffmpeg 逐字节 SHA）与 MP3
     // （真 viper.mp3 的时长/样本数 + 与 ffmpeg 的逐样本对比）。拆文件是为了
     // provider 正文只留解码路径。

@@ -43,12 +43,14 @@ fn tempPath(tmp: *testing.TmpDir, name: []const u8) ![]u8 {
     return std.fs.path.join(testing.allocator, &.{ root_buffer[0..root_len], name });
 }
 
-test "supports：.mp3 归 native-audio 管（大小写不敏感），其它不归" {
+test "supports：.mp3 归 native-audio 管（大小写不敏感），.wav/.aiff 也声明，别的不管" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try testing.expect(native_audio.supports(&sampleWith(".mp3")));
     try testing.expect(native_audio.supports(&sampleWith(".MP3")));
     try testing.expect(native_audio.supports(&sampleWith(".Flac")));
-    for ([_][]const u8{ ".wav", ".m4a", ".aac", ".mp3x", "" }) |ext| {
+    try testing.expect(native_audio.supports(&sampleWith(".wav")));
+    try testing.expect(native_audio.supports(&sampleWith(".aiff")));
+    for ([_][]const u8{ ".aifc", ".m4a", ".aac", ".mp3x", "" }) |ext| {
         try testing.expect(!native_audio.supports(&sampleWith(ext)));
     }
 }

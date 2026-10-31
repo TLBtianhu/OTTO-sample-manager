@@ -1,12 +1,12 @@
-//! `providers/native_audio.zig` 的 FLAC 侧测试（supports、文件缺失、坏文件、
-//! 真 FLAC 的整段解码 / 过零点 / 与 ffmpeg 逐字节一致、流式内存与读次数、6 声道下混）。
+//! `providers/native_audio.zig` 的 FLAC / AIFF 侧测试（supports、文件缺失、坏文件、
+//! 真 FLAC 的整段解码 / 过零点 / 与 ffmpeg 逐字节一致、流式内存与读次数、6 声道下混，
+//! 以及 AIFF PCM16/PCM24 与 AIFC 的谢绝）。
 //!
 //! 从 provider 文件里拆出来是为了守住单文件行数（provider 正文只留解码路径）；
 //! MP3 侧的测试在 `native_audio_mp3_test.zig`。两个文件都由 `tests.zig` 导入。
 //!
-//! 需要 `C:\src\otto-testkit\samples\tone_660.flac` 的用例在缺素材时
-//! `SkipZigTest`（和 `audio/downmix_files_test.zig` 的既有做法一致），不把外部
-//! 素材变成测试的硬依赖。
+//! 需要 `C:\src\otto-testkit\samples` 或 `C:\src\zig-audio-vectors\legacy` 的用例
+//! 在缺素材时 `SkipZigTest`，不把外部素材变成测试的硬依赖。
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,7 +15,7 @@ const native_audio = @import("native_audio.zig");
 const file_reader_mod = @import("../audio/file_reader.zig");
 const preview = @import("../preview.zig");
 const test_support = @import("../audio/test_support.zig");
-const wav = @import("../audio/wav.zig");
+const pcm = @import("../audio/pcm.zig");
 
 const testing = std.testing;
 
@@ -28,11 +28,13 @@ fn sampleWith(ext: []const u8) core.model.Sample {
     };
 }
 
-test "supports：.flac 归 native-audio 管，.wav/.ogg/.mp4 不归" {
+test "supports：.flac/.wav/.mp3/.aiff/.aif 归 native-audio 管；.aifc/.ogg/.mp4 不归" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try testing.expect(native_audio.supports(&sampleWith(".flac")));
-    try testing.expect(native_audio.supports(&sampleWith(".FLAC")));
-    for ([_][]const u8{ ".wav", ".ogg", ".mp4", ".flacx", "" }) |ext| {
+    for ([_][]const u8{ ".flac", ".FLAC", ".wav", ".WAV", ".mp3", ".aiff", ".AIF", ".aif" }) |ext| {
+        try testing.expect(native_audio.supports(&sampleWith(ext)));
+    }
+    // `.aifc` 明确不在声明里：压缩 AIFC 在库中是 Unsupported，不假装能接。
+    for ([_][]const u8{ ".aifc", ".ogg", ".mp4", ".flacx", "" }) |ext| {
         try testing.expect(!native_audio.supports(&sampleWith(ext)));
     }
 }
@@ -93,7 +95,7 @@ test "真 FLAC：66150 帧 / 44100Hz / 单声道 / 1500ms，且是 660Hz 正弦"
     try testing.expectEqual(@as(u32, 44_100), decoded.sample_rate);
     try testing.expectEqual(@as(u16, 1), decoded.channels);
     try testing.expectEqual(@as(u16, 16), decoded.bits);
-    try testing.expectEqual(wav.SampleFormat.pcm, decoded.format);
+    try testing.expectEqual(pcm.SampleFormat.pcm, decoded.format);
     try testing.expectEqual(@as(u64, 66_150), decoded.frames);
     try testing.expectEqual(@as(u64, 1500), decoded.duration_ms);
     try testing.expectEqual(@as(usize, 66_150 * 2), decoded.pcm.len);
@@ -214,6 +216,67 @@ test "流式 512 KiB：峰值分配远小于文件、读次数 > 1（不是整�
         "otto-lite: streaming-512k file={d}B peak_alloc={d}B reads={d} avg_read={d}B pcm={d}B\n",
         .{ padded.len, tracker.peak, stats.reads, avg, decoded.pcm.len },
     );
+}
+
+test "真 AIFF PCM16：88200 帧 / 44100Hz / 单声道 / 2s，非静音" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const path = "C:\\src\\zig-audio-vectors\\legacy\\aiff-s16.aiff";
+    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.SkipZigTest;
+
+    var decoded = try native_audio.decode(testing.allocator, path);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 44_100), decoded.sample_rate);
+    try testing.expectEqual(@as(u16, 1), decoded.channels);
+    try testing.expectEqual(@as(u16, 16), decoded.bits);
+    try testing.expectEqual(pcm.SampleFormat.pcm, decoded.format);
+    try testing.expectEqual(@as(u64, 88_200), decoded.frames);
+    try testing.expectEqual(@as(u64, 2_000), decoded.duration_ms);
+    try testing.expectEqual(@as(usize, 88_200 * 2), decoded.pcm.len);
+
+    var peak: i32 = 0;
+    for (std.mem.bytesAsSlice(i16, decoded.pcm)) |sample| {
+        const value: i32 = sample;
+        peak = @max(peak, if (value < 0) -value else value);
+    }
+    try testing.expect(peak > 1_000);
+}
+
+test "真 AIFF PCM24：库内降到 i16，帧数/时长与 PCM16 一致" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const path = "C:\\src\\zig-audio-vectors\\legacy\\aiff-s24.aiff";
+    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.SkipZigTest;
+
+    var decoded = try native_audio.decode(testing.allocator, path);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 44_100), decoded.sample_rate);
+    try testing.expectEqual(@as(u16, 1), decoded.channels);
+    try testing.expectEqual(@as(u64, 88_200), decoded.frames);
+    try testing.expectEqual(@as(usize, 88_200 * 2), decoded.pcm.len);
+}
+
+test "AIFC（压缩 AIFF）：库给出 Unsupported，provider 谢绝而不是 failed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const path = "C:\\src\\zig-audio-vectors\\legacy\\aiff-s16.aiff";
+    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buffer);
+    const aifc_path = try std.fs.path.join(testing.allocator, &.{ root_buffer[0..root_len], "compressed.aifc" });
+    defer testing.allocator.free(aifc_path);
+
+    // 把 FORM 的 AIFF 改成 AIFC：库在 open 阶段就明确拒绝，不猜压缩类型。
+    const source = try std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(1024 * 1024));
+    defer testing.allocator.free(source);
+    @memcpy(source[8..12], "AIFC");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "compressed.aifc", .data = source });
+
+    try testing.expectError(error.Unsupported, native_audio.decode(testing.allocator, aifc_path));
+    // 扩展名本身不声明：没人会误以为 `.aifc` 归这里。
+    try testing.expect(!native_audio.supports(&sampleWith(".aifc")));
 }
 
 test "6 声道 FLAC：ffmpeg 生成 → 解码成 2 声道、帧数/时长不变、左右一致" {

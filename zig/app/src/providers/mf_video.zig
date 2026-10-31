@@ -43,6 +43,13 @@
 //!
 //! 只读第一帧：SourceReader 自己按块读文件，不把整个 MP4 读进内存。转换后立刻
 //! 释放样本缓冲，只留下 ≤ max_px² 的 BGRA 位图。
+//!
+//! ## 错误 → 四态（统一规则）
+//!
+//! `unsupported` / `no_handler` = 不是我的格式、或不是我能解的编码 → 谢绝，注册表
+//! 继续问下一个；`failed` / `file_missing` = 认领了、但文件损坏 / IO 出错 → 到此
+//! 为止。`MFStartup` 不可用（`Unavailable`）归 `unsupported`，`MediaTypeChanged` /
+//! `Failed` 才是认领后解码失败；完整分类见 `decline`。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -180,11 +187,13 @@ fn decline(err: mf.Error, path: []const u8) preview.Error!preview.Outcome {
         error.FileNotFound => .{ .none = .file_missing },
         error.InvalidPath => .{ .none = .unsupported },
         error.Unavailable => blk: {
+            // 系统组件不可用 = 这台机器没有这个解码能力，不是文件坏了：
+            // 按四态规则是 unsupported（谢绝），注册表继续问下一个。
             std.debug.print(
                 "otto-lite: Media Foundation 不可用，MF 视频预览谢绝（{s} hresult=0x{x:0>8}）\n",
                 .{ path, @as(u32, @bitCast(mf.lastHresult())) },
             );
-            break :blk .{ .none = .failed };
+            break :blk .{ .none = .unsupported };
         },
         error.MediaTypeChanged, error.Failed => failed(path, @errorName(err)),
     };

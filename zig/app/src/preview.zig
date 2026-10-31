@@ -17,28 +17,40 @@
 //!      Zig 里能存进结构体的运行时字段的是函数指针。签名一字未改。
 //!   3. **`Error` 与 `Outcome.deinit`**：ROADMAP 写了 `Error!Outcome` 却没定义
 //!      `Error`。这里把它收成一个 `OutOfMemory`——**"文件读不出来"不是错误，是
-//!      `none.*` 的一次谢绝**；错误只在"连 outcome 都构造不出来"时出现。
+//!      `none.*` 的一次作答**（谢绝或认领后失败）；错误只在"连 outcome 都构造
+//!      不出来"时出现。
 //!
-//! ## 谢绝（decline）：`none.*` 不是最终答案
+//! ## 谢绝（decline）与四态：一张统一的映射表
 //!
-//! `supports` 只能做**廉价声明**（读注册表、看元数据），真正的能力要到 `open` 才知道：
-//! 本机 `caps` 对 `.wav` 说"有 handler"，`thumb.get` 却给 `NoHandler`，这就是典型。
-//! 所以注册表的规则是：
+//! `supports` 只能做**廉价声明**（读注册表、看扩展名/元数据），真正的能力要到
+//! `open` 才知道：本机 `caps` 对 `.wav` 说"有 handler"，`thumb.get` 却给
+//! `NoHandler`，这就是典型。所以四态的含义必须**每个 provider 都照同一张表**，
+//! 四者不许合并：
+//!
+//! ```
+//! unsupported / no_handler = 不是我的格式、或不是我能解的编码 → 谢绝，继续问下一个
+//! failed / file_missing    = 认领了、但文件损坏 / IO 出错   → 到此为止（最终答案）
+//! ```
+//!
+//! 落成注册表规则：
 //!
 //!   1. 跳过 `supports == false` 的 provider（它没声明要接）；
 //!   2. 对 `supports == true` 的 provider 调 `open`；
-//!   3. **只有成功分支**（`image` / `audio` / `frames` / `text`）终止查找；
-//!   4. `open` 返回 `none.*` 只是一次**谢绝**，继续问下一个 provider；
-//!   5. 全部谢绝时，最终原因取**最具体**的那个：
-//!      `file_missing > failed > no_handler > unsupported`；
-//!      一个 provider 都没声明接手时仍是 `none.unsupported`。
+//!   3. **成功分支**（`image` / `audio` / `frames` / `text`）终止查找；
+//!   4. `none.unsupported` / `none.no_handler` 是一次**谢绝**，继续问下一个；
+//!   5. `none.failed` / `none.file_missing` 是**认领后的失败**，直接作为最终答案
+//!      返回——文件已经坏了/没了，再让 Shell 去画一张静态图不是更诚实的答案。
+//!      它们也不会被后面 provider 的 `unsupported` 降级；
+//!   6. 全部谢绝时，最终原因取最具体的那个：`no_handler > unsupported`；一个
+//!      provider 都没声明接手时仍是 `none.unsupported`。
 //!
-//! 这样"新 provider 必须排在 thumb 前面"不再是隐性纪律：thumb 谢绝后注册表会继续问。
-//! （注意：如果 thumb 在某个机器上**成功**出了图，它仍然先赢；想让音频播放压过
-//! Shell 静态图，provider 顺序依然是一种偏好表达，见 `providers/root.zig`。）
+//! 这条规则同时解释了 `--preview` 的三个对照实验：截断的 ADPCM WAV 是
+//! `failed`（wasapi-pcm 认领后损坏，到此为止）；改名为 `.xyz` 的 AIFF 是
+//! `unsupported`（没人认领）；`.wav` 里装 FLAC 是 `unsupported`（wasapi-pcm 按
+//! 内容判断"不是我的格式"）→ 注册表继续问 native-audio，由它按内容解。
 //!
-//! `file_missing` 不在最初的三档里，但它比 `failed` 更具体（文件没了 vs 处理失败），
-//! 所以放在最前；四档都允许出现在最终原因里，不合并。
+//! `file_missing` 不在最初的三档里，但它与 `failed` 同属"认领后失败"：文件没了
+//! 要刷新索引，不是"没有预览组件"。
 //!
 //! ## 所有权（谁分配、谁释放）
 //!
@@ -236,9 +248,22 @@ pub const FrameSource = struct {
     pub fn deinit(_: FrameSource) void {}
 };
 
-/// "没有预览"的四种原因。四者**不许合并**（CHARTER「一」）：没有 handler 是一个
-/// 诚实的答案，文件没了要刷新索引，失败值得记日志，没有 provider 是配置问题。
+/// "没有预览"的四种原因。四者**不许合并**（CHARTER「一」）：
+///   * `unsupported` / `no_handler` 是**谢绝**，注册表继续问下一个；
+///   * `failed` / `file_missing` 是**认领后失败**，是本次预览的最终答案。
+/// `Reason` 只描述原因，不描述控制流；控制流唯一实现在 `Registry.openAnswered`，
+/// 规则见文件头「谢绝（decline）与四态」。
 pub const Reason = enum { no_handler, unsupported, failed, file_missing };
+
+/// 这个原因是否终止注册表查找。`failed` / `file_missing` 表示 provider 已经
+/// `supports` 为真、认领了文件，但文件损坏或读不出来——再问后面的 provider 不是
+/// 更具体的答案。`unsupported` / `no_handler` 只是"这次我答不了"，继续问。
+pub fn isTerminal(reason: Reason) bool {
+    return switch (reason) {
+        .failed, .file_missing => true,
+        .unsupported, .no_handler => false,
+    };
+}
 
 /// 预览的五个结局。UI 只 switch 它，不 switch 媒体类型。
 ///
@@ -287,8 +312,9 @@ pub const Provider = struct {
     /// 愿不愿意接手这个样本。**不允许分配内存**（`caps.forPath` 走无状态
     /// allocator 的那点分配除外）。返回 true 只代表"让我试一次"；`open` 仍可谢绝。
     supports: *const fn (*const core.model.Sample) bool,
-    /// 同步打开。成功返回四个载荷分支之一；打不开用 `none.*` **谢绝**，不要返回
-    /// error——注册表会继续问下一个 provider。只有 OOM 算 error。
+    /// 同步打开。成功返回四个载荷分支之一；打不开用 `none.*` 作答（`unsupported` /
+    /// `no_handler` 是谢绝，`failed` / `file_missing` 是认领后失败，见文件头），
+    /// 不要返回 error——只有 OOM 算 error。
     open: *const fn (std.mem.Allocator, Request) Error!Outcome,
     /// 这个 provider 将来跑在哪里。当前全是 `.in_process`；M4 的 helper 进程读这个
     /// 字段。注意它与 `Request.allow_isolation` 是两件事：Shell provider 的 `open`
@@ -320,7 +346,7 @@ pub const Registry = struct {
         return null;
     }
 
-    /// 按 decline 规则打开；全部谢绝时返回最具体的 `none.*`。
+    /// 按四态规则打开；全部谢绝时返回最具体的 `none.*`。
     pub fn open(self: Registry, allocator: std.mem.Allocator, request: Request) Error!Outcome {
         const answered = try self.openAnswered(allocator, request);
         return answered.outcome;
@@ -328,7 +354,8 @@ pub const Registry = struct {
 
     /// `open` 的完整答案。`provider` 是：
     ///   * 成功分支的赢家；或
-    ///   * 贡献了最终谢绝原因的 provider（`--preview` 用来说明"谁谢的"）；或
+    ///   * 贡献了最终答案的 provider（`failed` / `file_missing` 的认领者，或
+    ///     全部谢绝时贡献最具体原因的 provider；`--preview` 用来说明"谁谢的"）；或
     ///   * `null`（一个 provider 都没声明接手，最终 `none.unsupported`）。
     pub fn openAnswered(
         self: Registry,
@@ -343,6 +370,10 @@ pub const Registry = struct {
             const outcome = try provider.open(allocator, request);
             switch (outcome) {
                 .none => |reason| {
+                    // 认领后的失败：文件坏了/没了，到此为止。
+                    if (isTerminal(reason)) {
+                        return .{ .provider = provider, .outcome = outcome };
+                    }
                     // 谢绝：继续问下一个。只在原因更具体时换掉记录。
                     if (decline_reason == null or reasonRank(reason) > reasonRank(decline_reason.?)) {
                         decline_reason = reason;
@@ -365,15 +396,15 @@ pub const Registry = struct {
     };
 };
 
-/// 谢绝原因的"具体程度"：数字越大越具体，全部谢绝时留最大的。
-/// `file_missing` 比 `failed` 具体（文件没了 vs 处理失败），`no_handler` 比
-/// `unsupported` 具体（有格式但没组件 vs 没人接手）。四档不合并。
+/// 谢绝原因的"具体程度"：数字越大越具体，全部谢绝时留最大的。只有
+/// `unsupported` / `no_handler` 会走到这里——`failed` / `file_missing` 已由
+/// `isTerminal` 终止，不再参与排名。
 pub fn reasonRank(reason: Reason) u8 {
     return switch (reason) {
-        .file_missing => 4,
-        .failed => 3,
         .no_handler => 2,
         .unsupported => 1,
+        // 终止原因不参与排名；给 0 是为了保持函数对四态全覆盖。
+        .failed, .file_missing => 0,
     };
 }
 

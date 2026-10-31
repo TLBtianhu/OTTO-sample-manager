@@ -5,8 +5,9 @@
 //! 这一层；换尺寸、换颜色不需要重新解码。
 //!
 //! 口径（报告里也要写）：
-//!   * 输入是 `wav.decode` 的产物（交错、`channels` 声道、`bits` 位、`format`）；
+//!   * 输入是解码产物（交错、`channels` 声道、`bits` 位、`format`）；
 //!     8/16/24/32 位 PCM 与 32 位 float 都先折算成 i16 再比较，所以下游只有一种数；
+//!     zig-audio 与 MF 现在都交 16 位整数 PCM，其余分支保留给纯函数测试与未来解码器；
 //!   * **多声道先混合再取峰值**（同一帧各声道简单平均）：听感上是一个整体，
 //!     分轨波形是以后的事；
 //!   * 桶数可配（默认 512）。第 i 桶覆盖的帧区间用整数除法切分：
@@ -19,7 +20,7 @@
 //! 由调用方用**同一个 allocator** 调 `Peaks.deinit` 释放。
 
 const std = @import("std");
-const wav = @import("wav.zig");
+const SampleFormat = @import("pcm.zig").SampleFormat;
 
 /// 默认桶数。240 点宽的预览条在 2x 屏上是 480 设备像素：512 桶既不会让波形
 /// 变成一根根柱子，又很便宜（800 ms 的 22050 Hz 素材只有 17640 帧、512 次边界）。
@@ -48,14 +49,14 @@ pub const Error = std.mem.Allocator.Error;
 /// 把一段交错 PCM 压成 `buckets` 对 min/max。
 ///
 /// `pcm` 只在调用期间借用；返回值里的两个切片归调用方所有。`bits`/`format`
-/// 与 `wav.Wav` 的字段一一对应（wav 解码层已经把不支持的格式挡在门外，这里遇到
-/// 未知位深按 0 处理，不 panic）。
+/// `bits`/`format` 与解码产物的字段一一对应（解码层已经把不支持的格式挡在门外，
+/// 这里遇到未知位深按 0 处理，不 panic）。
 pub fn compute(
     allocator: std.mem.Allocator,
     pcm: []const u8,
     channels: u16,
     bits: u16,
-    format: wav.SampleFormat,
+    format: SampleFormat,
     buckets: usize,
 ) Error!Peaks {
     const bytes_per_sample: usize = @as(usize, bits) / 8;
@@ -108,7 +109,7 @@ pub fn frameValue(
     frame: usize,
     channels: u16,
     bits: u16,
-    format: wav.SampleFormat,
+    format: SampleFormat,
 ) i16 {
     if (channels == 0) return 0;
     return mixedSample(pcm, frame, @as(usize, channels), bits, format);
@@ -120,7 +121,7 @@ fn mixedSample(
     frame: usize,
     channels: usize,
     bits: u16,
-    format: wav.SampleFormat,
+    format: SampleFormat,
 ) i16 {
     const bytes_per_sample: usize = @as(usize, bits) / 8;
     const base = frame * channels * bytes_per_sample;
@@ -134,7 +135,7 @@ fn mixedSample(
 }
 
 /// 单个采样 → i16。float 按 ±1.0 = 满幅折算（NaN/±inf 当 0，不能变成 UB）。
-fn sampleI16(bytes: []const u8, offset: usize, bits: u16, format: wav.SampleFormat) i16 {
+fn sampleI16(bytes: []const u8, offset: usize, bits: u16, format: SampleFormat) i16 {
     return switch (format) {
         .float => floatToI16(@as(f32, @bitCast(readU32(bytes, offset)))),
         .pcm => switch (bits) {
@@ -154,8 +155,8 @@ fn floatToI16(value: f32) i16 {
     return @intFromFloat(std.math.clamp(scaled, -32768.0, 32767.0));
 }
 
-// 小端采样读取。与 `wav.zig` 里的同名辅助函数重复是有意的：那边是文件私有，
-// 而"峰值层"不该为了 4 个三行函数去扩 `wav` 的公开 API（也让本层能单独测试）。
+// 小端采样读取。这些三行函数在本层重复是有意的：峰值层不 import 解码器，
+// 所以能单独测试、也不被容器的字节序规则绑住。
 
 fn readU16(bytes: []const u8, offset: usize) u16 {
     return std.mem.readInt(u16, bytes[offset..][0..2], .little);

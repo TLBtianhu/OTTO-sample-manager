@@ -80,16 +80,18 @@ handler 没装就没有预览，装坏了就是我们的进程崩。
 
 | 格式 | provider | 依赖 |
 | --- | --- | --- |
-| wav | `wasapi-pcm`（自己解码 + WASAPI） | 无 |
+| wav（PCM/float/µ-law/A-law/IMA/MS ADPCM） | `wasapi-pcm`（zig-audio 解码 + WASAPI；粗采样图标） | 无 |
 | flac | `native-audio`（vendor 的 zig-audio，纯 Zig 解码） | 无 |
 | mp3 | `native-audio`（vendor 的 zig-audio，纯 Zig 解码）；`mf-audio` 兜底 | 无 |
+| aiff / aif | `native-audio`（vendor 的 zig-audio，纯 Zig 解码） | 无 |
 | aac/m4a/wma | `mf-audio`（Media Foundation 解码） | 系统 codec |
 | png/jpg/bmp/gif/tif | `image-wic`（WIC 解码） | 系统 codec |
 | mp4/mov/wmv | `mf-video`（MF 抽首帧） | 系统 codec |
 | psd/ai/blend 等 | `shell-thumbnail`（`IShellItemImageFactory`） | **第三方 handler** |
 
-前五种是"我们自己能回答的"，不需要能力表、不看注册表；最后一种才是"问系统"。
-**没有系统级快速通道**：Shell 只是表里的一项，排在后面，因为它是唯一需要别人装东西的。
+上表除 `shell-thumbnail` 之外的七种是"我们自己能回答的"，不需要能力表、不看注册表；
+最后一种才是"问系统"。**没有系统级快速通道**：Shell 只是表里的一项，排在后面，因为
+它是唯一需要别人装东西的。
 
 体积目标没变（这些全是系统 API，没有一个第三方运行时）；零转义也没变（我们直呼 DLL）。
 

@@ -1,7 +1,7 @@
 //! 音频起播基准：`play()` 返回 → `positionMs() > 0` 的延迟，跑 20 次报 p95。
 //!
-//! 走的是 `--play-test` 同一条链路：`audio_provider.load`（真解码）+ `sessionFromWav`
-//! （WASAPI 初始化 + 波形），只在计时区间上做了收窄——
+//! 走的是 `--play-test` 同一条链路：`audio_provider.load`（zig-audio 真解码）+
+//! `sessionFromDecoded`（WASAPI 初始化 + 波形），只在计时区间上做了收窄——
 //!
 //!   * **设备初始化不算**：那是一次性的（用户第一次选中音频行时付），不是"起播"；
 //!   * **计时**：`play()` 之前取时间戳，`positionMs()` 第一次非 0 时停表。位置由
@@ -67,7 +67,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, samples_dir: []const u8) Re
         var decoded = audio_provider.load(allocator, path) catch continue;
         defer decoded.deinit(allocator);
 
-        var session = audio_provider.sessionFromWav(allocator, &decoded) catch |err| switch (err) {
+        var session = audio_provider.sessionFromDecoded(allocator, &decoded) catch |err| switch (err) {
             error.NoAudioEndpoint => return .{ .skip = "no_audio_endpoint" },
             else => continue,
         };

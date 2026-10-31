@@ -7,9 +7,17 @@
 //! keeps memory use flat.
 //!
 //! Scope: PCM 8/16/24/32, IEEE float32, WAVE_FORMAT_EXTENSIBLE with the PCM or
-//! IEEE_FLOAT subformat, 1..64 channels, any non-zero sample rate. Unknown
-//! chunks are skipped with the RIFF odd-length padding rule. Compressed tags,
-//! RIFX/RF64, 12/20-bit PCM and float64 are rejected by name.
+//! IEEE_FLOAT subformat, G.711 µ-law/A-law (tags 7/6), IMA ADPCM (0x11) and
+//! Microsoft ADPCM (0x02), 1..64 channels, any non-zero sample rate. Unknown
+//! chunks are skipped with the RIFF odd-length padding rule. Compressed tags
+//! beyond those (GSM, MP3-in-WAV, ...), RIFX/RF64, 12/20-bit PCM and float64
+//! are rejected by name.
+//!
+//! The two ADPCM codecs and G.711 decode to 16-bit linear samples; their
+//! `Info.bits_per_sample` is reported as 16 because that is what `read`
+//! produces, while the container's nibble/byte width stays internal. ADPCM is
+//! block based: `open` allocates one staging block from the caller's
+//! allocator, `read` never allocates, and `deinit` frees it.
 //!
 //! `data` before `fmt ` is rejected (`error.Unsupported`): a streaming decoder
 //! cannot rewind to the payload after discovering the format.
@@ -17,18 +25,24 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
+const adpcm = @import("adpcm.zig");
+const g711 = @import("g711.zig");
 
 /// `data` size used by streaming WAV writers that cannot seek back to patch
 /// the header. Treated as "decode until EOF", total_frames = null.
 const data_size_unknown: u32 = 0xFFFF_FFFF;
 
 /// Upper bound on how much of a `fmt ` payload is inspected. The standard
-/// PCM/float form is 16 bytes, the EXTENSIBLE form is 40; anything after that
-/// is ignored (and skipped).
-const fmt_buf_len = 40;
+/// PCM/float form is 16 bytes, the EXTENSIBLE form is 40, and Microsoft ADPCM
+/// needs 22 + 4 * coefficient_count (50 for the seven standard pairs).
+const fmt_buf_len = 96;
 
 const format_pcm: u16 = 0x0001;
+const format_ms_adpcm: u16 = 0x0002;
 const format_float: u16 = 0x0003;
+const format_alaw: u16 = 0x0006;
+const format_mulaw: u16 = 0x0007;
+const format_ima_adpcm: u16 = 0x0011;
 const format_extensible: u16 = 0xFFFE;
 
 /// KSDATAFORMAT_SUBTYPE_PCM / _IEEE_FLOAT GUIDs, in the little-endian byte
@@ -45,7 +59,7 @@ const guid_float = [16]u8{
 /// Sentinel for "no declared length"; must not collide with a real u64 size.
 const unknown_size = std.math.maxInt(u64);
 
-pub const SampleFormat = enum { pcm, float };
+pub const SampleFormat = enum { pcm, float, mulaw, alaw };
 
 const Fmt = struct {
     sample_rate: u32,
@@ -54,6 +68,23 @@ const Fmt = struct {
     format: SampleFormat,
     bytes_per_sample: usize,
     frame_bytes: usize,
+    /// Non-null for the block codecs; the linear fields above are unused
+    /// (`frame_bytes` is 0) and `read` dispatches to the block reader.
+    adpcm_params: ?adpcm.Params = null,
+};
+
+/// Streaming state for the block codecs: one compressed block and its decoded
+/// staging samples. Both buffers are allocated in `open`, never in `read`.
+const BlockState = struct {
+    allocator: std.mem.Allocator,
+    params: adpcm.Params,
+    input: []u8,
+    staging: []i16,
+    /// Samples currently in `staging` and the read position inside them.
+    filled: usize = 0,
+    pos: usize = 0,
+    /// Compressed bytes left in `data`, or `unknown_size` for "until EOF".
+    remaining: u64,
 };
 
 pub const Decoder = struct {
@@ -65,11 +96,14 @@ pub const Decoder = struct {
     /// Bytes left in `data`, or `unknown_size` for "until EOF".
     remaining: u64,
     done: bool = false,
+    block: ?BlockState = null,
 
     /// Decode into `out`. See `root.Decoder.read` for the public contract.
     pub fn read(self: *Decoder, out: []i16) types.Error!usize {
         if (out.len == 0) return 0;
         if (self.done) return 0;
+
+        if (self.block) |*block| return self.readBlock(block, out);
 
         const channels: usize = self.info.channels;
         const capacity_frames = out.len / channels;
@@ -105,8 +139,11 @@ pub const Decoder = struct {
     }
 
     pub fn deinit(self: *Decoder) void {
-        // WAV owns no memory. `root.Decoder.deinit` poisons the whole value.
-        _ = self;
+        if (self.block) |*block| {
+            block.allocator.free(block.input);
+            block.allocator.free(block.staging);
+            self.block = null;
+        }
     }
 
     fn readConverted(self: *Decoder, out: []i16, want_frames: usize) types.Error!usize {
@@ -135,6 +172,89 @@ pub const Decoder = struct {
             if (got < chunk_bytes) break;
         }
         return frames_done * channels;
+    }
+
+    // -----------------------------------------------------------------------
+    // Block codecs (IMA / MS ADPCM)
+    // -----------------------------------------------------------------------
+
+    fn readBlock(self: *Decoder, state: *BlockState, out: []i16) types.Error!usize {
+        const channels: usize = self.info.channels;
+        const capacity_frames = out.len / channels;
+        if (capacity_frames == 0) return error.ShortBuffer;
+
+        var frames: usize = 0;
+        while (frames < capacity_frames) {
+            if (state.pos >= state.filled) {
+                if (!try self.nextBlock(state)) break;
+            }
+            const available = (state.filled - state.pos) / channels;
+            const take = @min(available, capacity_frames - frames);
+            const samples = take * channels;
+            @memcpy(
+                out[frames * channels ..][0..samples],
+                state.staging[state.pos..][0..samples],
+            );
+            state.pos += samples;
+            frames += take;
+            if (state.pos >= state.filled) {
+                state.pos = 0;
+                state.filled = 0;
+            }
+        }
+
+        if (frames == 0) {
+            self.done = true;
+            return 0;
+        }
+        return frames * channels;
+    }
+
+    /// Decode the next compressed block into the staging buffer. Returns false
+    /// at a clean end of stream.
+    fn nextBlock(self: *Decoder, state: *BlockState) types.Error!bool {
+        const known = state.remaining != unknown_size;
+        var want = state.input.len;
+        if (known) {
+            if (state.remaining == 0) return false;
+            want = @intCast(@min(state.remaining, @as(u64, state.input.len)));
+        }
+
+        const got = try self.fillBlock(state.input[0..want]);
+        if (got == 0) {
+            // A declared length that stops before the first block of the
+            // stream is a truncation; an unknown length is simply EOF.
+            if (known) return error.Truncated;
+            return false;
+        }
+        if (known) {
+            state.remaining -= @as(u64, got);
+            if (got < want) return error.Truncated;
+        }
+
+        const frames = try adpcm.decodeBlock(state.params, state.input[0..got], state.staging);
+        if (frames == 0) {
+            // Only a final fragment shorter than the block header can get
+            // here: with a declared size that is a broken header.
+            return if (known) error.Corrupt else false;
+        }
+
+        state.filled = frames * @as(usize, self.info.channels);
+        state.pos = 0;
+        return true;
+    }
+
+    /// Fill `dst` from the reader unless the stream ends first. A single
+    /// `readSliceShort` may under-fill a streaming reader even when more is
+    /// coming, so block framing must loop.
+    fn fillBlock(self: *Decoder, dst: []u8) types.Error!usize {
+        var got: usize = 0;
+        while (got < dst.len) {
+            const n = try readSome(self.reader, dst[got..]);
+            if (n == 0) break;
+            got += n;
+        }
+        return got;
     }
 
     /// Read exactly `dst.len` bytes when the length is known (EOF there is a
@@ -168,7 +288,6 @@ pub fn open(
     reader: *std.Io.Reader,
     riff: *const [12]u8,
 ) types.Error!Decoder {
-    _ = allocator; // WAV decoding does not allocate.
     if (!std.mem.eql(u8, riff[0..4], "RIFF") or !std.mem.eql(u8, riff[8..12], "WAVE")) {
         return error.NotAudio;
     }
@@ -199,7 +318,7 @@ pub fn open(
             // Without a preceding fmt we would have to rewind to the payload
             // later; a streaming decoder cannot do that. Say so explicitly.
             const parsed = fmt orelse return error.Unsupported;
-            return openData(reader, parsed, size);
+            return openData(allocator, reader, parsed, size);
         }
 
         // LIST / fact / JUNK / anything else: skip payload and odd padding.
@@ -208,7 +327,14 @@ pub fn open(
     }
 }
 
-fn openData(reader: *std.Io.Reader, fmt: Fmt, size: u32) types.Error!Decoder {
+fn openData(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    fmt: Fmt,
+    size: u32,
+) types.Error!Decoder {
+    if (fmt.adpcm_params) |params| return openAdpcm(allocator, reader, fmt, params, size);
+
     var remaining: u64 = unknown_size;
     var total_frames: ?u64 = null;
 
@@ -236,6 +362,55 @@ fn openData(reader: *std.Io.Reader, fmt: Fmt, size: u32) types.Error!Decoder {
     };
 }
 
+fn openAdpcm(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    fmt: Fmt,
+    params: adpcm.Params,
+    size: u32,
+) types.Error!Decoder {
+    var remaining: u64 = unknown_size;
+    var total_frames: ?u64 = null;
+    if (size != data_size_unknown) {
+        remaining = size;
+        total_frames = adpcm.framesForData(params, size);
+    }
+
+    const capacity_frames = adpcm.samplesForBlock(params, params.block_align);
+    if (capacity_frames == 0) return error.Corrupt;
+
+    // One compressed block plus its decoded samples: the whole allocation is
+    // bounded by 64 KiB (block_align) * 4 + frames * channels * 2 bytes, and
+    // `read` never allocates.
+    const staging = try allocator.alloc(i16, capacity_frames * params.channels);
+    errdefer allocator.free(staging);
+    const input = try allocator.alloc(u8, params.block_align);
+    errdefer allocator.free(input);
+
+    return .{
+        .reader = reader,
+        .info = .{
+            .format = .wav,
+            .sample_rate = fmt.sample_rate,
+            .channels = fmt.channels,
+            // Block codecs expand to 16-bit linear samples.
+            .bits_per_sample = 16,
+            .total_frames = total_frames,
+        },
+        .sample_format = .pcm,
+        .bytes_per_sample = 0,
+        .frame_bytes = 0,
+        .remaining = remaining,
+        .block = .{
+            .allocator = allocator,
+            .params = params,
+            .input = input,
+            .staging = staging,
+            .remaining = remaining,
+        },
+    };
+}
+
 fn parseFmt(chunk: []const u8, declared_size: u32) types.Error!Fmt {
     if (chunk.len < 16 or declared_size < 16) return error.Corrupt;
 
@@ -247,6 +422,25 @@ fn parseFmt(chunk: []const u8, declared_size: u32) types.Error!Fmt {
 
     if (channels == 0 or sample_rate == 0 or bits == 0) return error.Corrupt;
     if (channels > types.max_channels) return error.Unsupported;
+
+    // Block codecs first: their `fmt ` extension carries parameters the
+    // linear path never sees, and their fields mean different things
+    // (`bits` is the nibble width, `block_align` is the block size).
+    if (tag == format_ms_adpcm or tag == format_ima_adpcm) {
+        if (bits != 4) return error.Unsupported;
+        if (block_align == 0) return error.Corrupt;
+        const kind: adpcm.Kind = if (tag == format_ms_adpcm) .ms else .ima;
+        const params = try adpcm.parseFmt(kind, channels, block_align, chunk, declared_size);
+        return .{
+            .sample_rate = sample_rate,
+            .channels = channels,
+            .bits = 16,
+            .format = .pcm,
+            .bytes_per_sample = 0,
+            .frame_bytes = 0,
+            .adpcm_params = params,
+        };
+    }
 
     var format: SampleFormat = undefined;
     if (tag == format_extensible) {
@@ -269,8 +463,12 @@ fn parseFmt(chunk: []const u8, declared_size: u32) types.Error!Fmt {
         format = .pcm;
     } else if (tag == format_float) {
         format = .float;
+    } else if (tag == format_alaw) {
+        format = .alaw;
+    } else if (tag == format_mulaw) {
+        format = .mulaw;
     } else {
-        // ADPCM, A-law, mu-law, MP3, ...
+        // GSM, MP3-in-WAV, ...: named refusals instead of guesses.
         return error.Unsupported;
     }
 
@@ -283,15 +481,25 @@ fn parseFmt(chunk: []const u8, declared_size: u32) types.Error!Fmt {
             else => return error.Unsupported,
         },
         .float => if (bits == 32) 4 else return error.Unsupported,
+        // G.711 always codes one 8-bit sample per byte; a header claiming
+        // anything else is a different law or a broken file.
+        .alaw, .mulaw => if (bits == 8) 1 else return error.Unsupported,
     };
 
     const frame_bytes = @as(usize, channels) * bytes_per_sample;
     if (@as(usize, block_align) != frame_bytes) return error.Corrupt;
 
+    // G.711 expands to 16-bit linear samples, so that is what `read`
+    // produces and what `Info.bits_per_sample` reports.
+    const reported_bits: u16 = switch (format) {
+        .pcm, .float => bits,
+        .alaw, .mulaw => 16,
+    };
+
     return .{
         .sample_rate = sample_rate,
         .channels = channels,
-        .bits = bits,
+        .bits = reported_bits,
         .format = format,
         .bytes_per_sample = bytes_per_sample,
         .frame_bytes = frame_bytes,
@@ -341,6 +549,8 @@ fn convertSamples(
                 else => unreachable,
             },
             .float => floatToI16(@bitCast(readU32(src, off))),
+            .mulaw => g711.mulaw_table[src[off]],
+            .alaw => g711.alaw_table[src[off]],
         };
     }
 }

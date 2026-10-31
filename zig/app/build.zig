@@ -71,7 +71,8 @@ pub fn build(b: *std.Build) void {
         // 导入流水线的两个口岸：L0 扫描（真 Win32 属性/身份）与 L1 头部探测。
         .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
         .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
-        // WAV 头部解析：解码器（audio/wav.zig）与 probe 共用同一份块扫描。
+        // WAV 头部解析：图标粗采样（audio/coarse.zig）与 probe 共用同一份块扫描。
+        // 整段解码已交给 zig_audio，app 侧不再有 WAV 解码器。
         .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
         // 更新 feed 口岸（M5）：WinHTTP GET / 本地文件，只收发字节。
         .{ .name = "otto_feed", .module = ports_dep.module("otto_feed") },

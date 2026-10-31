@@ -122,7 +122,8 @@ const AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM: u32 = 0x8000_0000;
 const E_RENDER: u32 = 0; // EDataFlow::eRender
 const E_CONSOLE: u32 = 0; // ERole::eConsole
 
-// WAVEFORMATEXTENSIBLE 的常量（与 wav.zig 的磁盘 GUID 顺序一致，但这里用 SDK 结构）。
+// WAVEFORMATEXTENSIBLE 的常量（GUID 的磁盘字节序与 zig-audio 的 WAV 解码器一致，
+// 但这里用 SDK 结构）。
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 const SPEAKER_FRONT_LEFT: u32 = 0x1;
 const SPEAKER_FRONT_RIGHT: u32 = 0x2;
@@ -200,7 +201,7 @@ const IAudioRenderClientVtbl = extern struct {
 ///
 /// 为什么总是 EXTENSIBLE：24/32 位与 float 用普通 WAVEFORMATEX 在共享模式下
 /// 会被引擎判成"格式不支持"；扩展头 + KSDATAFORMAT_SUBTYPE 才是设备能认的形状。
-/// `channels` 只会是 1 或 2（多声道已在 `wav.zig` 下混）。
+/// `channels` 只会是 1 或 2（多声道已在 `audio/decode.zig` 下混）。
 pub fn buildFormat(
     channels: u16,
     sample_rate: u32,

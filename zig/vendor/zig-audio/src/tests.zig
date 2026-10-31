@@ -10,6 +10,10 @@ test {
     _ = @import("mp3_test.zig");
     _ = @import("mp3_stereo_test.zig");
     _ = @import("mp3_vectors_test.zig");
+    _ = @import("g711_test.zig");
+    _ = @import("adpcm_test.zig");
+    _ = @import("aiff_test.zig");
+    _ = @import("legacy_vectors_test.zig");
     _ = @import("ffmpeg_test.zig");
     _ = @import("fuzz.zig");
 }
