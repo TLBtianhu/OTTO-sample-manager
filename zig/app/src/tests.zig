@@ -78,6 +78,8 @@ test {
     _ = @import("duration_trust_test.zig");
     // 列表行里的 Ogg 时长：`display` → `format` 给出 3.0s（不带 ≈）。
     _ = @import("duration_trust_ogg_test.zig");
+    // 列表行里的 Opus 时长：旧库 duration=0 → 2.0s（同样不带 ≈）；预览仍然谢绝。
+    _ = @import("duration_trust_opus_test.zig");
     _ = @import("media_key.zig");
     _ = @import("audio/peaks.zig");
     _ = @import("audio/waveform.zig");

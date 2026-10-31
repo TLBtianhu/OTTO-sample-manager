@@ -1,15 +1,37 @@
-//! Ogg 容器的最小只读解析：认 Vorbis、谢绝 Opus、从**最后一页的 granule** 取时长。
+//! Ogg 容器的最小只读解析：认 Vorbis 与 Opus（**只取元数据**），时长取
+//! **最后一页的 granule**。解码不在这里：Opus 的时长算得出来，声音仍然播不了。
 //!
 //! ## 为什么时长在文件尾
 //!
 //! Vorbis 的 PCM 帧数不写在任何头里。Ogg 规范把音频流的 granule position 定义成
 //! "到这一页为止已完成解码的 PCM 帧数"，所以**最后一页**的 granule 就是总帧数
-//! （识别头 / 注释 / setup 三页的 granule 都是 0）。probe 因此读两次：
+//! （识别头 / 注释 / setup 三页的 granule 都是 0）。Opus 遵守同一条规矩，唯一的
+//! 差别是它的 granule 把 `pre_skip` 算在里面（见下）。probe 因此读两次：
 //!
 //!   1. 开头 64 KiB：`OggS` 页头 → segment table → 首包；`\x01vorbis` 给出声道数
-//!      与采样率；`OpusHead` 直接返回 null（不是 Vorbis，本口岸不支持）；
+//!      与采样率；`OpusHead` 给出 pre_skip / 声道数 / 输入采样率；
 //!   2. 结尾 64 KiB：从后往前找 `OggS`，只接受"页头声明的总长刚好到文件末"的
 //!      候选，解析它的 granule。中间一页都不读，也不整份读。
+//!
+//! ## Opus：pre_skip 与恒定的 48 kHz
+//!
+//! OpusHead（RFC 7845 §5.1）的定长部分，共 19 字节（mapping family > 0 时后面
+//! 还有一张声道映射表，本口岸不读）：
+//!
+//!     "OpusHead"  version  channels  pre_skip(u16)  input_sample_rate(u32)  gain  family
+//!         8B         1B        1B          2B                4B             2B      1B
+//!
+//!   * `pre_skip`（偏移 10）——解码器在**流开头**要丢掉的样本数。一段 2.000 s 的
+//!     素材尾页 granule 是 96312 = 96000 + 312，那 312 就是它：granule 从"编码器
+//!     上手第一帧之前"开始数，要把预滚的那 312 个样本减掉才是真正要播的长度；
+//!   * `input_sample_rate`（偏移 12）——**录制时的**采样率，只作记录（规范允许
+//!     写 0 表示未知）。它**不是**输出采样率：Opus 解码器的输出恒为 48 kHz。Opus
+//!     只有 8/12/16/24/48 kHz 五种内部时钟，全部以 48 kHz 为基准做重采样，解码器
+//!     交付的 PCM 永远是 48 kHz；所以用 44100 之类的值去除 granule 会算出错的时长；
+//!   * `channels`（偏移 9）——0 是坏头。
+//!
+//! 于是 Opus 的时长 = `(尾页 granule − pre_skip) / 48000`。granule < pre_skip 的
+//! 文件是坏的（差值是负的），返回 null，绝不把负数折成 0 或者回绕成天文数字。
 //!
 //! ## 为什么"页末 == 文件末"这一条是必须的
 //!
@@ -21,7 +43,7 @@
 //! 含最后一页的页头；窗口从文件中间开始时也不影响，字节偏移由调用方一起传进来。
 //!
 //! 尾页 granule 是 `0xFFFF_FFFF_FFFF_FFFF`（"这一页没有包结束"）时不猜，返回
-//! null；截断（页长超过文件末）、非 Vorbis、坏页头同样返回 null——probe 的契约
+//! null；截断（页长超过文件末）、未知编码、坏页头同样返回 null——probe 的契约
 //! 是"不认识就 null"，不是"猜一个 0 秒"。
 //!
 //! 本文件只碰字节与文件句柄，不 import core、不认识 `Sample`，也不做解码。
@@ -40,28 +62,45 @@ const page_header_len: usize = 27;
 /// "这一页没有包结束"的 granule 标记（Ogg 规范里的 -1）。
 const no_granule: u64 = std.math.maxInt(u64);
 
-/// 首包给出的流参数。`sample_rate` 是 Vorbis 识别包里的声明值。
+/// Opus 的输出采样率：解码器永远按 48 kHz 交付 PCM（见文件头）。
+pub const opus_sample_rate: u32 = 48_000;
+
+/// OpusHead 定长部分的字节数（含 8 字节魔数）。
+const opus_head_len: usize = 19;
+
+/// 首包认出来的编码。时长口径两者一致（尾页 granule），只是 Opus 要减 pre_skip。
+pub const Codec = enum { vorbis, opus };
+
+/// 首包给出的流参数。
 pub const Head = struct {
+    codec: Codec,
+    /// **输出**采样率：Vorbis 是头里的声明值；Opus 恒为 `opus_sample_rate`。
     sample_rate: u32,
     channels: u32,
+    /// 只有 Opus 可能非 0：解码开始时要丢掉的样本数（OpusHead 偏移 10）。
+    pre_skip: u16 = 0,
+    /// 只有 Opus 有：`input_sample_rate`（偏移 12）。**不是**输出采样率，
+    /// 只作记录（可能是 0 = 未知）。
+    input_sample_rate: u32 = 0,
 };
 
-/// `read` 的完整答案：头部的参数 + 尾页的帧数 + 由两者算出的时长。
+/// `read` 的完整答案：头部的参数 + 尾页算出的帧数 + 由两者算出的时长。
 pub const Info = struct {
+    codec: Codec,
     sample_rate: u32,
     channels: u32,
-    /// 最后一页的 granule：Vorbis 里它就是总 PCM 帧数。
+    /// 真正要播的 PCM 帧数：Vorbis = 尾页 granule；Opus = granule − pre_skip。
     total_frames: u64,
     /// `total_frames * 1000 / sample_rate`，向下取整。
     duration_ms: u64,
 };
 
 /// 一次 `read` 可能失败的地方：`stat` / 位置读 / 唯一的 64 KiB 缓冲。
-/// "不是 Vorbis / 截断 / 没有 granule"不是错误，是 `null`。
+/// "不认识的编码 / 截断 / 没有 granule / granule < pre_skip"不是错误，是 `null`。
 pub const Error = std.Io.File.StatError || std.Io.File.ReadPositionalError || error{OutOfMemory};
 
-/// 读一次头 + 一次尾，给出 Vorbis 的精确时长。返回 null = 不是 Vorbis（Opus 或
-/// 别的 codec）、坏页头、截断、或尾页没有 granule——一律不猜。
+/// 读一次头 + 一次尾，给出 Vorbis / Opus 的精确时长。返回 null = 不认识的编码、
+/// 坏页头、截断、尾页没有 granule、或 granule 比 pre_skip 还小——一律不猜。
 ///
 /// `header` 是调用方已经读进来的文件开头（probe 的 64 KiB 窗口，短文件就是全文）。
 pub fn read(
@@ -78,17 +117,20 @@ pub fn read(
     defer allocator.free(tail);
     const got = try file.readPositionalAll(io, tail, size - window);
 
+    // 尾页定位只有这一份实现：先找"页末 == 文件末"的那一页，再拿它的 granule。
     const granule = lastGranule(tail[0..got], size - got, size) orelse return null;
-    const duration_ms = durationMs(granule, head.sample_rate) orelse return null;
+    const frames = totalFrames(head, granule) orelse return null;
+    const duration_ms = durationMs(frames, head.sample_rate) orelse return null;
     return .{
+        .codec = head.codec,
         .sample_rate = head.sample_rate,
         .channels = head.channels,
-        .total_frames = granule,
+        .total_frames = frames,
         .duration_ms = duration_ms,
     };
 }
 
-/// 首包是 Vorbis 识别包时给出声道数与采样率；Opus / 别的 codec / 坏页头 → null。
+/// 首包是 Vorbis 识别包或 OpusHead 时给出流参数；别的 codec / 坏页头 → null。
 ///
 /// Vorbis 识别包（规范 §4.2.2）：`\x01vorbis` + version(4) + channels(1) +
 /// sample_rate(4) + 三个 bitrate(4) + blocksize(1) + framing(1)，共 30 字节。
@@ -99,17 +141,47 @@ pub fn parseHead(header: []const u8) ?Head {
     if (page.flags & flag_continued != 0) return null;
 
     const packet = firstPacket(header, page) orelse return null;
+    if (isOpusHead(packet)) return parseOpusHead(packet);
+
     if (packet.len < 16) return null;
     if (packet[0] != 1 or !std.mem.eql(u8, packet[1..7], "vorbis")) return null;
 
     const channels = packet[11];
     const sample_rate = std.mem.readInt(u32, packet[12..16], .little);
     if (channels == 0 or sample_rate == 0) return null;
-    return .{ .sample_rate = sample_rate, .channels = channels };
+    return .{ .codec = .vorbis, .sample_rate = sample_rate, .channels = channels };
 }
 
-/// 尾页的 granule = 总帧数。`tail` 是文件最后一段，`tail_offset` 是它在文件里的
-/// 偏移（`tail.len + tail_offset == file_size` 由调用方保证）。
+/// 首包是不是 `OpusHead`。魔数就够长（8 字节），先做这一条最便宜的判断。
+fn isOpusHead(packet: []const u8) bool {
+    return packet.len >= 8 and std.mem.eql(u8, packet[0..8], "OpusHead");
+}
+
+/// 解析 OpusHead 的定长部分（见文件头）。短头 / 0 声道 → null（不猜）。
+/// 采样率**不用**头里声明的 `input_sample_rate`：Opus 的输出恒为 48 kHz。
+fn parseOpusHead(packet: []const u8) ?Head {
+    if (packet.len < opus_head_len) return null;
+    const channels = packet[9];
+    if (channels == 0) return null;
+    return .{
+        .codec = .opus,
+        .sample_rate = opus_sample_rate,
+        .channels = channels,
+        .pre_skip = std.mem.readInt(u16, packet[10..12], .little),
+        .input_sample_rate = std.mem.readInt(u32, packet[12..16], .little),
+    };
+}
+
+/// 尾页 granule → 要播的帧数。Opus 的 granule 含编码器的预滚样本，减掉 pre_skip；
+/// 不够减就是坏文件（负数不折成 0，也不回绕）。
+fn totalFrames(head: Head, granule: u64) ?u64 {
+    if (head.codec == .vorbis) return granule;
+    if (granule < head.pre_skip) return null;
+    return granule - head.pre_skip;
+}
+
+/// 尾页的 granule。`tail` 是文件最后一段，`tail_offset` 是它在文件里的偏移
+/// （`tail.len + tail_offset == file_size` 由调用方保证）。
 ///
 /// 从后往前扫描：只接受"页起点 + 该页声明的总长 == file_size"的候选——这一条
 /// 同时排除了负载里的假 `OggS` 与被截断的尾页。找不到就 null。
@@ -193,147 +265,5 @@ fn firstPacket(header: []const u8, page: Page) ?[]const u8 {
     return null;
 }
 
-// ---------------------------------------------------------------------------
-// 测试：内存里造页（真字节），外加两件真素材（存在才跑）
-// ---------------------------------------------------------------------------
-
-const testing = std.testing;
-
-/// 造一页：一个包（≤255 字节的整数倍也正确终止）、给定 flags 与 granule。
-/// 返回下一页的偏移。`out` 必须够大。
-fn putPage(out: []u8, at: usize, flags: u8, granule: u64, packet: []const u8) usize {
-    const segments = packet.len / 255 + 1;
-    const header_len = page_header_len + segments;
-    const total = header_len + packet.len;
-
-    @memset(out[at..][0..total], 0);
-    @memcpy(out[at..][0..4], "OggS");
-    out[at + 5] = flags;
-    std.mem.writeInt(u64, out[at + 6 ..][0..8], granule, .little);
-    out[at + 26] = @intCast(segments);
-
-    var remaining = packet.len;
-    for (0..segments) |index| {
-        const lace: u8 = @intCast(@min(remaining, 255));
-        out[at + page_header_len + index] = lace;
-        remaining -= lace;
-    }
-    @memcpy(out[at + header_len ..][0..packet.len], packet);
-    return at + total;
-}
-
-/// Vorbis 识别包（30 字节）。
-fn vorbisIdent(channels: u8, sample_rate: u32) [30]u8 {
-    var packet: [30]u8 = @splat(0);
-    packet[0] = 1;
-    @memcpy(packet[1..7], "vorbis");
-    packet[11] = channels;
-    std.mem.writeInt(u32, packet[12..16], sample_rate, .little);
-    return packet;
-}
-
-test "parseHead：Vorbis 识别包给出 44100 / 2 声道" {
-    var bytes: [128]u8 = undefined;
-    const ident = vorbisIdent(2, 44_100);
-    const len = putPage(&bytes, 0, flag_bos, 0, &ident);
-
-    const head = parseHead(bytes[0..len]).?;
-    try testing.expectEqual(@as(u32, 44_100), head.sample_rate);
-    try testing.expectEqual(@as(u32, 2), head.channels);
-}
-
-test "parseHead：Opus / 非 BOS / 短头 / 坏帧全是 null（不猜）" {
-    var bytes: [128]u8 = undefined;
-
-    // OpusHead：19 字节的识别包，独占 BOS 页。
-    var opus: [19]u8 = @splat(0);
-    @memcpy(opus[0..8], "OpusHead");
-    opus[8] = 1;
-    opus[9] = 2;
-    std.mem.writeInt(u16, opus[10..12], 312, .little);
-    std.mem.writeInt(u32, opus[12..16], 48_000, .little);
-    const opus_len = putPage(&bytes, 0, flag_bos, 0, &opus);
-    try testing.expect(parseHead(bytes[0..opus_len]) == null);
-
-    // 不是 BOS：识别包不在流的第一页。
-    const ident = vorbisIdent(2, 44_100);
-    const mid_len = putPage(&bytes, 0, 0, 0, &ident);
-    try testing.expect(parseHead(bytes[0..mid_len]) == null);
-
-    try testing.expect(parseHead(&[_]u8{}) == null);
-    try testing.expect(parseHead("OggS") == null);
-    try testing.expect(parseHead("RIFFxxxxWAVE") == null);
-}
-
-test "lastGranule：尾页 granule = 132300，页末正好到文件末" {
-    var bytes: [256]u8 = undefined;
-    var at = putPage(&bytes, 0, flag_bos, 0, "ident");
-    at = putPage(&bytes, at, 0, 0, "setup");
-    at = putPage(&bytes, at, flag_eos, 132_300, "audio-page");
-
-    try testing.expectEqual(@as(u64, 132_300), lastGranule(bytes[0..at], 0, at).?);
-}
-
-test "lastGranule：窗口从文件中间开始（尾页头在窗口内）" {
-    var bytes: [256]u8 = undefined;
-    var at = putPage(&bytes, 0, flag_bos, 0, "ident");
-    const last_at = at;
-    at = putPage(&bytes, at, flag_eos, 8_820, "audio-page");
-
-    // 窗口从上一页的负载中间开始（不是文件头），偏移量交给调用方。
-    const offset: usize = last_at - 5;
-    try testing.expectEqual(@as(u64, 8_820), lastGranule(bytes[offset..at], offset, at).?);
-}
-
-test "lastGranule：截断 / granule=-1 / 负载里的假 OggS 都不冒充时长" {
-    var bytes: [256]u8 = undefined;
-    var at = putPage(&bytes, 0, flag_bos, 0, "ident");
-    at = putPage(&bytes, at, flag_eos, 4_410, "audio-page");
-
-    // 文件比页头声明的短 10 字节：尾页被截断，上一页的 granule 也不能冒充。
-    try testing.expect(lastGranule(bytes[0 .. at - 10], 0, at - 10) == null);
-
-    // 尾页 granule = -1："这一页没有包结束"，不是 0 帧也不是上一页的帧数。
-    var pages: [256]u8 = undefined;
-    var end = putPage(&pages, 0, flag_bos, 0, "ident");
-    end = putPage(&pages, end, flag_eos, no_granule, "no-packet-end");
-    try testing.expect(lastGranule(pages[0..end], 0, end) == null);
-
-    // 负载里恰好有 "OggS""：它后面凑不出"页长刚好到文件末"，必须继续往前找。
-    var noisy: [512]u8 = undefined;
-    var at2 = putPage(&noisy, 0, flag_bos, 0, "ident");
-    var payload: [64]u8 = @splat(0);
-    @memcpy(payload[20..24], "OggS");
-    at2 = putPage(&noisy, at2, flag_eos, 44_100, &payload);
-    try testing.expectEqual(@as(u64, 44_100), lastGranule(noisy[0..at2], 0, at2).?);
-}
-
-test "真 testkit ogg（存在才跑）：132300 帧 / 44100 / 2 声道 / 3000 ms" {
-    const path = "C:\\src\\otto-testkit\\samples\\vorbis-44k.ogg";
-    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.SkipZigTest;
-
-    const file = try std.Io.Dir.cwd().openFile(testing.io, path, .{});
-    defer file.close(testing.io);
-    const header = try testing.allocator.alloc(u8, tail_window);
-    defer testing.allocator.free(header);
-    const got = try file.readPositionalAll(testing.io, header, 0);
-
-    const info = (try read(testing.allocator, testing.io, file, header[0..got])).?;
-    try testing.expectEqual(@as(u32, 44_100), info.sample_rate);
-    try testing.expectEqual(@as(u32, 2), info.channels);
-    try testing.expectEqual(@as(u64, 132_300), info.total_frames);
-    try testing.expectEqual(@as(u64, 3000), info.duration_ms);
-}
-
-test "真 opus 素材（存在才跑）：OpusHead → null（不支持，不猜）" {
-    const path = "C:\\src\\zig-audio-vectors\\ogg\\opus-48k-96.opus";
-    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.SkipZigTest;
-
-    const file = try std.Io.Dir.cwd().openFile(testing.io, path, .{});
-    defer file.close(testing.io);
-    const header = try testing.allocator.alloc(u8, tail_window);
-    defer testing.allocator.free(header);
-    const got = try file.readPositionalAll(testing.io, header, 0);
-
-    try testing.expect((try read(testing.allocator, testing.io, file, header[0..got])) == null);
-}
+// 测试在 `ogg_info_test.zig`（单独一个测试根，同 `mp4_info_test.zig` 的理由：
+// 本文件正文要留出行数给注释与解析，也便于把"真素材"那几条集中在一处）。

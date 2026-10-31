@@ -21,8 +21,10 @@
 //!
 //!   * `sample.duration > 0`：**不 probe**，`resolve` 直接返回 null（库里已经有时长，
 //!     显示层保持原样，这条路径与没有本功能时逐字节一致）；
-//!   * `duration <= 0` 且扩展名是 `.wav/.flac/.mp3/.aiff/.aif/.ogg/.oga`：缓存未命中
-//!     才 probe 一次（只读 64 KiB 头；Ogg 再多读 64 KiB 尾，见 `ports/probe.zig`）；
+//!   * `duration <= 0` 且扩展名是 `.wav/.flac/.mp3/.aiff/.aif/.ogg/.oga/.opus`：缓存
+//!     未命中才 probe 一次（只读 64 KiB 头；Ogg / Opus 再多读 64 KiB 尾，见
+//!     `ports/probe.zig`）。`.opus` 能算时长但**不能解码**（Opus 只到元数据），
+//!     补出来的时长只给列表行与事实区，预览仍然谢绝；
 //!   * 视频后缀（`.mp4/.mov/.mkv/.webm`）另走一条：**库里已有时长也要读一次头**，
 //!     因为分辨率不在 `Sample` 里；`display` 用它决定列表行要不要写 `640×360`；
 //!   * 其它扩展名（`.xyz` / `.png` / 无后缀）：不打开文件，仍然"未知"——显示层不猜
@@ -216,9 +218,13 @@ fn extension(sample: core.model.Sample) []const u8 {
 }
 
 /// 显示层愿意打开的容器后缀（音频 + 视频）。大小写不敏感，前导点必须有。
+///
+/// `.opus` 在这一版里只换**时长**：`probe` 认 OpusHead、减 pre_skip、按 48 kHz 算，
+/// 而预览注册表里没有任何 provider 声明它（`native-audio` 只到 Vorbis），所以
+/// 列表行有数字、预览区仍然是"不能播"。两条路互不借用，别在这里顺手加 provider。
 fn parsable(ext: []const u8) bool {
     const supported = [_][]const u8{
-        ".wav", ".flac", ".mp3", ".aiff", ".aif", ".ogg", ".oga",
+        ".wav", ".flac", ".mp3", ".aiff", ".aif", ".ogg", ".oga", ".opus",
         ".mp4", ".mov",  ".mkv", ".webm",
     };
     for (supported) |candidate| {
