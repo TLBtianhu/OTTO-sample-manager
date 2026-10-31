@@ -16,8 +16,10 @@
 #              <exe>\updates.
 #   portable   two exes + otto-portable.flag in a temp dir -> (portable); import
 #              writes <exe>\data\library.otto; settings at <exe>\data\settings.json;
-#              cache at <exe>\data\cache; updates at <exe>\data\updates; the real
-#              %APPDATA%\OTTO is in the stash and must not reappear.
+#              cache at <exe>\data\cache; updates at <exe>\data\updates; --preview
+#              on img00.png still names image-wic, so the shipped copy decodes by
+#              itself instead of only the dev tree; the real %APPDATA%\OTTO is in
+#              the stash and must not reappear.
 #   installed  two exes in a temp dir, no flag, path without a zig-out segment ->
 #              (installed); the child runs on the **real** %APPDATA%, so the
 #              library / settings / cache / updates must land in the real
@@ -790,6 +792,19 @@ function Invoke-PortableForm {
   $script:currentExe = $exe
   $script:currentCwd = $dir
   Assert-Readback -Form 'portable' -ExpectedLibrary $library -ExpectedSettings $settings
+
+  # Self-contained decoding in the *shipped* form: the same `--preview` path the
+  # dev tree uses must still name image-wic here, in a copy of the exe that only
+  # has the portable flag beside it. Without this, "PNG decodes without the Shell"
+  # would only ever have been proven inside the build tree: a missing runtime
+  # dependency, or a Shell fallback silently answering instead, would keep every
+  # dev-tree test green. It also covers the portable form's own "no window" path.
+  $preview = Invoke-Otto -Exe $exe -Cwd $dir -Argv @('--preview', (Join-Path $script:samples 'img00.png'))
+  $providerLine = Get-LineMatching $preview.Lines '^preview: provider=image-wic kind=image'
+  $imageLine = Get-LineMatching $preview.Lines '^preview: outcome=image \d+x\d+ '
+  Add-Check 'portable' '--preview decodes img00.png here (provider=image-wic, self-contained)' (
+    ($preview.Code -eq 0) -and ($providerLine.Length -gt 0) -and ($imageLine.Length -gt 0)) (
+    'exit={0}; {1}; {2}' -f $preview.Code, $providerLine, $imageLine)
 
   # Updates: portable puts them under <data>\updates, never beside the exe.
   $updateResult = Invoke-UpdateProbe -Exe $exe -Cwd $dir

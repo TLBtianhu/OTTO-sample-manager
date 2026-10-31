@@ -202,6 +202,27 @@ zig-out/bin/otto-lite.exe --preview C:\src\otto-testkit\samples\mystery.xyz
 #   (its facts are printed before the outcome either way)
 ```
 
+### Provider matrix (the gate for "every format is self-sufficient")
+
+```powershell
+# six samples × two rounds; exits 1 if a provider name or an exit code changes
+powershell -NoProfile -ExecutionPolicy Bypass -File zig\provider-matrix.ps1
+```
+
+`zig/provider-matrix.ps1` runs `--preview` on `img00.png`, `img00.bmp`,
+`viper.mp3`, `rabbit320.mp4`, `tone_440.wav` and `mystery.xyz` twice — default and
+`--no-shell-preview` — and asserts which provider each round must name
+(`image-wic`, `image-wic`, `mf-audio`, `mf-video`, `wasapi-pcm`, `none` +
+`unsupported`), that the process exits 0, and that the no-shell round really
+printed `shell-preview=disabled` (otherwise the flag could be ignored and the
+column would prove nothing). `open_ms` is printed for every round with **no
+threshold** — a cold Media Foundation jumps by hundreds of ms legitimately — so a
+performance regression is visible as a number instead of becoming a flaky test.
+It is a `health.ps1` row in both full and `-Quick` mode, and
+`verify-distribution.ps1` runs the same `img00.png` preview in the portable form,
+so the self-contained decode is proven on the shipped copy, not only in the dev
+tree.
+
 ## Search and keyboard
 
 A full-width field (`搜索素材…`) sits above the list:
@@ -431,16 +452,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ..\health.ps1 -Release
 
 `zig/health.ps1` runs the whole gate in one process and prints a single table:
 debug + release builds, the core / ports / app test suites, the distribution
-audit above, the six-row bench plus the real-window scroll and memory probes,
-the opacity probe, the four `--demo*` self-checks, and minisign verification of
-the newest `zig/dist` artifacts. No window is shown and no focus is taken. A
-failure in one step is recorded and the rest still run; the exit code is decided
-at the end (any failed row -> 1). The charter's known unmet first-frame
+audit above, the provider matrix, the six-row bench plus the real-window scroll
+and memory probes, the opacity probe, the four `--demo*` self-checks, and minisign
+verification of the newest `zig/dist` artifacts. No window is shown and no focus
+is taken. A failure in one step is recorded and the rest still run; the exit code
+is decided at the end (any failed row -> 1). The charter's known unmet first-frame
 <= 100 ms row is labeled `KNOWN-FAIL` and does not fail the run. `-Quick` is the
-pre-commit subset (builds + tests + audit + signatures), `-Release` skips the
-debug build. The test suites and the opacity probe are retried once because
-their real-window foreground checks are sensitive to an unrelated shell window;
-the table says so when that happens.
+pre-commit subset (builds + tests + audit + provider matrix + signatures),
+`-Release` skips the debug build. The test suites and the opacity probe are
+retried once because their real-window foreground checks are sensitive to an
+unrelated shell window; the table says so when that happens.
 
 ## Settings panel (topmost, opacity, budgets)
 
