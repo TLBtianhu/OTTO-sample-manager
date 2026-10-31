@@ -454,7 +454,7 @@ installed), all with defaults when the field is missing:
 
 | field | effect | when it applies |
 | --- | --- | --- |
-| `always_on_top` | `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)` | on the click, and once at startup |
+| `always_on_top` | `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)` + read back `WS_EX_TOPMOST` | on the click, and once at startup |
 | `opacity` | `WS_EX_LAYERED` + `SetLayeredWindowAttributes(LWA_ALPHA)` | on every slider frame (hot), and once at startup |
 | `l2_budget_mib` / `l3_budget_mib` | thumbnail caches | on close |
 | `update_url` | feed used by 「检查更新」 | on close |
@@ -469,9 +469,18 @@ ignores `SetLayeredWindowAttributes`. That run prints one
 `opacity-d3d-warning` line instead of failing silently; the default GDI present
 path is the one that supports it.
 
+Topmost has its own trap: a background thread's `SetWindowPos` can return TRUE
+while `WS_EX_TOPMOST` stays unset (the foreground input-queue lock). `setTopmost`
+always reads the bit back; if it did not change it attaches to the foreground
+thread for one retry and detaches immediately, and still failing it returns
+`error.TopmostRejected` instead of pretending success. The panel logs
+`topmost-rejected` and retries once when the window first becomes foreground.
+
 ```powershell
 # one command: real hidden HWND, flags read back from Windows, panel screenshots
 powershell -NoProfile -ExecutionPolicy Bypass -File ../opacity.ps1
+# one command: portable startup always_on_top=true, external WS_EX_TOPMOST readback
+powershell -NoProfile -ExecutionPolicy Bypass -File ../topmost.ps1
 ```
 
 ## Update check (M5)

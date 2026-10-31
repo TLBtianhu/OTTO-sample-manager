@@ -20,6 +20,20 @@
 //! 判定用 `GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST`：这是 Windows
 //! 自己维护的置顶位，也是验收脚本断言的同一个位（不是本口岸记的账）。
 //!
+//! ## 前台锁：`SetWindowPos` 的返回值会撒谎
+//!
+//! 后台进程（没有前台窗口的线程）调用 `SetWindowPos(HWND_TOPMOST)` 时，Windows
+//! 只在调用线程与前台线程**共享输入队列**时才真正改 z-order；否则它可能返回
+//! `TRUE`、`GetLastError` 还是 0，而 `WS_EX_TOPMOST` 位一点没变。启动时窗口还
+//! 没被激活，正是这条路径——用户保存了"窗口置顶"，下次启动却静默失效。
+//!
+//! 所以 `setTopmost` 在每次 `SetWindowPos` 之后都**读回 `WS_EX_TOPMOST`**，以位
+//! 为准、不以返回值为准；第一次读回不对时，取前台线程并与它临时
+//! `AttachThreadInput`，再试一次，然后立刻解挂（`defer` 兜底，绝不留着挂住）。
+//! 两次都改不动就返回 `error.TopmostRejected`，不假装成功。全程不调用
+//! `SetForegroundWindow` / `SetActiveWindow` / `SetFocus`：接输入队列不等于抢焦点，
+//! 前台窗口和焦点都不变。
+//!
 //! ## 不透明度
 //!
 //! ```
@@ -54,6 +68,9 @@ pub const Error = error{
     InvalidWindow,
     /// `SetWindowPos` 失败，具体 Win32 码见 `lastError()`。
     SetWindowPosFailed,
+    /// `SetWindowPos` 返回成功，但读回 `WS_EX_TOPMOST` 仍不是期望值：
+    /// 后台进程的前台锁拒绝了这条 z-order 修改（见文件头的"前台锁"）。
+    TopmostRejected,
     /// `SetWindowLongPtrW` 改扩展样式失败（加/去 `WS_EX_LAYERED`）。
     SetStyleFailed,
     /// `SetLayeredWindowAttributes` 失败。
@@ -122,6 +139,10 @@ extern "user32" fn GetLayeredWindowAttributes(hwnd: HWND, color_key: ?*DWORD, al
 
 extern "user32" fn IsWindowVisible(hwnd: HWND) callconv(.winapi) BOOL;
 
+/// 句柄是不是一个还活着的窗口。无效 / 已销毁 / 风格不对的句柄都在碰 Win32
+/// 之前变成 `error.InvalidWindow`，不让调用方拿到一个假的成功或一个崩溃。
+extern "user32" fn IsWindow(hwnd: HWND) callconv(.winapi) BOOL;
+
 extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 
 /// 清零错误码：`SetWindowLongPtrW` 成功时也返回 0，只能靠"调用前清零 +
@@ -148,10 +169,8 @@ extern "user32" fn DestroyWindow(hwnd: HWND) callconv(.winapi) BOOL;
 
 extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 
-/// 测试进程是后台进程。Windows 只在调用线程与前台线程共享输入队列时才接受
-/// 后台进程对 z-order 的修改；否则 `SetWindowPos` 返回成功但 `WS_EX_TOPMOST`
-/// 位不变（前台锁 / 输入队列规则）。测试只把这一对调用接到前台线程上，
-/// 不激活、不改变前台窗口；断言仍然是 Windows 自己维护的置顶位。
+/// 前台锁的解法：临时与前台线程共享输入队列，让后台进程的 z-order 修改被接受。
+/// 只用于 `setTopmost` 的第二次尝试；不激活、不改变前台窗口。
 extern "user32" fn AttachThreadInput(id_attach: DWORD, id_attach_to: DWORD, attach: BOOL) callconv(.winapi) BOOL;
 
 extern "user32" fn GetWindowThreadProcessId(hwnd: HWND, process_id: ?*DWORD) callconv(.winapi) DWORD;
@@ -169,20 +188,66 @@ pub fn lastError() u32 {
 // 公共 API
 // ---------------------------------------------------------------------------
 
-/// 置顶 / 取消置顶。`hwnd` 为空是 `error.InvalidWindow`，不是崩溃。
+/// 置顶 / 取消置顶。`hwnd` 为空 / 无效是 `error.InvalidWindow`，不是崩溃。
 ///
 /// 不移动、不缩放、不激活窗口；成功返回后 `isTopmost(hwnd)` 立即反映新状态。
+/// 返回 `error.TopmostRejected` 表示系统没有接受这次 z-order 修改（读回的位不
+/// 符合期望），调用方不该把它当成成功；窗口被拒绝后第一次成为前台时可以再试。
 pub fn setTopmost(hwnd: ?*anyopaque, on: bool) Error!void {
     if (!supported) return error.Unsupported;
     const raw = hwnd orelse return error.InvalidWindow;
     const handle: HWND = @ptrCast(raw);
+    // 无效句柄在 SetWindowPos 里可能只是失败，也可能返回一个莫名其妙的码；
+    // 先问 IsWindow，给调用方一个稳定的具名错误。
+    if (IsWindow(handle) == 0) return error.InvalidWindow;
 
+    const first_call_ok = setWindowPosTopmost(handle, on);
+    // 以读回的位为准：即使 SetWindowPos 报失败，期望状态已经成立也算成功。
+    if (isTopmost(handle) == on) return;
+    // 硬失败（句柄已失效 / 权限不足）不是前台锁，不做徒劳的 attach。
+    if (!first_call_ok) return error.SetWindowPosFailed;
+
+    // 第一次 SetWindowPos 返回 TRUE，但位没变：后台进程被前台锁挡下了。
+    // 找到前台线程，临时与它共享输入队列，再试一次。全程不激活、不改前台。
+    const me = GetCurrentThreadId();
+    var foreground_thread: DWORD = 0;
+    if (GetForegroundWindow()) |foreground| {
+        foreground_thread = GetWindowThreadProcessId(foreground, null);
+    }
+    // 前台就是本线程（或根本取不到）：没有可接的输入队列，直接如实拒绝。
+    if (foreground_thread == 0 or foreground_thread == me) return error.TopmostRejected;
+
+    var attached = false;
+    // 兜底：任何提前返回路径都不能让两个线程的输入队列留在挂住状态。
+    defer {
+        if (attached) _ = AttachThreadInput(me, foreground_thread, 0);
+    }
+    if (AttachThreadInput(me, foreground_thread, 1) == 0) {
+        last_win32_error = GetLastError();
+        // 接不上也再试一次：最终只认读回的位，第二次的返回值同样不可信。
+    } else {
+        attached = true;
+    }
+
+    _ = setWindowPosTopmost(handle, on);
+    if (attached) {
+        // 立刻解挂：两个线程共享输入状态是严重问题，不能拖到函数返回。
+        if (AttachThreadInput(me, foreground_thread, 0) != 0) attached = false;
+    }
+    if (isTopmost(handle) != on) return error.TopmostRejected;
+}
+
+/// 一次原始 `SetWindowPos`。返回 false 时 `last_win32_error` 是 Win32 码。
+///
+/// **返回值不是结果**：见文件头"前台锁"，它可能在位没变时也返回 true。
+fn setWindowPosTopmost(handle: HWND, on: bool) bool {
     const insert_after: isize = if (on) HWND_TOPMOST else HWND_NOTOPMOST;
     const after: ?HWND = @ptrFromInt(@as(usize, @bitCast(insert_after)));
     if (SetWindowPos(handle, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) == 0) {
         last_win32_error = GetLastError();
-        return error.SetWindowPosFailed;
+        return false;
     }
+    return true;
 }
 
 /// 读 Windows 自己维护的 `WS_EX_TOPMOST` 位。空句柄 / 非 Windows 返回 false。
@@ -190,6 +255,17 @@ pub fn isTopmost(hwnd: ?*anyopaque) bool {
     if (!supported) return false;
     const raw = hwnd orelse return false;
     return exStyle(@ptrCast(raw)) & WS_EX_TOPMOST != 0;
+}
+
+/// 我们的窗口是不是当前前台窗口。空句柄 / 非 Windows / 没有前台返回 false。
+///
+/// nanoui 没有 focus 回调（只有每帧的 `Context.window_focused`），app 的启动
+/// 置顶补救在 tick 里用这个系统事实判断"窗口第一次被激活"。
+pub fn isForeground(hwnd: ?*anyopaque) bool {
+    if (!supported) return false;
+    const raw = hwnd orelse return false;
+    const foreground = GetForegroundWindow() orelse return false;
+    return foreground == @as(HWND, @ptrCast(raw));
 }
 
 /// 整体不透明度：0 = 全透明，255 = 完全不透明。
@@ -310,40 +386,6 @@ fn isOurs(handle: ?HWND, hwnd: HWND) bool {
     return if (handle) |value| value == hwnd else false;
 }
 
-/// 与前台线程共享输入队列的临时连接（只覆盖测试里的 `setTopmost` 调用）。
-const ForegroundInput = struct {
-    me: DWORD,
-    foreground_thread: DWORD,
-    attached: bool,
-
-    fn join() ForegroundInput {
-        const me = GetCurrentThreadId();
-        var foreground_thread: DWORD = 0;
-        if (GetForegroundWindow()) |foreground| {
-            foreground_thread = GetWindowThreadProcessId(foreground, null);
-        }
-        var attached = false;
-        if (foreground_thread != 0 and foreground_thread != me) {
-            attached = AttachThreadInput(me, foreground_thread, 1) != 0;
-        }
-        return .{ .me = me, .foreground_thread = foreground_thread, .attached = attached };
-    }
-
-    fn leave(self: ForegroundInput) void {
-        if (self.attached) _ = AttachThreadInput(self.me, self.foreground_thread, 0);
-    }
-};
-
-/// 测试进程在后台时，Windows 会忽略**没有**接上前台输入队列的 z-order 修改
-/// （`SetWindowPos` 返回 TRUE 但 `WS_EX_TOPMOST` 不置位）。短暂接上输入队列，
-/// 让 `setTopmost` 在测试里得到和"用户在前台点开关"时一样的执行条件；
-/// 不激活任何窗口，前台窗口也不变。
-fn setTopmostWithForegroundInput(hwnd: HWND, on: bool) !void {
-    const foreground_input = ForegroundInput.join();
-    defer foreground_input.leave();
-    try setTopmost(hwnd, on);
-}
-
 /// 建一个从未 `ShowWindow` 过的系统 `STATIC` 窗口：没有消息循环也能被
 /// `SetWindowPos` 改扩展样式。`WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` 保证它
 /// 即使被误显示也不会抢焦点、不进任务栏。
@@ -365,7 +407,7 @@ fn createHiddenWindow() !HWND {
     ) orelse error.CreateWindowFailed;
 }
 
-test "真实隐藏窗口：设置/取消 WS_EX_TOPMOST，且不抢前台" {
+test "topmost-foreground-input: 真实隐藏窗口，调用方不 attach，setTopmost 自己处理前台锁" {
     if (!supported) return error.SkipZigTest;
 
     const hwnd = try createHiddenWindow();
@@ -376,12 +418,17 @@ test "真实隐藏窗口：设置/取消 WS_EX_TOPMOST，且不抢前台" {
     // 前后两个前台值只作诊断打印用；断言只看"前台是不是我们"。
     const foreground_before = GetForegroundWindow();
     try expectNotForeground(hwnd);
+    try testing.expect(!isForeground(hwnd));
 
-    try setTopmostWithForegroundInput(hwnd, true);
+    // 验收 2：调用方**绝不** AttachThreadInput。测试进程通常是后台进程，
+    // 前台锁必须由 setTopmost 自己接、自己解；失败会以具名错误返回（`try`
+    // 会让测试失败），不会静默放过。
+    try setTopmost(hwnd, true);
     try testing.expect(isTopmost(hwnd));
     try expectNotForeground(hwnd);
+    try testing.expect(!isForeground(hwnd));
 
-    try setTopmostWithForegroundInput(hwnd, false);
+    try setTopmost(hwnd, false);
     try testing.expect(!isTopmost(hwnd));
     try expectNotForeground(hwnd);
 
@@ -400,20 +447,29 @@ test "真实隐藏窗口：设置/取消 WS_EX_TOPMOST，且不抢前台" {
     try expectNotForeground(hwnd);
 }
 
-test "空句柄是具名错误；重复设置是幂等的" {
+test "topmost-invalid: null / 无效句柄是具名错误；重复设置是幂等的" {
     if (!supported) return error.SkipZigTest;
 
     try testing.expectError(error.InvalidWindow, setTopmost(null, true));
     try testing.expect(!isTopmost(null));
 
+    // 验收 4：把一个无效句柄（比如已销毁 / 伪造的值）传进来，必须是具名错误，
+    // 不是崩溃、也不是假装成功。`IsWindow` 先把它挡在 Win32 调用之前。
+    const bogus: *anyopaque = @ptrFromInt(@as(usize, 0x1234_5678));
+    try testing.expectError(error.InvalidWindow, setTopmost(bogus, true));
+    try testing.expectError(error.InvalidWindow, setTopmost(bogus, false));
+    try testing.expect(!isTopmost(bogus));
+    try testing.expect(!isForeground(bogus));
+
     const hwnd = try createHiddenWindow();
     defer _ = DestroyWindow(hwnd);
 
-    try setTopmostWithForegroundInput(hwnd, true);
-    try setTopmostWithForegroundInput(hwnd, true);
+    // 幂等：第二次设置同一值不会把置顶位弄丢，也不该触发前台锁兜底。
+    try setTopmost(hwnd, true);
+    try setTopmost(hwnd, true);
     try testing.expect(isTopmost(hwnd));
-    try setTopmostWithForegroundInput(hwnd, false);
-    try setTopmostWithForegroundInput(hwnd, false);
+    try setTopmost(hwnd, false);
+    try setTopmost(hwnd, false);
     try testing.expect(!isTopmost(hwnd));
 }
 

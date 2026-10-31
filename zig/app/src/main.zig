@@ -360,6 +360,8 @@ const State = struct {
         const s: *State = @ptrCast(@alignCast(ctx.?));
         // 拖放循环里不许再碰 UI（连轮询也不做）：等它返回后下一次 tick 再补。
         if (!s.transport.busy) {
+            // 启动置顶被前台锁拒绝时，窗口第一次成为前台后补一次（见 settings_ui）。
+            s.settings.retryTopmostIfActivated(window_util.nativeHandle(s.window));
             s.refresh();
             // 导入是异步的：结果回来先重载（换 Live/库指针），再刷新本帧的状态。
             const import_event = s.import.poll();
@@ -480,7 +482,6 @@ pub fn main(init: std.process.Init) !void {
         options_mod.printUsage();
         return error.InvalidArguments;
     };
-
     // 所有不开窗的模式（--version / 自检 / 转换 / 查库）都在这里返回；
     // null 才继续走 UI。顺序与实现见 `commands.zig`。
     if (try commands.run(init, allocator, options)) |code| {
@@ -489,7 +490,6 @@ pub fn main(init: std.process.Init) !void {
     }
     // `--mem-probe`：真实窗口形态的内存分解（隐藏窗口）；没开时 `begin`/`mark` 只是 bool 判断。
     var probe = mem_probe.Probe.begin(init, options);
-
     // 位置参数优先；没有就按运行形态给默认库（见文件头）。格式按 magic 判断。
     const library_path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
     var library = try init.gpa.create(core.store.Library);
