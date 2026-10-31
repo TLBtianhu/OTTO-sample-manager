@@ -9,7 +9,7 @@
 #   2. core / ports / app `zig build test`
 #   3. verify-distribution.ps1 against the real %APPDATA% (it snapshots/restores)
 #   3b. zig-out\bin purity: only otto-lite.exe / otto-lite.pdb / otto-thumb-host.exe
-#   4. provider-matrix.ps1: `--preview` on nine samples, default and
+#   4. provider-matrix.ps1: `--preview` on ten samples, default and
 #      `--no-shell-preview`, asserting which provider answers (the 0.9.0
 #      "each format is self-sufficient" claim plus the 0.16 legacy formats;
 #      also runs under -Quick)
@@ -443,7 +443,7 @@ function Invoke-Purity {
 # 4. Provider matrix (the 0.9.0 self-sufficient-provider claim)
 # ---------------------------------------------------------------------------
 
-# Nine samples, two rounds each: the default registry and the one without
+# Ten samples, two rounds each: the default registry and the one without
 # shell-thumbnail. The row fails if any `--preview` names a provider other than
 # the expected one, exits non-zero, or (no-shell round) does not print
 # `shell-preview=disabled`. This is the only check that notices "MP3 preview

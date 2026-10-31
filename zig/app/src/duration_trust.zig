@@ -7,7 +7,7 @@
 //!   1. `isEstimated`：库里已有 `duration > 0` 的 MP3 要不要显示 `≈`（0.18 之前
 //!      的契约，行为完全不变）；
 //!   2. `resolve`：库里 `duration <= 0` 的**旧库条目**（0.18 之前导入的压缩 WAV /
-//!      FLAC / AIFF / MP3）就地补一个时长——不动库文件，也不改导入流水线。
+//!      FLAC / AIFF / MP3 / Ogg）就地补一个时长——不动库文件，也不改导入流水线。
 //!
 //! ## 为什么补显示，而不是回填库文件
 //!
@@ -21,8 +21,8 @@
 //!
 //!   * `sample.duration > 0`：**不 probe**，`resolve` 直接返回 null（库里已经有时长，
 //!     显示层保持原样，这条路径与没有本功能时逐字节一致）；
-//!   * `duration <= 0` 且扩展名是 `.wav/.flac/.mp3/.aiff/.aif`：缓存未命中才 probe
-//!     一次（只读 64 KiB 头，`probe.max_header_bytes`）；
+//!   * `duration <= 0` 且扩展名是 `.wav/.flac/.mp3/.aiff/.aif/.ogg/.oga`：缓存未命中
+//!     才 probe 一次（只读 64 KiB 头；Ogg 再多读 64 KiB 尾，见 `ports/probe.zig`）；
 //!   * 视频后缀（`.mp4/.mov/.mkv/.webm`）另走一条：**库里已有时长也要读一次头**，
 //!     因为分辨率不在 `Sample` 里；`display` 用它决定列表行要不要写 `640×360`；
 //!   * 其它扩展名（`.xyz` / `.png` / 无后缀）：不打开文件，仍然"未知"——显示层不猜
@@ -218,7 +218,7 @@ fn extension(sample: core.model.Sample) []const u8 {
 /// 显示层愿意打开的容器后缀（音频 + 视频）。大小写不敏感，前导点必须有。
 fn parsable(ext: []const u8) bool {
     const supported = [_][]const u8{
-        ".wav", ".flac", ".mp3", ".aiff", ".aif",
+        ".wav", ".flac", ".mp3", ".aiff", ".aif", ".ogg", ".oga",
         ".mp4", ".mov",  ".mkv", ".webm",
     };
     for (supported) |candidate| {

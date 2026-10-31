@@ -28,13 +28,16 @@ fn sampleWith(ext: []const u8) core.model.Sample {
     };
 }
 
-test "supports：.flac/.wav/.mp3/.aiff/.aif 归 native-audio 管；.aifc/.ogg/.mp4 不归" {
+test "supports：.flac/.wav/.mp3/.aiff/.aif/.ogg/.oga 归 native-audio 管；.aifc/.opus/.mp4 不归" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    for ([_][]const u8{ ".flac", ".FLAC", ".wav", ".WAV", ".mp3", ".aiff", ".AIF", ".aif" }) |ext| {
+    for ([_][]const u8{
+        ".flac", ".FLAC", ".wav", ".WAV", ".mp3", ".aiff", ".AIF", ".aif", ".ogg", ".OGG", ".oga",
+    }) |ext| {
         try testing.expect(native_audio.supports(&sampleWith(ext)));
     }
     // `.aifc` 明确不在声明里：压缩 AIFC 在库中是 Unsupported，不假装能接。
-    for ([_][]const u8{ ".aifc", ".ogg", ".mp4", ".flacx", "" }) |ext| {
+    // `.opus` 同理：库只解 Ogg Vorbis，Opus 编码在库内被明确谢绝，不声明它。
+    for ([_][]const u8{ ".aifc", ".opus", ".mp4", ".flacx", "" }) |ext| {
         try testing.expect(!native_audio.supports(&sampleWith(ext)));
     }
 }

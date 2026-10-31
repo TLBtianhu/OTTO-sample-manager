@@ -1,4 +1,5 @@
-//! 纯 Zig 音频 provider：**WAV / FLAC / MP3 / AIFF**（vendor 的 zig-audio v0.8）。
+//! 纯 Zig 音频 provider：**WAV / FLAC / MP3 / AIFF / Ogg Vorbis**（vendor 的
+//! zig-audio v0.10）。
 //!
 //! 它是"库能解什么，我就声明什么"的那一项：`supports` 只按扩展名做廉价声明，
 //! 真正的容器识别由 `zig_audio.open` 按**内容**完成。解出来的 PCM 统一交给
@@ -17,6 +18,11 @@
 //! `error.Unsupported`（不猜压缩类型）。一个 `.aiff` 里装 AIFC 时库会给出
 //! `Unsupported` → 本 provider 谢绝为 `none.unsupported`，不是 `failed`。
 //!
+//! `.ogg` / `.oga` 也归这里，但**只认 Vorbis**：Ogg 是容器，里面可能是 Vorbis，
+//! 也可能是 Opus。库只解 Vorbis，对 Opus 明确返回 `error.Unsupported` → 本
+//! provider 按同一条规则谢绝为 `none.unsupported`（文件没坏，只是不是我们的
+//! 编码），让后面的 provider 继续试，**不是 `failed`**。
+//!
 //! ## 输出与内存
 //!
 //! 库的公开读取路径只有一种输出：**交错 i16**（源 8/16/24/32 位、float32、
@@ -25,6 +31,11 @@
 //!
 //! 压缩文件不整份进内存：`audio/file_reader.zig` 的 64 KiB 流式 Reader 按需拉取；
 //! 整段 PCM 仍进内存（播放器/波形都要整段），上限 512 MiB（`audio/decode.zig`）。
+//!
+//! Vorbis 的 `Info.total_frames` 要读到流尾才有值（最后一页的 granule），所以
+//! 开流时它是 `null`：`audio/decode.zig` 走"没有声明长度"的估算分支（压缩大小 ×
+//! 12，上限 64 MiB），只影响 realloc 次数，不参与上限判断；512 MiB 的增量检查
+//! 与最终帧数仍按实际解出的样本算，不信容器（见 `reservePcm` 的注释）。
 //!
 //! ## 错误 → 四态（统一规则）
 //!
@@ -36,8 +47,8 @@
 //!
 //! ## 图标：不参与
 //!
-//! `icon_capable = false`。WAV/FLAC/MP3/AIFF 都没有"读几 KB 就能画出包络"的通用
-//! 粗采样路径（WAV 的粗采样专门留在 wasapi-pcm；压缩帧要解整段）。按"绝不为
+//! `icon_capable = false`。WAV/FLAC/MP3/AIFF/Vorbis 都没有"读几 KB 就能画出包络"的
+//! 通用粗采样路径（WAV 的粗采样专门留在 wasapi-pcm；压缩帧要解整段）。按"绝不为
 //! 32px 图标解码整段音频"的原则，图标表里不出现本 provider；`open` 里再挡一次
 //! `request.icon`，误塞进来也只会得到一次谢绝。
 
@@ -62,7 +73,8 @@ pub const provider: preview.Provider = .{
 
 /// 声明接手的扩展名（带点，大小写不敏感）。`.aifc` 故意不在表里：压缩 AIFC
 /// 需要额外的压缩类型字段，库明确返回 `Unsupported`；不声明就不会假装能接。
-const extensions = [_][]const u8{ ".wav", ".flac", ".mp3", ".aiff", ".aif" };
+/// `.ogg` / `.oga` 声明的是**容器**，编码由库按首包判断（Opus 会被谢绝）。
+const extensions = [_][]const u8{ ".wav", ".flac", ".mp3", ".aiff", ".aif", ".ogg", ".oga" };
 
 /// 整段 PCM 上限（与 `audio/decode.zig` / MF 同一常量）。
 pub const max_pcm_bytes: usize = decode_mod.max_pcm_bytes;
@@ -79,8 +91,9 @@ pub fn supportsExtension(ext: []const u8) bool {
     return false;
 }
 
-/// `.wav` / `.flac` / `.mp3` / `.aiff` / `.aif` 归本 provider。大小写不敏感；
-/// 不碰文件、不碰注册表。真正的"能不能解"由 `open` 里的 `zig_audio.open` 回答。
+/// `.wav` / `.flac` / `.mp3` / `.aiff` / `.aif` / `.ogg` / `.oga` 归本 provider。
+/// 大小写不敏感；不碰文件、不碰注册表。真正的"能不能解"由 `open` 里的
+/// `zig_audio.open` 回答——`.ogg` 里装 Opus 时它的回答是"谢绝"。
 pub fn supports(sample: *const core.model.Sample) bool {
     return supportsExtension(sample.file_ext);
 }

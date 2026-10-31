@@ -1,8 +1,12 @@
 //! probe 的测试根。
 //!
-//! 音频的解析测试写在 `probe.zig` 里（真临时文件 + 内存里造的 WAV）；这里只放
-//! **视频容器的端到端**测试——`probe.zig` 的正文字数压到 450 行以内，装不下
-//! 造 mp4 的辅助函数。
+//! 音频的解析测试写在 `probe.zig` 里（真临时文件 + 内存里造的 WAV），Ogg 的字节
+//! 解析在 `ogg_info.zig`（跟着本测试根一起跑）；这里放**放不进 probe.zig 正文**的
+//! 部分——`probe.zig` 的字数压到 450 行以内：
+//!
+//!   * 视频容器的端到端测试（造 mp4 的辅助函数）；
+//!   * MP3 官方向量的时长对照（七条数据驱动用例）；
+//!   * Ogg 的端到端：真 Vorbis 素材的精确时长，以及 `.ogg` 里装 Opus 时的 null。
 //!
 //! `wav_header.zig` 的测试单独一个根（`wav_header_test.zig`）：probe 通过模块
 //! `otto_wav_header` 引它，同一个编译图里不能再按相对路径把同一个文件拉进来。
@@ -134,3 +138,79 @@ test "真 testkit mp4（存在才跑）：rabbit320.mp4 = 7800 ms / 320×240 / a
     try testing.expectEqual(probe.Kind.mp4, metadata.kind);
     try testing.expect(!metadata.estimated);
 }
+
+// ---------------------------------------------------------------------------
+// 音频向量：MP3 的 Xing/Info 与 Ogg（Vorbis / Opus）
+// ---------------------------------------------------------------------------
+
+test "真 vector mp3（存在才跑）：带 Xing/Info 的文件全部精确" {
+    const Case = struct {
+        name: []const u8,
+        duration_ms: u64,
+        sample_rate: u32,
+        channels: u32,
+    };
+    // 期望值来自 Xing/Info 的 frames 字段（与 ffprobe 的秒数向下取整一致）。
+    const cases = [_]Case{
+        .{ .name = "mono-32k-64.mp3", .duration_ms = 3060, .sample_rate = 32_000, .channels = 1 },
+        .{ .name = "mono-44k-128.mp3", .duration_ms = 3030, .sample_rate = 44_100, .channels = 1 },
+        .{ .name = "mono-44k-vbr.mp3", .duration_ms = 2037, .sample_rate = 44_100, .channels = 1 },
+        .{ .name = "mono-48k-192.mp3", .duration_ms = 3024, .sample_rate = 48_000, .channels = 1 },
+        .{ .name = "stereo-44k-192.mp3", .duration_ms = 3030, .sample_rate = 44_100, .channels = 2 },
+        .{ .name = "stereo-44k-vbr-ms.mp3", .duration_ms = 3030, .sample_rate = 44_100, .channels = 2 },
+        .{ .name = "stereo-48k-128-lr.mp3", .duration_ms = 3024, .sample_rate = 48_000, .channels = 2 },
+    };
+
+    for (cases) |case| {
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(
+            &path_buffer,
+            "C:\\src\\zig-audio-vectors\\mp3\\{s}",
+            .{case.name},
+        ) catch return error.SkipZigTest;
+        std.Io.Dir.cwd().access(test_io, path, .{}) catch return error.SkipZigTest;
+
+        const metadata = (try probe.probe(test_allocator, test_io, path)).?;
+        try testing.expectEqual(case.duration_ms, metadata.duration_ms);
+        try testing.expectEqual(case.sample_rate, metadata.sample_rate);
+        try testing.expectEqual(case.channels, metadata.channels);
+        try testing.expect(!metadata.estimated);
+    }
+}
+
+test "真 testkit ogg（存在才跑）：vorbis-44k.ogg = 3000 ms / 44100 / 2 声道 / 精确" {
+    const path = "C:\\src\\otto-testkit\\samples\\vorbis-44k.ogg";
+    std.Io.Dir.cwd().access(test_io, path, .{}) catch return error.SkipZigTest;
+
+    const metadata = (try probe.probe(test_allocator, test_io, path)).?;
+    // 132300 帧 @ 44.1 kHz = 正好 3.000 s，来自最后一页的 granule。
+    try testing.expectEqual(@as(u64, 3000), metadata.duration_ms);
+    try testing.expectEqual(@as(u32, 44_100), metadata.sample_rate);
+    try testing.expectEqual(@as(u32, 2), metadata.channels);
+    try testing.expectEqual(probe.Kind.ogg, metadata.kind);
+    try testing.expect(!metadata.estimated);
+}
+
+test ".ogg 里装 Opus：probe 返回 null（谢绝，不冒充 Vorbis）" {
+    // 一张 BOS 页 + 19 字节的 OpusHead 识别包，一共 47 字节。
+    var page: [47]u8 = @splat(0);
+    @memcpy(page[0..4], "OggS");
+    page[5] = 0x02; // BOS
+    page[26] = 1; // 一个 segment
+    page[27] = 19; // 识别包 19 字节
+    @memcpy(page[28..36], "OpusHead");
+    page[36] = 1;
+    page[37] = 2;
+    std.mem.writeInt(u16, page[38..40], 312, .little);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(test_io, .{ .sub_path = "opus-in-ogg.ogg", .data = &page });
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(test_io, &root);
+    var full: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&full, "{s}\\opus-in-ogg.ogg", .{root[0..root_len]});
+
+    try testing.expect((try probe.probe(test_allocator, test_io, path)) == null);
+}
+

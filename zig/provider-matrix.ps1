@@ -26,7 +26,7 @@
 #      provider=none / outcome=none reason=unsupported. "No preview" must stay
 #      visible instead of being swallowed by a fallback.
 #
-# Expected table (0.16.0 + legacy):
+# Expected table (0.20.0 + legacy + Ogg):
 #
 #   素材               默认          no-shell
 #   img00.png          image-wic     image-wic      (core row: PNG never needs Shell)
@@ -35,16 +35,20 @@
 #   rabbit320.mp4      mf-video      mf-video
 #   tone_440.wav       wasapi-pcm    wasapi-pcm
 #   tone_660.flac      native-audio  native-audio   (vendored zig-audio, pure Zig)
+#   vorbis-44k.ogg     native-audio  native-audio   (vendored zig-audio v0.10 Ogg Vorbis)
 #   legacy-adpcm.wav   wasapi-pcm    wasapi-pcm     (MS ADPCM WAV, zig-audio v0.8)
 #   legacy.aiff        native-audio  native-audio   (AIFF PCM16, zig-audio v0.8)
 #   mystery.xyz        none          none
 #
 # The audio rows need an audio endpoint: `wasapi-pcm` (WAV/ADPCM) and
-# `native-audio` (FLAC / MP3 / AIFF) initialise the shared-mode device inside
-# `open`, and a box with no endpoint makes them decline (then shell-thumbnail may
-# answer, or nothing). bench.ps1 calls that SKIP; here it is a FAIL by design -- the
-# point of the gate is that audio preview works on this machine, not that it would
-# work on one where it cannot.
+# `native-audio` (FLAC / MP3 / AIFF / Ogg Vorbis) initialise the shared-mode
+# device inside `open`, and a box with no endpoint makes them decline (then
+# shell-thumbnail may answer, or nothing). bench.ps1 calls that SKIP; here it is
+# a FAIL by design -- the point of the gate is that audio preview works on this
+# machine, not that it would work on one where it cannot. `.ogg` is declared by
+# extension, so an Ogg file carrying Opus is claimed and then *declined*
+# (`unsupported`, not `failed`) -- that path is covered by the app tests
+# (`providers/native_audio_ogg_test.zig`), not by this table.
 #
 # open_ms is printed for every round but has **no threshold**: a cold decoder or a
 # busy audio endpoint legitimately varies by hundreds of ms (viper.mp3 through
@@ -103,6 +107,9 @@ $script:cases = @(
   [pscustomobject]@{ Name = 'rabbit320.mp4'; Default = 'mf-video';   NoShell = 'mf-video';   Reason = '' },
   [pscustomobject]@{ Name = 'tone_440.wav';  Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },
   [pscustomobject]@{ Name = 'tone_660.flac'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
+  # Ogg Vorbis: zig-audio v0.10 decodes it in pure Zig; the registry claims
+  # `.ogg` in native-audio and the duration comes from the last page's granule.
+  [pscustomobject]@{ Name = 'vorbis-44k.ogg'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
   # Legacy formats decoded by zig-audio v0.8: MS ADPCM WAV stays with the WAV
   # provider; AIFF is claimed by native-audio.
   [pscustomobject]@{ Name = 'legacy-adpcm.wav'; Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },

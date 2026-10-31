@@ -1,6 +1,6 @@
 //! L1 元数据口岸：只读文件头，产出时长 / 采样率 / 声道 / 位深 / 画面尺寸 / 编码。
 //!
-//! 六种容器，各自的头部解析在独立文件里（纯字节、可单测）：
+//! 七种容器，各自的头部解析在独立文件里（纯字节、可单测）：
 //!   * WAV：`otto_wav_header.parse` 是解码器与 probe 共用的**唯一**一份块扫描，
 //!     时长由 `wav_info` 按 codec 算（PCM/float、A-law、µ-law、IMA/MS ADPCM）；
 //!   * FLAC：`flac_info.parse` 只读 STREAMINFO；
@@ -9,7 +9,9 @@
 //!   * MP4 / MOV：`mp4_info` 走 box 到 `moov`（mvhd/tkhd/mdhd/stsd）；`moov` 在
 //!     文件尾时由 `mp4_info.seek` 按 box 偏移跳过去，只读那一段，不读 `mdat`；
 //!   * MKV / WebM：`mkv_info` 读 EBML 的 `Info`（TimecodeScale/Duration）与
-//!     `Tracks`（TrackType/PixelWidth/PixelHeight/CodecID）。
+//!     `Tracks`（TrackType/PixelWidth/PixelHeight/CodecID）；
+//!   * Ogg：`ogg_info` 认首包的 `\x01vorbis`（`OpusHead` → null），时长取
+//!     **最后一页的 granule**——头里没有帧数，所以这一种要读文件尾（见下）。
 //!
 //! **视频只读容器、不解码任何一帧**：解码仍归 Media Foundation（`mf-video`）。
 //! 非上述格式、坏头、截断一律返回 `null`——**不猜**，把 `pending_metadata`
@@ -24,11 +26,16 @@
 //! MP3 的 Xing/Info 在**第一帧**里，64 KiB 同样足够；CBR 估算用 `stat` 的
 //! 文件大小，不会把音频负载读进来。FLAC 只需要 42 字节。
 //!
+//! Ogg 是唯一要读**文件尾**的音频容器：Vorbis 的总帧数就是最后一页的 granule，
+//! 头里没有。`ogg_info.read` 用同一个 64 KiB 上限读最后一段（一页最大 65307
+//! 字节，窗口一定含最后一页的页头），从后往前找"页末 == 文件末"的那一页；
+//! 头尾之外一个字节都不读，Opus 与其他 codec 返回 null。
+//!
 //! `Metadata.estimated` 是"这个时长是不是推算的"：WAV（含 ADPCM / G.711）/
-//! FLAC / AIFF / 带 Xing 的 MP3 都来自容器声明（false），无 Xing 的 MP3 由文件
-//! 大小 / 比特率算出（true）。界面必须把 true 显示成 `≈`，不能冒充精确值。
-//! ADPCM 的帧数由块头 + `block_align` 算出，仍是容器精确值，不是估算。
-//! MP4 / MKV 的时长是容器声明的，也是 false。
+//! FLAC / AIFF / 带 Xing 的 MP3 / Ogg Vorbis 都来自容器声明（false），无 Xing
+//! 的 MP3 由文件大小 / 比特率算出（true）。界面必须把 true 显示成 `≈`，不能
+//! 冒充精确值。ADPCM 的帧数由块头 + `block_align` 算出，仍是容器精确值，不是
+//! 估算。MP4 / MKV / Ogg 的时长是容器声明的，也是 false。
 //!
 //! 本文件只碰标准库的文件 API；不 import core。
 
@@ -40,16 +47,19 @@ const mp3_info = @import("mp3_info.zig");
 const aiff_info = @import("aiff_info.zig");
 const mp4_info = @import("mp4_info.zig");
 const mkv_info = @import("mkv_info.zig");
+const ogg_info = @import("ogg_info.zig");
 const codec_text = @import("codec_text.zig");
 
 /// 编码名的定长载体（见 `codec_text.zig`）。
 pub const CodecText = codec_text.CodecText;
-/// 头部读取上限：六种容器的头部都远小于 64 KiB。MP4 的 `moov` 在文件尾时按
-/// 偏移单独读（见 `mp4_info.max_moov_bytes`），这一条只约束"从头读的那一段"。
+/// 头部读取上限：七种容器的头部都远小于 64 KiB。MP4 的 `moov` 在文件尾时按
+/// 偏移单独读（见 `mp4_info.max_moov_bytes`），Ogg 的尾页走 `ogg_info.tail_window`，
+/// 这一条只约束"从头读的那一段"。
 pub const max_header_bytes: usize = 64 * 1024;
 
 /// 支持的类型面。不在这个列表里的容器一律返回 null。
-pub const Kind = enum { wav, flac, mp3, aiff, mp4, mkv };
+pub const Kind = enum { wav, flac, mp3, aiff, mp4, mkv, ogg };
+
 
 pub const Metadata = struct {
     /// 声明或推算的时长（毫秒，向下取整）。
@@ -93,6 +103,7 @@ pub fn probe(
     if (isAiff(bytes)) return probeAiff(bytes);
     if (isMp4(bytes)) return probeMp4(allocator, io, file, bytes);
     if (isMkv(bytes)) return probeMkv(bytes);
+    if (std.mem.eql(u8, bytes[0..4], "OggS")) return probeOgg(allocator, io, file, bytes);
     if (looksLikeMp3(bytes)) return probeMp3(io, file, bytes);
     return null;
 }
@@ -154,6 +165,24 @@ fn probeMkv(bytes: []const u8) ?Metadata {
         .width = info.width,
         .height = info.height,
         .codec = info.codec,
+        .estimated = false,
+    };
+}
+
+/// Ogg：首包认 Vorbis（`OpusHead` / 别的 codec → null），时长取最后一页的
+/// granule（容器精确值）。头 + 尾各读一次，中间不读（见 `ogg_info.zig`）。
+fn probeOgg(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file: std.Io.File,
+    bytes: []const u8,
+) Error!?Metadata {
+    const info = (try ogg_info.read(allocator, io, file, bytes)) orelse return null;
+    return .{
+        .duration_ms = info.duration_ms,
+        .sample_rate = info.sample_rate,
+        .channels = info.channels,
+        .kind = .ogg,
         .estimated = false,
     };
 }
@@ -404,41 +433,6 @@ test "真 testkit mp3（存在才跑）：viper.mp3 无 Xing，按比特率估�
     try testing.expectEqual(@as(u32, 2), metadata.channels);
     try testing.expectEqual(Kind.mp3, metadata.kind);
     try testing.expect(metadata.estimated);
-}
-
-test "真 vector mp3（存在才跑）：带 Xing/Info 的文件全部精确" {
-    const Case = struct {
-        name: []const u8,
-        duration_ms: u64,
-        sample_rate: u32,
-        channels: u32,
-    };
-    // 期望值来自 Xing/Info 的 frames 字段（与 ffprobe 的秒数向下取整一致）。
-    const cases = [_]Case{
-        .{ .name = "mono-32k-64.mp3", .duration_ms = 3060, .sample_rate = 32_000, .channels = 1 },
-        .{ .name = "mono-44k-128.mp3", .duration_ms = 3030, .sample_rate = 44_100, .channels = 1 },
-        .{ .name = "mono-44k-vbr.mp3", .duration_ms = 2037, .sample_rate = 44_100, .channels = 1 },
-        .{ .name = "mono-48k-192.mp3", .duration_ms = 3024, .sample_rate = 48_000, .channels = 1 },
-        .{ .name = "stereo-44k-192.mp3", .duration_ms = 3030, .sample_rate = 44_100, .channels = 2 },
-        .{ .name = "stereo-44k-vbr-ms.mp3", .duration_ms = 3030, .sample_rate = 44_100, .channels = 2 },
-        .{ .name = "stereo-48k-128-lr.mp3", .duration_ms = 3024, .sample_rate = 48_000, .channels = 2 },
-    };
-
-    for (cases) |case| {
-        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = std.fmt.bufPrint(
-            &path_buffer,
-            "C:\\src\\zig-audio-vectors\\mp3\\{s}",
-            .{case.name},
-        ) catch return error.SkipZigTest;
-        std.Io.Dir.cwd().access(test_io, path, .{}) catch return error.SkipZigTest;
-
-        const metadata = (try probe(test_allocator, test_io, path)).?;
-        try testing.expectEqual(case.duration_ms, metadata.duration_ms);
-        try testing.expectEqual(case.sample_rate, metadata.sample_rate);
-        try testing.expectEqual(case.channels, metadata.channels);
-        try testing.expect(!metadata.estimated);
-    }
 }
 
 test "真 FLAC 没有 total_samples（存在才跑）：null，不是 0 秒" {
