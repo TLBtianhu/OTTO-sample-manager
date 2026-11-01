@@ -15,6 +15,7 @@ const std = @import("std");
 const root = @import("root.zig");
 const compare = @import("compare.zig");
 const vorbis_decoder = @import("vorbis_decoder.zig");
+const audit = @import("test_audit");
 const testing = std.testing;
 
 const vector_dir = "..\\zig-audio-vectors\\ogg";
@@ -45,7 +46,7 @@ fn readVector(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}\\{s}", .{ vector_dir, name });
     defer allocator.free(path);
     return std.Io.Dir.cwd().readFileAlloc(testing.io, path, allocator, .limited(16 << 20)) catch |err| switch (err) {
-        error.FileNotFound => error.SkipZigTest,
+        error.FileNotFound => audit.skip(.external_vectors_missing),
         else => err,
     };
 }
@@ -258,4 +259,3 @@ test "vorbis: read honours the caller's buffer size and reports ShortBuffer" {
     }
     try testing.expectEqual(@as(u64, 132_300), frames);
 }
-

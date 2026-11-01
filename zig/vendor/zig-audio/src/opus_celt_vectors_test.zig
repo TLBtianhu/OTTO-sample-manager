@@ -33,6 +33,8 @@ const std = @import("std");
 const root = @import("root.zig");
 const opus = @import("opus.zig");
 const compare = @import("compare.zig");
+const ffmpeg = @import("ffmpeg.zig");
+const audit = @import("test_audit");
 const testing = std.testing;
 
 const vector_dir = "..\\zig-audio-vectors\\ogg";
@@ -53,7 +55,7 @@ fn readVector(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}\\{s}", .{ vector_dir, name });
     defer allocator.free(path);
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(8 << 20)) catch |err| switch (err) {
-        error.FileNotFound => error.SkipZigTest,
+        error.FileNotFound => audit.skip(.external_vectors_missing),
         else => err,
     };
 }
@@ -155,7 +157,6 @@ fn compareI16(ours: []const i16, reference: []const u8) !Stats {
 /// decoders disagree with each other on CELT streams, so this is what tells
 /// "our decoder is wrong" apart from "the two references disagree".
 fn runLibopus(allocator: std.mem.Allocator, bytes: []const u8, sample_format: []const u8) ![]u8 {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "input.bin", .data = bytes });
@@ -169,19 +170,13 @@ fn runLibopus(allocator: std.mem.Allocator, bytes: []const u8, sample_format: []
     );
     defer allocator.free(input_path);
 
-    const result = std.process.run(allocator, std.testing.io, .{
-        .argv = &.{
-            compare.ffmpeg_path, "-v",      "error",
-            "-c:a",              "libopus", "-i",
-            input_path,          "-f",      sample_format,
-            "pipe:1",
-        },
-        .stdout_limit = .limited(64 << 20),
-        .stderr_limit = .limited(1 << 20),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    const result = try ffmpeg.run(allocator, &.{
+        "-v",     "error",
+        "-c:a",   "libopus",
+        "-i",     input_path,
+        "-f",     sample_format,
+        "pipe:1",
+    }, .limited(64 << 20));
     defer allocator.free(result.stderr);
     if (!result.term.success()) {
         allocator.free(result.stdout);

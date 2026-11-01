@@ -20,14 +20,35 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    const require_ffmpeg = b.option(
+        bool,
+        "require-ffmpeg",
+        "Fail when any live-ffmpeg (L4) test skips; ZA_REQUIRE_FFMPEG=1 is equivalent",
+    ) orelse false;
+    const test_options = b.addOptions();
+    test_options.addOption(bool, "require_ffmpeg", require_ffmpeg);
+
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const tests = b.addTest(.{ .root_module = test_mod });
+    test_mod.addOptions("test_options", test_options);
+    const test_audit_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_audit.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.addImport("test_audit", test_audit_mod);
+    const tests = b.addTest(.{
+        .root_module = test_mod,
+        .test_runner = .{ .path = b.path("src/test_runner.zig"), .mode = .simple },
+    });
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run unit, API, integration and fuzz tests");
+    // Integration availability is an environment input, not a source-file
+    // cache key. Always execute so a changed ZA_FFMPEG_PATH cannot reuse green.
+    run_tests.stdio = .inherit;
+    const test_step = b.step("test", "Run unit, API, integration and fuzz tests with L1-L4 audit");
     test_step.dependOn(&run_tests.step);
 
     const fuzz_mod = b.createModule(.{

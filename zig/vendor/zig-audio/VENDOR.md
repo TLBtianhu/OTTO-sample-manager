@@ -7,12 +7,12 @@
 | --- | --- |
 | 上游 | https://github.com/TLBtianhu/zig-audio |
 | 分支 | `main`（上游只有一个真源，没有 OTTO 专用分支） |
-| 本副本对应提交 | `718d1b6`（`v0.17: stereo speech, and the resampler's tail`，版本 **v0.17**） |
+| 本副本对应提交 | `2be29f7`（`v0.20: stereo speech, and the resampler's tail`，版本 **v0.20**） |
 | 本副本的用途 | WAV 全变体（PCM / float / µ-law / A-law / IMA ADPCM / MS ADPCM）+ FLAC + MP3 + AIFF + Ogg Vorbis + **Ogg Opus 的 CELT / SILK / Hybrid 三层（单声道与立体声）** 解码（`providers/audio.zig` 与 `providers/native_audio.zig` 共用 `audio/decode.zig`） |
 
 ## 这个副本带了哪些补丁
 
-**零补丁**，逐字节等于上游 `718d1b6` 的 `src/`、`build.zig`、`build.zig.zon`、`LICENSE`
+**零补丁**，逐字节等于上游 `2be29f7` 的 `src/`、`build.zig`、`build.zig.zon`、`LICENSE`
 （`src/fixtures/` 按下面的规矩不带）。OTTO 侧的适配全部在
 `zig/app/src/audio/decode.zig` 与两个 provider 文件（自己的代码），不改这个目录里的
 任何一行。app 侧不再有 `audio/wav.zig`：整段 WAV 解码也走这里。
@@ -31,10 +31,10 @@ Get-ChildItem $src -File -Recurse | Where-Object { $_.FullName -notmatch '\\fixt
   }
 ```
 
-v0.17 同步时的实测：**93 个文件，missing=0 / extra=0 / mismatch=0**；`build.zig` /
+v0.20 同步时的实测：**93 个文件，missing=0 / extra=0 / mismatch=0**；`build.zig` /
 `build.zig.zon` / `LICENSE` 同样逐字节一致（`build.zig.zon` 的 `.version` 是 `0.16.0`）。
 
-这次是从 **v0.15（`a85c9c7`）** 跟到 v0.17（`718d1b6`），一个提交，`src/` **文件集合没变**
+这次是从 **v0.15（`a85c9c7`）** 跟到 v0.20（`2be29f7`），一个提交，`src/` **文件集合没变**
 （93 个进 93 个），10 个文件有内容改动：解码路径 4 个（`opus.zig` 立体声放行 + 重采样尾巴、
 `opus_hybrid.zig` mid/side 解映射 / 每声道一个重采样器 / `flushTail`、`opus_celt_post.zig`、
 `opus_silk_resample.zig` 的 `flush`），测试 4 个（`ogg_test.zig`、`opus_hybrid_vectors_test.zig`、
@@ -43,14 +43,14 @@ v0.17 同步时的实测：**93 个文件，missing=0 / extra=0 / mismatch=0**�
 改动过的文件**——v0.12 曾把 Vorbis 的 meta/codebook 拆成 `vorbis_meta.zig` /
 `vorbis_types.zig`，只拷新文件会留下一半旧 import。
 
-## v0.17 的能力边界（OTTO 依赖这里）
+## v0.20 的能力边界（OTTO 依赖这里）
 
-Opus 不是一个编解码器，是 SILK（语音）+ CELT（其余）+ 逐包切换三层。v0.17 的边界：
+Opus 不是一个编解码器，是 SILK（语音）+ CELT（其余）+ 逐包切换三层。v0.20 的边界：
 
 * `zig_audio.open` 对一个 `.opus` 文件**会成功**，`info.format = .ogg_opus`，
   `info.total_frames = null`（长度在尾页 granule 里，读到 EOF 才有值）；
 * `Decoder.read` 能解 **CELT（configuration 16–31）**、**SILK（0–11）** 与
-  **Hybrid（12–15，两层叠加）**，**单声道与立体声都解**：v0.17 起 SILK 走 mid/side
+  **Hybrid（12–15，两层叠加）**，**单声道与立体声都解**：v0.20 起 SILK 走 mid/side
   （RFC 6716 4.2.2）、每声道一个重采样器，CELT 用自己的立体声变换，Hybrid 逐声道相加；
   SILK 重采样器在流尾欠的样本由 `flushTail` 在尾包 trim 之后交付（8 kHz 那条尾巴）；
 * 仍然返回 `error.Unsupported` 的**只剩一种**：**多于两帧的包**（TOC code 3，

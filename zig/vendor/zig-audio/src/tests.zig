@@ -34,5 +34,8 @@ test {
     _ = @import("opus_hybrid.zig");
     _ = @import("opus_hybrid_vectors_test.zig");
     _ = @import("ffmpeg_test.zig");
+    _ = @import("stream_matrix_test.zig");
+    _ = @import("stream_contract_test.zig");
     _ = @import("fuzz.zig");
+    _ = @import("fuzz_corpus_test.zig");
 }

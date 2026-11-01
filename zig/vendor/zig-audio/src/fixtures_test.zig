@@ -217,8 +217,8 @@ test "committed 24-bit FLAC matches ffmpeg -f s32le shifted right by 16" {
 }
 
 test "committed LPC FLAC fixtures match ffmpeg sample for sample" {
-    // Skipped when ffmpeg is absent (non-Windows CI); the offline decode above
-    // and the WAV-source comparison still cover both LPC files there.
+    // Skipped with a named reason when ffmpeg is absent; the offline decode
+    // above and the WAV-source comparison still cover both LPC files there.
     for ([_]usize{ 3, 4 }) |i| {
         try compare.expectExact(testing.allocator, flac_cases[i].bytes);
     }
@@ -261,4 +261,111 @@ test "float WAV fixture matches ffmpeg -f s16le within 1 LSB" {
     // not part of the WAV format, so allow one LSB rather than claiming an
     // exactness the format does not define.
     try compare.expectWithin(testing.allocator, wav_cases[4].bytes, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Short-buffer matrix on real audio (L2)
+//
+// `stream_matrix_test.zig` covers every decoder path with synthetic streams.
+// The MP3 mono and Vorbis streams there carry no signal (an all-zero frame and
+// the minimal silent setup), so a value-level bug that swapped two nonzero
+// samples would be invisible. This test runs the same buffer-size sequence on
+// the committed 440 Hz fixtures, sample for sample: MP3 mono/stereo and Ogg
+// Vorbis get a real oracle, and FLAC/WAV add a second one.
+// ---------------------------------------------------------------------------
+
+const short_buffer_full = 4096;
+
+const ShortPattern = struct {
+    name: []const u8,
+    size: usize = 0,
+    random: bool = false,
+    mixed: bool = false,
+};
+
+const short_patterns = [_]ShortPattern{
+    .{ .name = "full", .size = short_buffer_full },
+    .{ .name = "1", .size = 1 },
+    .{ .name = "3", .size = 3 },
+    .{ .name = "7", .size = 7 },
+    .{ .name = "13", .size = 13 },
+    .{ .name = "rnd", .random = true },
+    .{ .name = "mix", .mixed = true },
+};
+
+fn decodeShortPattern(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    channels: u16,
+    pattern: ShortPattern,
+) ![]i16 {
+    var reader = std.Io.Reader.fixed(bytes);
+    var dec = try root.open(allocator, &reader);
+    defer dec.deinit();
+
+    var list: std.ArrayList(i16) = .empty;
+    errdefer list.deinit(allocator);
+    var buffer: [short_buffer_full]i16 = undefined;
+    var seed: u64 = 0x1234_5678_9ABC_DEF0;
+    var step: usize = 0;
+    var force_full = false;
+
+    while (true) {
+        const want = if (force_full)
+            short_buffer_full
+        else if (pattern.random) blk: {
+            seed = seed *% 6364136223846793005 +% 1442695040888963407;
+            break :blk 1 + @as(usize, @intCast((seed >> 33) % 64));
+        } else if (pattern.mixed) blk: {
+            // One frame, a full read, then sizes around a frame boundary.
+            const sizes = [6]usize{ channels, short_buffer_full, 7, short_buffer_full, 13, 3 };
+            const value = sizes[step % sizes.len];
+            step += 1;
+            break :blk value;
+        } else pattern.size;
+
+        if (dec.read(buffer[0..want])) |written| {
+            if (written == 0) break;
+            try list.appendSlice(allocator, buffer[0..written]);
+        } else |err| {
+            if (err == error.ShortBuffer and want < channels) {
+                // Contract: nothing consumed; finish with a full buffer.
+                force_full = true;
+                continue;
+            }
+            return err;
+        }
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+test "committed fixtures: short buffers reproduce the full decode on real audio" {
+    const Case = struct { name: []const u8, bytes: []const u8, channels: u16 };
+    const cases = [_]Case{
+        .{ .name = "mp3 mono", .bytes = @embedFile("fixtures/mp3-mono-44k-128.mp3"), .channels = 1 },
+        .{ .name = "mp3 stereo", .bytes = @embedFile("fixtures/mp3-stereo-44k-128.mp3"), .channels = 2 },
+        .{ .name = "vorbis stereo", .bytes = @embedFile("fixtures/vorbis-stereo-44k-q4.ogg"), .channels = 2 },
+        .{ .name = "flac s24 stereo", .bytes = flac_cases[2].bytes, .channels = 2 },
+        .{ .name = "wav pcm16 5.1", .bytes = wav_cases[5].bytes, .channels = 6 },
+    };
+
+    var failures: usize = 0;
+    for (cases) |case| {
+        const reference = try decodeShortPattern(testing.allocator, case.bytes, case.channels, short_patterns[0]);
+        defer testing.allocator.free(reference);
+        std.debug.print("fixture matrix {s:<16}", .{case.name});
+        for (short_patterns) |pattern| {
+            const got = try decodeShortPattern(testing.allocator, case.bytes, case.channels, pattern);
+            defer testing.allocator.free(got);
+            const passed = std.mem.eql(i16, got, reference);
+            if (!passed) failures += 1;
+            std.debug.print(" {s}={s}", .{ pattern.name, if (passed) "PASS" else "FAIL" });
+            if (!passed) {
+                std.debug.print(" (got {d}, want {d})", .{ got.len, reference.len });
+            }
+        }
+        std.debug.print(" samples={d}\n", .{reference.len});
+    }
+    std.debug.print("fixture matrix failures={d}\n", .{failures});
+    try testing.expectEqual(@as(usize, 0), failures);
 }

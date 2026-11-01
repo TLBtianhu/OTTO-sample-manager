@@ -4,16 +4,15 @@
 //! cover the "unknown length, decode until EOF" path on real encoder output.
 //! The FLAC cases are encoded with `-lpc_type none` and compared sample for
 //! sample with ffmpeg's decoder; `-ch_mode` selects independent or one of the
-//! three decorrelated channel assignments. On non-Windows runners (or when the
-//! binary is absent) every test skips; CI does not depend on ffmpeg.
+//! three decorrelated channel assignments. The selected binary and its source
+//! are printed once. An unavailable binary produces named, visible skips; the
+//! require-ffmpeg release gate turns every such L4 skip into a failure.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const root = @import("root.zig");
 const compare = @import("compare.zig");
+const ffmpeg = @import("ffmpeg.zig");
 const testing = std.testing;
-
-const ffmpeg_path = "C:\\Users\\30680\\.zcode\\workspace\\default\\music-to-midi\\tools\\ffmpeg\\bin\\ffmpeg.exe";
 
 fn generate(
     allocator: std.mem.Allocator,
@@ -21,8 +20,6 @@ fn generate(
     channels_arg: []const u8,
     duration: []const u8,
 ) ![]u8 {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
     const filter = try std.fmt.allocPrint(
         allocator,
         "sine=frequency=440:duration={s}",
@@ -30,21 +27,16 @@ fn generate(
     );
     defer allocator.free(filter);
 
-    const result = std.process.run(allocator, std.testing.io, .{
-        .argv = &.{
-            ffmpeg_path, "-v",    "error",
-            "-f",        "lavfi", "-i",
-            filter,      "-ac",   channels_arg,
-            "-ar",       "44100", "-c:a",
-            codec,       "-f",    "wav",
-            "pipe:1",
-        },
-        .stdout_limit = .limited(64 << 20),
-        .stderr_limit = .limited(1 << 20),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    const result = try ffmpeg.run(allocator, &.{
+        "-v",     "error",
+        "-f",     "lavfi",
+        "-i",     filter,
+        "-ac",    channels_arg,
+        "-ar",    "44100",
+        "-c:a",   codec,
+        "-f",     "wav",
+        "pipe:1",
+    }, .limited(64 << 20));
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -145,8 +137,6 @@ const FlacOptions = struct {
 };
 
 fn generateFlac(allocator: std.mem.Allocator, options: FlacOptions) ![]u8 {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
     const filter = try std.fmt.allocPrint(
         allocator,
         "aevalsrc=0.4*sin(2*PI*440*t)|0.4*sin(2*PI*660*t):s=44100:d={s}",
@@ -160,10 +150,11 @@ fn generateFlac(allocator: std.mem.Allocator, options: FlacOptions) ![]u8 {
     var argv: [40][]const u8 = undefined;
     var len: usize = 0;
     const fixed_args = [_][]const u8{
-        ffmpeg_path, "-v",            "error",                "-f",                 "lavfi",
-        "-i",        filter,          "-ac",                  options.channels_arg, "-ar",
-        "44100",     "-c:a",          "flac",                 "-lpc_type",          options.lpc_type,
-        "-ch_mode",  options.ch_mode, "-max_partition_order", "4",
+        "-v",                   "error",          "-f",       "lavfi",
+        "-i",                   filter,           "-ac",      options.channels_arg,
+        "-ar",                  "44100",          "-c:a",     "flac",
+        "-lpc_type",            options.lpc_type, "-ch_mode", options.ch_mode,
+        "-max_partition_order", "4",
     };
     for (fixed_args) |arg| {
         argv[len] = arg;
@@ -203,14 +194,7 @@ fn generateFlac(allocator: std.mem.Allocator, options: FlacOptions) ![]u8 {
         len += 1;
     }
 
-    const result = std.process.run(allocator, std.testing.io, .{
-        .argv = argv[0..len],
-        .stdout_limit = .limited(64 << 20),
-        .stderr_limit = .limited(1 << 20),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    const result = try ffmpeg.run(allocator, argv[0..len], .limited(64 << 20));
     defer allocator.free(result.stderr);
     if (!result.term.success()) {
         std.debug.print("ffmpeg flac failed: {s}\n", .{result.stderr});

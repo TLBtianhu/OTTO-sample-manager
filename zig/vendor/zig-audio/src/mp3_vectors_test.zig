@@ -22,6 +22,8 @@
 const std = @import("std");
 const mp3 = @import("mp3.zig");
 const compare = @import("compare.zig");
+const ffmpeg = @import("ffmpeg.zig");
+const audit = @import("test_audit");
 const testutil = @import("testutil.zig");
 const testing = std.testing;
 
@@ -51,11 +53,11 @@ fn readVector(allocator: std.mem.Allocator, v: Vector) ![]u8 {
     return dir.readFileAlloc(testing.io, v.path, allocator, .limited(16 << 20)) catch |err| switch (err) {
         error.FileNotFound => if (v.fallback) |alt|
             dir.readFileAlloc(testing.io, alt, allocator, .limited(16 << 20)) catch |err2| switch (err2) {
-                error.FileNotFound => error.SkipZigTest,
+                error.FileNotFound => audit.skip(.external_vectors_missing),
                 else => err2,
             }
         else
-            error.SkipZigTest,
+            audit.skip(.external_vectors_missing),
         else => err,
     };
 }
@@ -294,20 +296,21 @@ fn encodePulseMp3(allocator: std.mem.Allocator) ![]u8 {
     );
     defer allocator.free(input_path);
 
-    const result = std.process.run(allocator, testing.io, .{
-        .argv = &.{
-            compare.ffmpeg_path, "-v",         "error", "-i",     input_path,
-            "-c:a",              "libmp3lame", "-b:a",  "128k",   "-ac",
-            "1",                 "-f",         "mp3",   "pipe:1",
-        },
-        .stdout_limit = .limited(8 << 20),
-        .stderr_limit = .limited(1 << 20),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    const result = try ffmpeg.run(allocator, &.{
+        "-v",     "error",
+        "-i",     input_path,
+        "-c:a",   "libmp3lame",
+        "-b:a",   "128k",
+        "-ac",    "1",
+        "-f",     "mp3",
+        "pipe:1",
+    }, .limited(8 << 20));
     defer allocator.free(result.stderr);
-    if (!result.term.success()) return error.SkipZigTest;
+    if (!result.term.success()) {
+        std.debug.print("ffmpeg MP3 encode failed: {s}\n", .{result.stderr});
+        allocator.free(result.stdout);
+        return error.FfmpegFailed;
+    }
     return result.stdout;
 }
 

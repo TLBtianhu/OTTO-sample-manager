@@ -36,6 +36,7 @@
 const std = @import("std");
 const root = @import("root.zig");
 const compare = @import("compare.zig");
+const audit = @import("test_audit");
 const testing = std.testing;
 
 const vector_dir = ".zig-cache/vectors";
@@ -70,12 +71,12 @@ const vectors = [_]Vector{
 
 fn readVector(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var dir = std.Io.Dir.cwd().openDir(std.testing.io, vector_dir, .{}) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
+        error.FileNotFound => return audit.skip(.external_vectors_missing),
         else => return err,
     };
     defer dir.close(std.testing.io);
     return dir.readFileAlloc(std.testing.io, name, allocator, .limited(8 << 20)) catch |err| switch (err) {
-        error.FileNotFound => error.SkipZigTest,
+        error.FileNotFound => audit.skip(.external_vectors_missing),
         else => err,
     };
 }

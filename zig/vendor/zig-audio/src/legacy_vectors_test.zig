@@ -13,6 +13,7 @@
 const std = @import("std");
 const root = @import("root.zig");
 const compare = @import("compare.zig");
+const audit = @import("test_audit");
 const testutil = @import("testutil.zig");
 const testing = std.testing;
 
@@ -105,6 +106,7 @@ test "legacy vectors: probe, info and total_frames" {
             .limited(16 << 20),
         ) catch |err| switch (err) {
             error.FileNotFound => {
+                audit.noteSkip(.external_vectors_missing);
                 std.debug.print("legacy vector missing: {s}\n", .{path});
                 continue;
             },
@@ -143,7 +145,10 @@ test "legacy vectors: max_diff 0 and identical sample count vs ffmpeg" {
             testing.allocator,
             .limited(16 << 20),
         ) catch |err| switch (err) {
-            error.FileNotFound => continue,
+            error.FileNotFound => {
+                audit.noteSkip(.external_vectors_missing);
+                continue;
+            },
             else => return err,
         };
         defer testing.allocator.free(bytes);

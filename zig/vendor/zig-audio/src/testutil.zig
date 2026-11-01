@@ -456,6 +456,9 @@ pub fn decodeAll(
 pub const ChunkedReader = struct {
     source: []const u8,
     pos: usize = 0,
+    /// Number of reader-vtable calls made so far. Corpus replay uses this to
+    /// prove a malformed stream cannot cause an unbounded read loop.
+    calls: usize = 0,
     chunk: usize,
     interface: std.Io.Reader,
 
@@ -488,6 +491,7 @@ pub const ChunkedReader = struct {
     }
 
     fn nextLen(self: *ChunkedReader, limit: std.Io.Limit) usize {
+        self.calls += 1;
         const available = self.source.len - self.pos;
         if (available == 0) return 0;
         const wanted = limit.toInt() orelse available;

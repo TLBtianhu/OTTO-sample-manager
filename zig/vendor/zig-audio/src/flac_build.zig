@@ -383,9 +383,21 @@ const BitWriter = struct {
     }
 
     fn writeSigned(self: *BitWriter, value: i32, count: u6) !void {
-        const raw: u32 = @bitCast(value);
-        const masked: u32 = if (count >= 32) raw else raw & ((@as(u32, 1) << @intCast(count)) - 1);
-        try self.writeBits(masked, count);
+        if (count <= 32) {
+            const raw: u32 = @bitCast(value);
+            const masked: u32 = if (count >= 32) raw else raw & ((@as(u32, 1) << @intCast(count)) - 1);
+            try self.writeBits(masked, count);
+            return;
+        }
+        // A decorrelated 32-bit side subframe is 33 bits wide: the source
+        // integer is narrower than the field, so sign-extend it explicitly.
+        // (Only the 32-bit Unsupported test builds this; decoders reject it
+        // before reading the subframe.)
+        const extra: u6 = count - 32;
+        const sign: u32 = if (value < 0) 1 else 0;
+        var i: u6 = 0;
+        while (i < extra) : (i += 1) try self.writeBits(sign, 1);
+        try self.writeBits(@bitCast(value), 32);
     }
 
     fn flush(self: *BitWriter) !void {

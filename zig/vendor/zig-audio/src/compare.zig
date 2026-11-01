@@ -14,11 +14,9 @@
 //! not integer PCM and ffmpeg's float->s16 rounding is not part of the format.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const root = @import("root.zig");
 const testutil = @import("testutil.zig");
-
-pub const ffmpeg_path = "C:\\Users\\30680\\.zcode\\workspace\\default\\music-to-midi\\tools\\ffmpeg\\bin\\ffmpeg.exe";
+const ffmpeg = @import("ffmpeg.zig");
 
 pub const Result = struct {
     samples: usize,
@@ -65,8 +63,6 @@ pub fn runFfmpeg(
     bytes: []const u8,
     sample_format: []const u8,
 ) ![]u8 {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -81,18 +77,12 @@ pub fn runFfmpeg(
     );
     defer allocator.free(input_path);
 
-    const result = std.process.run(allocator, std.testing.io, .{
-        .argv = &.{
-            ffmpeg_path,   "-v",       "error",
-            "-i",          input_path, "-f",
-            sample_format, "pipe:1",
-        },
-        .stdout_limit = .limited(64 << 20),
-        .stderr_limit = .limited(1 << 20),
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    const result = try ffmpeg.run(allocator, &.{
+        "-v",     "error",
+        "-i",     input_path,
+        "-f",     sample_format,
+        "pipe:1",
+    }, .limited(64 << 20));
     defer allocator.free(result.stderr);
 
     if (!result.term.success()) {
