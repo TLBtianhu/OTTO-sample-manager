@@ -114,6 +114,7 @@ if (-not $Send) {
   exit 0
 }
 
+$failures = @()
 foreach ($g in $targets) {
   foreach ($f in $artifacts) {
     Write-Output ("上传到 {0}（{1}）：{2}" -f $g.group_name, $g.group_id, (Split-Path $f -Leaf))
@@ -123,6 +124,10 @@ foreach ($g in $targets) {
       name = (Split-Path $f -Leaf)
     }
     Write-Output ("  返回：{0}" -f ($resp | ConvertTo-Json -Depth 4 -Compress))
+    # 网关 HTTP 200 也可能带着 failed：必须看 status，不能只看"请求没报错"。
+    if ($resp.status -ne 'ok') {
+      $failures += ("{0} / {1}：{2}" -f $g.group_name, (Split-Path $f -Leaf), $resp.wording)
+    }
   }
   if ($Notes) {
     Invoke-OneBot -BaseUrl $baseUrl -Token $token -Action 'send_group_msg' -Payload @{
@@ -130,5 +135,12 @@ foreach ($g in $targets) {
       message = $Notes
     } | Out-Null
   }
+}
+
+if ($failures.Count -gt 0) {
+  Write-Output ''
+  Write-Output ("有 {0} 个文件没发出去：" -f $failures.Count)
+  foreach ($x in $failures) { Write-Output ("  - {0}" -f $x) }
+  exit 1
 }
 Write-Output '完成。'
