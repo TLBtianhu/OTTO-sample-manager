@@ -52,6 +52,9 @@ test {
     _ = @import("transport.zig");
     _ = @import("options.zig");
     _ = @import("options_test.zig");
+    // 目录浏览（Stage 0）：入口解析、懒枚举，以及"删掉选中行 → 墓碑 + 相邻行"的真实链路。
+    _ = @import("browse.zig");
+    _ = @import("browse_test.zig");
     _ = @import("library_io.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");

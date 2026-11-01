@@ -37,6 +37,9 @@ pub const Options = struct {
     /// 上屏走 D3D11 翻转交换链（`--d3d`）：分层窗口在这个模型下无效，设透明度时
     /// 打一行警告（不静默，见 `applyOpacity`）。
     d3d: bool = false,
+    /// 只读：照常读设置、照常应用，但**永不落盘**。浏览模式用它——"只是看一眼
+    /// 一个目录"不该改动用户的设置文件。
+    read_only: bool = false,
 };
 
 pub const Panel = struct {
@@ -60,6 +63,8 @@ pub const Panel = struct {
     d3d_warned: bool = false,
     /// 上屏是否是 D3D 翻转交换链（`--d3d`）。
     d3d: bool = false,
+    /// 只读模式（浏览模式）：`save` 直接返回，连文件都不碰。
+    read_only: bool = false,
     /// 启动置顶被前台锁拒绝（`error.TopmostRejected`）：等窗口第一次成为前台时
     /// 补一次。只排一次，补完就清掉——不在 tick 里循环重试。
     topmost_retry_pending: bool = false,
@@ -79,6 +84,7 @@ pub const Panel = struct {
             .settings = settings,
             .path = owned_path,
             .d3d = opts.d3d,
+            .read_only = opts.read_only,
         };
         panel.syncFields();
         return panel;
@@ -367,6 +373,12 @@ pub const Panel = struct {
     }
 
     fn save(self: *Panel) void {
+        // 浏览模式（`--browse` / 位置参数给的是目录）：只读，不写设置文件。
+        // 用户"只是看一眼一个目录"，不该让这次运行留下任何持久化痕迹。
+        if (self.read_only) {
+            std.debug.print("otto-lite: 浏览模式不写 settings（本次更改只在内存里）\n", .{});
+            return;
+        }
         const path = self.path orelse {
             std.debug.print("otto-lite: settings 无数据目录，本次不写盘\n", .{});
             return;

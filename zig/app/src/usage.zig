@@ -11,12 +11,15 @@ const std = @import("std");
 pub fn printUsage() void {
     std.debug.print(
         "用法：otto-lite [library.json|library.otto] [--watch <dir>] [--select=0,1]\n" ++
+            "      otto-lite <目录> | --browse <目录>   （浏览模式：只读列出该目录，不写库）\n" ++
             "      otto-lite --version\n" ++
             "      otto-lite [library.json|library.otto] --filter=<text> [--filter-ext=<list>]\n" ++
             "      otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport\n" ++
+            "      otto-lite --browse-probe <目录> [--preview-first=<文件名>]\n" ++
+            "      otto-lite --browse-watch-probe <目录> [--watch-seconds=<秒>] [--browse-select=<文件名>]\n" ++
             "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
             "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
-            "      otto-lite --bench-scroll <library> [--frames N] [--d3d] [--bench-scroll-edge] [--no-prefetch] [--no-vsync]\n" ++
+            "      otto-lite --bench-scroll <library|目录> [--frames N] [--d3d] [--bench-scroll-edge] [--no-prefetch] [--no-vsync]\n" ++
             "      otto-lite --mem-probe <library> --nanoui-hidden [--no-isolation]\n" ++
             "      otto-lite --drop-probe=<path>   （合成一次拖入；窗口隐藏）\n" ++
             "      otto-lite --settings-probe --set-opacity=<0..100>   （验收探针；窗口隐藏）\n" ++

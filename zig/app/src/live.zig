@@ -137,6 +137,28 @@ pub const Live = struct {
         root: []const u8,
         force_watch: bool,
     ) InitError!Live {
+        return initMode(allocator, io, library, root, if (force_watch) .force else .auto);
+    }
+
+    /// 浏览模式的空视图：**不监听、不建监听根**，只提供一个"没有样本"的 `Live`。
+    ///
+    /// 浏览模式的行来自 `browse.Session`，这里存在的唯一理由是 `main.State` 与
+    /// 「导入文件夹」的状态机要一个类型正确的 `Live`（浏览模式下那个按钮不显示）。
+    /// 它与 `init` 的区别只有一条：不打印"监听根没有本库的样本"——那对空库来说是
+    /// 误导，而这条路本来就不该有监听。
+    pub fn initIdle(allocator: std.mem.Allocator, io: std.Io, library: *const core.store.Library) InitError!Live {
+        return initMode(allocator, io, library, ".", .idle);
+    }
+
+    const WatchMode = enum { auto, force, idle };
+
+    fn initMode(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        library: *const core.store.Library,
+        root: []const u8,
+        mode: WatchMode,
+    ) InitError!Live {
         const owned_root = try live_adapt.normalizeRoot(allocator, root);
         errdefer allocator.free(owned_root);
 
@@ -149,11 +171,17 @@ pub const Live = struct {
         watch_allocator.* = .{ .child = allocator };
         const watcher_memory = watch_allocator.allocator();
 
-        const should_watch = force_watch or live_adapt.rootHasSamples(library, owned_root);
+        const should_watch = switch (mode) {
+            .idle => false,
+            .force => true,
+            .auto => live_adapt.rootHasSamples(library, owned_root),
+        };
         const watcher = try watcher_memory.create(watch.Watcher);
         const watching_started = blk: {
             if (!should_watch) {
-                std.debug.print("otto-lite: 监听根没有本库的样本，暂不监听 dir={s}\n", .{owned_root});
+                if (mode == .auto) {
+                    std.debug.print("otto-lite: 监听根没有本库的样本，暂不监听 dir={s}\n", .{owned_root});
+                }
                 break :blk false;
             }
             watcher.* = watch.Watcher.init(watcher_memory, owned_root, .{}) catch |err| switch (err) {
@@ -182,7 +210,7 @@ pub const Live = struct {
             .io = io,
             .root = owned_root,
             .index = index,
-            .force_watch = force_watch,
+            .force_watch = mode == .force,
             .watcher = if (watching_started) watcher else null,
             .watch_allocator = watch_allocator,
             .poll_arena = std.heap.ArenaAllocator.init(allocator),

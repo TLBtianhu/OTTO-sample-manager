@@ -174,6 +174,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // 目录浏览口岸（Stage 0）：**不递归**地列直接子项（FindFirstFileExW +
+    // FIND_FIRST_EX_LARGE_FETCH）与单文件身份。不做任何"我们觉得不重要"的过滤——
+    // 浏览模式看到的就是资源管理器看到的（见 src/browse_dir.zig）。
+    const browse_dir_module = b.addModule("otto_browse_dir", .{
+        .root_source_file = b.path("src/browse_dir.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // 模块本身只由 app 消费；测试图另建（同一个源文件不能属于两个模块）。
+    _ = browse_dir_module;
+
     // L1 元数据口岸：只读前 64 KiB，WAV 头部解析与解码器共用 otto_wav_header。
     // WAV 头部解析是独立模块（app 的解码器也 import 它），这里是唯一的实现：
     // `probe` 通过模块名引用，而不是相对路径再编译一份（Zig 不允许一个文件属于
@@ -405,4 +416,15 @@ pub fn build(b: *std.Build) void {
     const run_win_window_tests = b.addRunArtifact(b.addTest(.{ .root_module = win_window_test_module }));
     run_win_window_tests.step.dependOn(&run_feed_tests.step);
     test_step.dependOn(&run_win_window_tests.step);
+
+    // 目录浏览口岸（Stage 0）：真临时目录 + 真 FindFirstFileExW / 真句柄身份。
+    // 不需要 COM / Shell，串在最后只为 `--summary all` 的输出能直接贴。
+    const browse_dir_test_module = b.createModule(.{
+        .root_source_file = b.path("src/browse_dir_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_browse_dir_tests = b.addRunArtifact(b.addTest(.{ .root_module = browse_dir_test_module }));
+    run_browse_dir_tests.step.dependOn(&run_win_window_tests.step);
+    test_step.dependOn(&run_browse_dir_tests.step);
 }

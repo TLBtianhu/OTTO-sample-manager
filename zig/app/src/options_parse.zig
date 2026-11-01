@@ -329,6 +329,67 @@ pub fn bench(options: *options_mod.Options, args: anytype, index: *usize, arg: [
 }
 
 // ---------------------------------------------------------------------------
+// 浏览（--browse / --browse-probe / --browse-watch-probe / 探针参数）
+// ---------------------------------------------------------------------------
+
+/// Stage 0 的目录浏览：入口 `--browse`、两个无头探针，以及只给探针用的
+/// `--browse-select` / `--preview-first` / `--watch-seconds`。
+///
+/// `--browse` 与 `--browse-probe` 是两件事：前者开窗口（浏览模式），后者不出窗口、
+/// 打一行数字。它们都**不**占位置参数——位置参数仍是库路径（这是 0.34.0 的契约）。
+pub fn browsing(options: *options_mod.Options, args: anytype, index: *usize, arg: []const u8) Error!bool {
+    if (std.mem.eql(u8, arg, "--browse")) {
+        options.browse_dir = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse=")) {
+        options.browse_dir = arg["--browse=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--browse-probe")) {
+        options.browse_probe = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-probe=")) {
+        options.browse_probe = arg["--browse-probe=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--browse-watch-probe")) {
+        options.browse_watch_probe = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-watch-probe=")) {
+        options.browse_watch_probe = arg["--browse-watch-probe=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--browse-select")) {
+        options.browse_select = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-select=")) {
+        options.browse_select = arg["--browse-select=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--preview-first")) {
+        options.preview_first = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--preview-first=")) {
+        options.preview_first = arg["--preview-first=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--watch-seconds")) {
+        options.watch_seconds = try parseSeconds(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--watch-seconds=")) {
+        options.watch_seconds = try parseSeconds(arg["--watch-seconds=".len..]);
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // 过滤（--filter / --filter-ext）
 // ---------------------------------------------------------------------------
 
@@ -422,4 +483,11 @@ fn parseCount(text: []const u8) error{InvalidValue}!u32 {
 /// `--seek-at` 的毫秒数：0 合法（跳回开头），负数/非数字报 InvalidValue。
 fn parseMillis(text: []const u8) error{InvalidValue}!u64 {
     return std.fmt.parseInt(u64, text, 10) catch error.InvalidValue;
+}
+
+/// `--watch-seconds` 的秒数：正数；0 与负数都拒（观察窗口为 0 等于没跑探针）。
+fn parseSeconds(text: []const u8) error{InvalidValue}!f64 {
+    const seconds = std.fmt.parseFloat(f64, text) catch return error.InvalidValue;
+    if (!(seconds > 0)) return error.InvalidValue;
+    return seconds;
 }

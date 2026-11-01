@@ -59,6 +59,19 @@ pub const Options = struct {
     import_library: ?[]const u8 = null,
     /// `--import` 的输出路径（OTTOLIB v1，原子写）。
     save_path: ?[]const u8 = null,
+    /// `--browse <dir>`：进入"浏览模式"（只读地把一个真实目录列成列表）。
+    /// 必须指向**目录**：给文件就是 exit 2（见 `main.zig` / `browse.resolveTarget`）。
+    browse_dir: ?[]const u8 = null,
+    /// `--browse-probe <dir>`：无窗口的浏览探针，打印一行 key=value（见 `browse_probe.zig`）。
+    browse_probe: ?[]const u8 = null,
+    /// `--browse-watch-probe <dir>`：起监听、跑一段 60 Hz 帧循环，报告事件数与行变化数。
+    browse_watch_probe: ?[]const u8 = null,
+    /// `--browse-select=<文件名>`：探针用，先选中这一行（模拟用户点它）。
+    browse_select: ?[]const u8 = null,
+    /// `--preview-first=<文件名>`：`--browse-probe` 用它量"选中 → 首次预览可用"。
+    preview_first: ?[]const u8 = null,
+    /// `--watch-seconds=<秒>`：`--browse-watch-probe` 的观察窗口（默认 2 秒）。
+    watch_seconds: f64 = 2,
     /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
     no_isolation: bool = false,
     /// `--no-prefetch`：关掉空闲预取（滚动停下后提前取视口上下几十行）。
@@ -147,7 +160,9 @@ pub const Options = struct {
             self.convert != null or
             self.library_info != null or
             self.import_into != null or
-            self.import_dir != null;
+            self.import_dir != null or
+            self.browse_probe != null or
+            self.browse_watch_probe != null;
     }
 };
 
@@ -170,6 +185,7 @@ pub fn parse(args: anytype) ParseError!Options {
         if (try options_parse.update(&options, args, &index, arg)) continue;
         if (try options_parse.bench(&options, args, &index, arg)) continue;
         if (try options_parse.filter(&options, args, &index, arg)) continue;
+        if (try options_parse.browsing(&options, args, &index, arg)) continue;
         if (try options_parse.misc(&options, args, &index, arg)) continue;
         if (!std.mem.startsWith(u8, arg, "--")) options.library_path = arg;
     }
@@ -422,4 +438,52 @@ test "下载：--update-download / --no-exec / --update-current 两种写法都�
 
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--update-download" }));
     try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--update-current" }));
+}
+
+test "浏览：--browse / 两个探针 / 探针参数各自两种写法，都不占位置参数" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(plain.browse_dir == null);
+    try testing.expect(plain.browse_probe == null);
+    try testing.expect(plain.browse_watch_probe == null);
+    try testing.expect(plain.browse_select == null);
+    try testing.expect(plain.preview_first == null);
+    try testing.expectEqual(@as(f64, 2), plain.watch_seconds);
+    // `--browse` 是**开窗口**的模式，不是无头命令：CLI 才补控制台。
+    try testing.expect(!plain.isHeadlessCommand());
+
+    const spaced = try parse(&[_][]const u8{
+        "otto-lite", "--browse", "C:\\samples", "--browse-probe", "D:\\packs",
+        "--browse-watch-probe", "E:\\watch", "--browse-select", "kick.wav",
+        "--preview-first", "kick.mp3", "--watch-seconds", "3.5",
+    });
+    try testing.expectEqualStrings("C:\\samples", spaced.browse_dir.?);
+    try testing.expectEqualStrings("D:\\packs", spaced.browse_probe.?);
+    try testing.expectEqualStrings("E:\\watch", spaced.browse_watch_probe.?);
+    try testing.expectEqualStrings("kick.wav", spaced.browse_select.?);
+    try testing.expectEqualStrings("kick.mp3", spaced.preview_first.?);
+    try testing.expectEqual(@as(f64, 3.5), spaced.watch_seconds);
+    // 一个位置参数都没吃：库路径仍是 null（浏览目录走自己的字段）。
+    try testing.expect(spaced.library_path == null);
+
+    const joined = try parse(&[_][]const u8{
+        "otto-lite", "lib.json", "--browse=C:\\samples", "--browse-probe=C:\\p",
+        "--browse-watch-probe=C:\\w", "--browse-select=kick.wav", "--preview-first=kick.mp3",
+        "--watch-seconds=0.5",
+    });
+    try testing.expectEqualStrings("C:\\samples", joined.browse_dir.?);
+    try testing.expectEqualStrings("C:\\p", joined.browse_probe.?);
+    try testing.expectEqualStrings("C:\\w", joined.browse_watch_probe.?);
+    try testing.expectEqualStrings("kick.wav", joined.browse_select.?);
+    try testing.expectEqualStrings("kick.mp3", joined.preview_first.?);
+    try testing.expectEqual(@as(f64, 0.5), joined.watch_seconds);
+    try testing.expectEqualStrings("lib.json", joined.library_path.?);
+    // 探针是无头命令：不许给它们开控制台窗口（`isHeadlessCommand` 决定 CLI 才 attach）。
+    try testing.expect(joined.isHeadlessCommand());
+
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--browse" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--browse-probe" }));
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--browse-watch-probe" }));
+    // 观察窗口为 0/负数没有意义：解析层直接拒，不让探针跑一个空窗口。
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--watch-seconds=0" }));
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--watch-seconds=abc" }));
 }

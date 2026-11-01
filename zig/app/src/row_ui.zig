@@ -63,6 +63,12 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     ui.text(c, sample.file_name, .{ .size = 13, .truncate = .ellipsis });
     const ext = filter.trimExt(sample.file_ext);
     if (ext.len > 0) ui.textf(c, .{ .size = 11, .color = c.theme.muted }, ".{s}", .{ext});
+    // 这一行文件已经被删掉（浏览模式的墓碑）：明确标"已删除"，并且不再去读它的
+    // 时长——那个文件已经不在了，读一次只会失败一次。选中项此时已经移到相邻行。
+    if (State.isDeleted(s, index)) {
+        ui.text(c, "已删除", .{ .size = 11, .color = c.theme.danger });
+        return it;
+    }
     // 估算时长必须显示成 `≈40.9s`：这个数是从文件大小 / 比特率推出来的，不是
     // 容器声明的。`duration_trust.display` 对库里已有的时长只判 MP3 的估算位（读
     // 一次头部并缓存）；对旧库 `duration <= 0` 的条目先问 `resolve`——就地补出

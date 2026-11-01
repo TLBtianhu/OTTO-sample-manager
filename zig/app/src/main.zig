@@ -28,6 +28,8 @@ const core = @import("otto_core");
 const app_boot = @import("app_boot.zig");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
+const browse_mod = @import("browse.zig");
+const browse_ui = @import("browse_ui.zig");
 const commands = @import("commands.zig");
 const console_mod = @import("console.zig");
 const drop_ui = @import("drop_ui.zig");
@@ -60,6 +62,9 @@ pub const State = struct {
     /// 选择表与拖拽快照的分配器（`init.gpa`，长生命周期；不是帧 arena）。
     gpa: std.mem.Allocator,
     live: *live_mod.Live,
+    /// 浏览模式（`otto-lite <目录>` / `--browse <目录>`）：行来自这个会话，
+    /// 不看 `live`；null = 库模式。只读：不写库、不写设置、不写源目录。
+    browse: ?*browse_mod.Session = null,
     /// 当前视图；每次 poll 之后都要重新取——`Index.apply` 的扩容会让数组搬家。
     samples: []const core.model.Sample,
     /// 行内时长的可信度 side table：MP3 的时长是不是按比特率估算的。
@@ -121,7 +126,8 @@ pub const State = struct {
 
         // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧就参与过滤；
         // 「导入文件夹」按钮和搜索框同一行、宽度固定（见 `search_ui.Trailing`）。
-        const import_button: search_ui.Trailing = .{
+        // 浏览模式没有这个按钮：那条路不写库，点「导入」会把"看一眼目录"变成一次导入。
+        const import_button: ?search_ui.Trailing = if (s.browse != null) null else .{
             .label = import_ui.button_label,
             .width = import_ui.button_width,
             .disabled = s.import.busy(),
@@ -149,7 +155,7 @@ pub const State = struct {
             .flash_left = s.flash_left,
             .flash_count = s.flash_count,
             .rows_with_image = s.reporter.printed_rows,
-            .dirty = s.live.dirty(),
+            .dirty = if (s.browse != null) false else s.live.dirty(),
             .import_status = s.import.status(&status_buffer),
             .import_failed = s.import.phase == .failed,
             .update_status = s.update.status(&update_buffer),
@@ -160,6 +166,9 @@ pub const State = struct {
             if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
             if (header_action.settings_clicked) s.settings.openPanel(c);
         }
+        // 浏览模式的状态条：目录名、文件数、已截断 / 路径不可用 / 跳过 N 项。
+        // 它必须**看得见**——这些状态只写日志等于没说。
+        if (s.browse) |session| browse_ui.drawBanner(c, session.info());
         // 列表容器：空白处按下再松开 = 清空选择（行是它的后代，点行时容器不会 clicked）。
         const body = ui.div(c).sizeFull();
         const body_it = body.interaction();
@@ -183,8 +192,12 @@ pub const State = struct {
         // 库非空但过滤到 0 行：给一段明确文案（不是一片空白）。
         if (!busy and s.samples.len > 0 and s.search.len() == 0) s.search.drawNoMatches(c);
 
-        // 空库（首次启动）：列表区域换成空状态 + 居中的「导入文件夹」。
-        const empty_clicked = empty_state.draw(c, s.samples.len, s.import.busy());
+        // 空列表：库模式是「还没有素材 + 导入文件夹」；浏览模式是"这个目录没有文件 /
+        // 正在读取 / 路径不可用"，那条路不导入、也不写库（见 `browse_ui.zig`）。
+        const empty_clicked = if (s.browse) |session| blk: {
+            if (s.samples.len == 0) browse_ui.drawEmpty(c, session.info());
+            break :blk false;
+        } else empty_state.draw(c, s.samples.len, s.import.busy());
         if (!busy and empty_clicked) s.import.begin(window_util.nativeHandle(s.window));
 
         if (!busy) {
@@ -302,16 +315,28 @@ pub const State = struct {
     }
 
     fn refresh(s: *State) void {
-        const report_events = s.live.poll() catch |err| {
-            std.debug.print("otto-lite: poll 失败：{s}\n", .{@errorName(err)});
-            return;
-        };
-        // 即使四个计数都是零，`apply` 的扩容也可能让切片搬家，所以无条件重取。
-        s.samples = s.live.samples();
+        var changed = false;
+        if (s.browse) |session| {
+            // 浏览模式：行来自目录会话（批次 + 监听事件，在帧边界合并应用）。
+            // `poll` 自己会把选中项按身份找回来，所以这里不碰 `s.selection`。
+            const report = session.poll(&s.selection) catch |err| {
+                std.debug.print("otto-lite: 浏览目录 poll 失败：{s}\n", .{@errorName(err)});
+                return;
+            };
+            changed = report.changed or report.rescanned;
+            if (changed) s.samples = session.samples();
+        } else {
+            const report_events = s.live.poll() catch |err| {
+                std.debug.print("otto-lite: poll 失败：{s}\n", .{@errorName(err)});
+                return;
+            };
+            // 即使四个计数都是零，`apply` 的扩容也可能让切片搬家，所以无条件重取。
+            s.samples = s.live.samples();
+            changed = report_events.added != 0 or report_events.removed != 0 or
+                report_events.renamed != 0 or report_events.modified != 0 or
+                report_events.overflowed or report_events.rescanned;
+        }
 
-        const changed = report_events.added != 0 or report_events.removed != 0 or
-            report_events.renamed != 0 or report_events.modified != 0 or
-            report_events.overflowed or report_events.rescanned;
         // 磁盘变了：之前「文件没了 / Shell 失败」的结论值得重试一次；过滤映射
         // 也要重建（改名不改样本数，光看数量会漏）。
         if (changed) {
@@ -329,6 +354,13 @@ pub const State = struct {
         const window = s.window orelse return;
         if (changed) window_util.setTitle(window, s.samples.len);
         window.redraw();
+    }
+
+    /// 这一行是不是"已被删除"的墓碑（只有浏览模式有；库模式永远 false）。
+    /// `row_ui.drawRow` 用它写"已删除"，不猜任何状态。
+    pub fn isDeleted(s: *const State, index: usize) bool {
+        const session = s.browse orelse return false;
+        return session.isDeleted(index);
     }
 
     /// 帧外（定时器）执行一次待拖拽。进入前把计划从 `Transport` 摘下来。
@@ -384,21 +416,31 @@ pub fn main(init: std.process.Init) !void {
     }
     // `--mem-probe`：真实窗口形态的内存分解（隐藏窗口）；没开时 `begin`/`mark` 只是 bool 判断。
     var probe = mem_probe.Probe.begin(init, options);
+    // 入口分两种：位置参数 / `--browse` 指向目录 = 浏览模式；否则照旧开库。
+    // `--browse <文件>` 是用户错误：具名原因 + exit 2，绝不悄悄当库打开。
+    const target = browse_mod.resolveTarget(init.io, allocator, options) catch |err| {
+        std.debug.print(
+            "otto-lite: 浏览入口无效 reason={s} path={s}\n",
+            .{ @errorName(err), options.browse_dir orelse options.library_path orelse "" },
+        );
+        std.process.exit(2);
+    };
     // 库 / Live / 设置 / 缩略图 / 预览条 / 字体与上屏后端：见 `app_boot.zig`。
-    var boot = try app_boot.boot(init, allocator, options, &probe);
+    var boot = try app_boot.boot(init, allocator, options, target, &probe);
     defer boot.deinit();
 
     var state = State{
         .gpa = init.gpa,
         .live = boot.live,
-        .samples = boot.live.samples(),
+        .browse = boot.browse,
+        .samples = if (boot.browse) |session| session.samples() else boot.live.samples(),
         .duration_trust = duration_trust.Trust.init(init.gpa, init.io),
         .thumbs = boot.thumbs,
         .preview = boot.preview,
         .search = search_ui.Search.init(init.gpa),
         .import = try import_ui.Import.init(init.gpa, init.io, &boot.library, &boot.live, boot.library_path),
         .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse boot.settings.update_url, options.no_exec, options.update_current),
-        .settings = try settings_ui.Panel.init(init.gpa, init.io, boot.settings, boot.settings_path, .{ .d3d = options.d3d }),
+        .settings = try settings_ui.Panel.init(init.gpa, init.io, boot.settings, boot.settings_path, .{ .d3d = options.d3d, .read_only = boot.settings_read_only }),
         .transport = transport_mod.Transport.init(init.gpa),
         // `--no-prefetch`：空闲预取关掉（对比实验只差这一项）。
         .prefetch = .{ .enabled = !options.no_prefetch, .last_try_s = trace.now() },
@@ -417,9 +459,19 @@ pub fn main(init: std.process.Init) !void {
     const title = version_mod.windowTitle(&title_buffer, state.samples.len);
     // `--bench-first-frame` 是离屏探针：不建真实 HWND，也不 show。
     if (options.bench_first_frame) boot.app.gui = false;
-    // `--bench-scroll`：真实窗口、屏外、从不激活；窗口由基准自己建，进程交给它。
+    // `--bench-scroll <目录>`：真实窗口、屏外、从不激活；窗口由基准自己建，进程交给它。
     // 行就绪探针交出去：基准要靠它数"滚动经过的行里有多少已经画出图标"。
-    if (options.bench_scroll != null) try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe);
+    if (options.bench_scroll != null) {
+        // 基准自己泵消息、不跑 `tick`：先把浏览会话的第一轮枚举搬进视图，
+        // 否则视口里永远是 0 行（量到的 fps 没有意义）。
+        if (state.browse) |session| {
+            session.prime(&state.selection, 30);
+            // `prime` 只把行搬进会话；视图看的是 `State.samples`，这里跟着换。
+            state.samples = session.samples();
+            state.selection.resize(state.gpa, state.samples.len) catch {};
+        }
+        try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe);
+    }
     state.window = try boot.app.newWindow(.{
         .title = title,
         .width = 380,
@@ -430,8 +482,11 @@ pub fn main(init: std.process.Init) !void {
     });
     // 文件拖入：目录走「导入文件夹」同一条 `Import.start`；`--drop-probe` 时
     // 还会合成一次 WM_DROPFILES（窗口隐藏，见 `drop_ui.zig`）。
+    // **浏览模式不装**：拖入 = 导入 = 写库，而浏览模式对磁盘零写入。
     var drop: drop_ui.Drop = .{};
-    drop.install(init.io, &state.import, options.drop_probe, state.window.?, nanoui.App.after);
+    if (state.browse == null) {
+        drop.install(init.io, &state.import, options.drop_probe, state.window.?, nanoui.App.after);
+    }
     trace.mark("setup.window");
     probe.mark("window", .{ .window = state.window, .thumbs = boot.thumbs });
     // 窗口状态启动时应用一次：置顶（true 才碰 Win32）+ 不透明度（重启后恢复）。

@@ -11,6 +11,7 @@
 const std = @import("std");
 const thumb_host = @import("otto_thumb_host");
 const bench = @import("bench.zig");
+const browse_probe = @import("browse_probe.zig");
 const demo_filter = @import("demo_filter.zig");
 const demo_play = @import("demo_play.zig");
 const demo_preview = @import("demo_preview.zig");
@@ -56,6 +57,13 @@ pub fn run(
     // 更新下载（M5 最后一段）：无窗口取 feed → 下载 → 验签 → 落盘，打印摘要。
     // **永远不执行安装包**；「安装」只在 UI 里，且验收可用 `--no-exec` 跳过。
     if (options.update_download) |url| return try update_download.run(init, allocator, url);
+
+    // 目录浏览的两个无头探针（Stage 0）：都不建窗口、只看当前这一个目录。
+    // 放在其它自检之前：它们与库无关，也不该被 `--filter` / `--import` 抢走。
+    if (options.browse_probe) |dir| return try browse_probe.runProbe(init, allocator, dir, options);
+    if (options.browse_watch_probe) |dir| {
+        return try browse_probe.runWatchProbe(init, allocator, dir, options);
+    }
 
     // 更新检查（M5）：无窗口取一次 feed、打印结论、退出 0/1。默认不联网——
     // 只有用户显式敲出这条命令（或在表头点击）才会发请求。
