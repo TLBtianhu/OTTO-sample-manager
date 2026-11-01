@@ -1,4 +1,4 @@
-﻿# One command: run the whole OTTO Lite verification gate and print one table.
+# One command: run the whole OTTO Lite verification gate and print one table.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\health.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\health.ps1 -Quick
@@ -34,8 +34,9 @@
 # -Release skips the debug build; release is what ships.
 #
 # A sub-script failure is recorded and the run continues; the exit code is
-# decided once at the end. A PASS row that fails -> exit 1. The charter's known
-# unmet first-frame <= 100 ms row is reported as KNOWN-FAIL and does not fail
+# decided once at the end. A PASS row that fails -> exit 1. The charter's
+# first-frame row is judged on p50 (<= 100 ms) and p95 (<= 120 ms) over nine
+# child runs; when it misses, it is reported as KNOWN-FAIL and does not fail
 # the run. SKIP means "nothing to verify / prerequisite missing" and is not a
 # failure (e.g. no artifacts under zig\dist yet).
 #
@@ -184,7 +185,7 @@ function Print-Table {
   Write-Output ('总计                 ' + ($total -join ' / '))
   Write-Output ('总耗时               {0:N1} s' -f $script:clock.Elapsed.TotalSeconds)
   if ($known -gt 0) {
-    Write-Output 'KNOWN-FAIL = 宪章已知未达标项（冷启动→首帧 ≤ 100 ms），不算脚本失败。'
+    Write-Output 'KNOWN-FAIL = 宪章已知未达标项（冷启动→首帧 p50 ≤ 100 / p95 ≤ 120 ms，9 次），不算脚本失败。'
   }
 }
 
@@ -554,6 +555,7 @@ function Invoke-Bench {
   $skip = [int]$summary.Groups[3].Value
 
   $firstFrame = [regex]::Match($text, '冷启动→首帧\s+([0-9.]+)\s*ms')
+  $frameP95 = [regex]::Match($text, '冷启动→首帧[^\r\n]*?p95\s+([0-9.]+)')
   $failedMetrics = @()
   foreach ($line in $result.Lines) {
     if ($line -match '^\s*(库加载|冷启动→首帧|常驻内存|搜索延迟|缩略图|音频起播)\s') {
@@ -564,10 +566,16 @@ function Invoke-Bench {
 
   $stat = '{0} PASS / {1} FAIL' -f $pass, $fail
   if ($skip -gt 0) { $stat += (' / {0} SKIP' -f $skip) }
-  if ($firstFrame.Success) { $stat += ('  首帧 {0} ms' -f $firstFrame.Groups[1].Value) }
+  if ($firstFrame.Success) {
+    $stat += ('  首帧 p50 {0}' -f $firstFrame.Groups[1].Value)
+    if ($frameP95.Success) { $stat += (' / p95 {0} ms' -f $frameP95.Groups[1].Value) }
+  }
 
-  # The charter's known unmet item is the first-frame budget. Everything else
-  # failing is a real regression and must turn the row FAIL.
+  # The charter's known-unmet item is the first-frame budget; every other
+  # failing metric is a real regression and must turn the row FAIL.
+  # First frame is judged on p50 <= 100 and p95 <= 120 (nine child runs); the
+  # empty-window floor in PERF.md section 12 is where the 120 upper bound comes
+  # from, and a single 100 +/- 5 ms sample is the floor's own jitter.
   $knownMetrics = @('冷启动→首帧')
   $onlyKnown = ($failedMetrics.Count -eq 1)
   foreach ($metric in $failedMetrics) {
@@ -575,9 +583,9 @@ function Invoke-Bench {
   }
 
   if ($fail -eq 0 -and $result.Code -eq 0) {
-    Add-Row $item 'PASS' $stat ('六项全部达标；{0:N1} s' -f $result.Seconds)
+    Add-Row $item 'PASS' $stat ('六项全部达标（首帧判据 p50≤100 / p95≤120）；{0:N1} s' -f $result.Seconds)
   } elseif ($fail -eq 1 -and $onlyKnown) {
-    Add-Row $item 'KNOWN-FAIL' ($stat + '（目标 100）') ('首帧 ≤100 ms 为宪章已知未达标项；{0:N1} s' -f $result.Seconds)
+    Add-Row $item 'KNOWN-FAIL' ($stat + '（目标 p50 100 / p95 120）') ('宪章已知项；本机空窗口下限 p50 ~84 ms（PERF §12）；{0:N1} s' -f $result.Seconds)
   } else {
     $bad = @($failedMetrics | Select-Object -Unique)
     if ($bad.Count -gt 0) {

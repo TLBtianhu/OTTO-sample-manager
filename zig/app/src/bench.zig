@@ -4,9 +4,10 @@
 //! 测量顺序与表格顺序不同：内存必须在"5 次加载/释放"之前测（见 run 里的注释）。
 //!
 //!   1. **库加载**：`library_io` 读 + decode 的墙钟，重复 5 次取中位数；
-//!   2. **冷启动到首帧**：另起一个自己（`--bench-first-frame`），量 CreateProcess →
-//!      子进程第一帧建完 → 退出；子进程同时报一个 `main` 内计时。真正的窗口首帧
-//!      还要加上真实 paint/合成，headless 测不到那一段（见 `PERF.md`）；
+//!   2. **冷启动到首帧**：另起一个自己（`--bench-first-frame`）9 次，量 CreateProcess →
+//!      子进程第一帧建完 → 退出；报 p50/p95/max，判 p50 ≤ 100 与 p95 ≤ 120（本机空
+//!      窗口的下限就接近 100，见 `PERF.md` §12）。真正的窗口首帧还要加上真实
+//!      paint/合成，headless 测不到那一段（见 `PERF.md`）；
 //!   3. **常驻内存**：`K32GetProcessMemoryInfo` 的 `WorkingSetSize`，在"库常驻 +
 //!      取到 100 张缩略图"之后测 3 次取最大；
 //!   4. **搜索延迟**：2000 条上 `matchingIndices` 跑 200 次，报 p50/p95；
@@ -42,14 +43,23 @@ pub const Args = struct {
 
 const load_runs = 5;
 const search_runs = 200;
-const first_frame_runs = 3;
+/// 9 次，不是 3 次：本机首个 HWND 的抖动是 ±10 ms（见 `PERF.md` §12 的下限探针），
+/// 3 次的中位数会在 92–101 ms 之间翻面，闸门就成了掷硬币。9 次的中位数才是"这台
+/// 机器这一刻的冷启动"，p95 则单独报出来看尾部。
+const first_frame_runs = 9;
 const memory_runs = 3;
 
 const mib: f64 = 1024.0 * 1024.0;
 
 /// 宪章/路线图里的目标，集中在表头与判定里各出现一次，不散落在各处。
 const target_load_ms: f64 = 100;
+/// 宪章：冷启动 ≤ 100 ms。判据是 **p50**（9 次）：本机"只 create window + present
+/// 一帧"的空程序就是 p50 ≈ 84 ms、p95 ≈ 98 ms（`PERF.md` §12），所以 p95 的
+/// 100 ms 线落在系统自己的抖动带里，拿它判红绿只能得到噪声。
 const target_first_frame_ms: f64 = 100;
+/// 尾部上限：同样的空程序 p95 ≈ 98 ms，加上我们自己的 ~20 ms（库 5.5 + 首帧 14），
+/// 120 ms 是"没有真实退步"的上界。p50 是目标，p95 是噪声闸。
+const target_first_frame_p95_ms: f64 = 120;
 const target_memory_bytes: usize = 50 * 1024 * 1024;
 const target_search_p95_ms: f64 = 20; // ROADMAP M2 的验收，不在宪章表里
 const target_thumb_p95_ms: f64 = 80;
@@ -189,20 +199,30 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, args: Args) !u8
         std.debug.print("bench: 取自身 exe 路径失败（{s}）\n", .{@errorName(err)});
     }
     var first_frame_wall: f64 = 0;
+    var first_frame_p95: f64 = 0;
+    var first_frame_max: f64 = 0;
     var first_frame_internal: ?f64 = null;
     var first_frame_setup: ?f64 = null;
     var first_frame_frame: ?f64 = null;
     var full_ui_ws: ?f64 = null;
     if (frame_runs > 0) {
-        first_frame_wall = bench_stats.median(allocator, walls[0..frame_runs]);
+        const summary = bench_stats.summarize(allocator, walls[0..frame_runs]);
+        first_frame_wall = summary.p50;
+        first_frame_p95 = summary.p95;
+        first_frame_max = summary.max;
         first_frame_internal = medianOptional(allocator, internals[0..frame_runs]);
         first_frame_setup = medianOptional(allocator, setups[0..frame_runs]);
         first_frame_frame = medianOptional(allocator, frames[0..frame_runs]);
         full_ui_ws = medianOptional(allocator, working_sets[0..frame_runs]);
+        // 9 个原始样本照打：中位数可以被质疑时，原始数就在这里（PERF.md 的口径）。
         std.debug.print("bench: 首帧子进程墙钟 {d} 次 ms:", .{frame_runs});
         for (walls[0..frame_runs]) |value| std.debug.print(" {d:.2}", .{value});
-        if (first_frame_internal) |ms| std.debug.print("（子进程 main 内中位 {d:.2} ms）", .{ms});
-        std.debug.print("\n", .{});
+        std.debug.print(
+            "（p50 {d:.2} p95 {d:.2} max {d:.2}",
+            .{ summary.p50, summary.p95, summary.max },
+        );
+        if (first_frame_internal) |ms| std.debug.print("，main 内中位 {d:.2} ms", .{ms});
+        std.debug.print("）\n", .{});
         if (full_ui_ws) |ws| {
             std.debug.print(
                 "bench: 完整 UI（首帧子进程）WS={d:.2} MiB —— 不计入内存行：该行按任务口径只含库+缩略图。\n",
@@ -227,6 +247,8 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator, args: Args) !u8
         .load_median = load_median,
         .library_samples = library.samples.len,
         .first_frame_wall = first_frame_wall,
+        .first_frame_p95 = first_frame_p95,
+        .first_frame_max = first_frame_max,
         .first_frame_internal = first_frame_internal,
         .first_frame_setup = first_frame_setup,
         .first_frame_frame = first_frame_frame,
@@ -333,6 +355,8 @@ const TableInput = struct {
     load_median: f64,
     library_samples: usize,
     first_frame_wall: f64,
+    first_frame_p95: f64,
+    first_frame_max: f64,
     first_frame_internal: ?f64,
     first_frame_setup: ?f64,
     first_frame_frame: ?f64,
@@ -367,20 +391,28 @@ fn printTable(input: TableInput) u8 {
     count(&pass, &fail, &skip, load_pass, false);
 
     // 2. 冷启动到首帧
-    const frame_pass = input.first_frame_ran and input.first_frame_wall <= target_first_frame_ms;
-    var note: [192]u8 = undefined;
+    //    判的是 p50（9 次）与 p95 两个数：p50 是宪章目标，p95 是尾部噪声闸。
+    //    本机空程序的 p95 就接近 100 ms，所以单次 100±5 不是退步，中位数才算。
+    const frame_pass = input.first_frame_ran and
+        input.first_frame_wall <= target_first_frame_ms and
+        input.first_frame_p95 <= target_first_frame_p95_ms;
+    var note: [256]u8 = undefined;
     const frame_note = if (input.first_frame_internal) |ms| blk: {
         if (input.first_frame_setup != null and input.first_frame_frame != null) {
-            break :blk text(&note, "CreateProcess→首帧行；main 内 {d:.1} ms = setup {d:.1} + frame {d:.1}", .{
-                ms, input.first_frame_setup.?, input.first_frame_frame.?,
-            });
+            break :blk text(
+                &note,
+                "p95 {d:.1} / max {d:.1} ms；{d} 次；main 内 {d:.1} = setup {d:.1} + frame {d:.1}",
+                .{ input.first_frame_p95, input.first_frame_max, first_frame_runs, ms, input.first_frame_setup.?, input.first_frame_frame.? },
+            );
         }
-        break :blk text(&note, "CreateProcess→首帧行；main 内 {d:.1} ms", .{ms});
+        break :blk text(&note, "p95 {d:.1} / max {d:.1} ms；{d} 次；main 内 {d:.1} ms", .{
+            input.first_frame_p95, input.first_frame_max, first_frame_runs, ms,
+        });
     } else text(&note, "CreateProcess→首帧行；子进程未报 main 内计时", .{});
     printRow(
         "冷启动→首帧",
-        if (input.first_frame_ran) text(&buf, "{d:.2} ms", .{input.first_frame_wall}) else "测不到",
-        "≤ 100 ms",
+        if (input.first_frame_ran) text(&buf, "{d:.2} ms（p50）", .{input.first_frame_wall}) else "测不到",
+        "p50≤100/p95≤120",
         verdict(frame_pass),
         frame_note,
     );
