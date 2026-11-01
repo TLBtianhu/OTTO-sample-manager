@@ -79,6 +79,18 @@ const opus_silk_fixture = @embedFile("fixtures/opus-silk-wb-12k.opus");
 const opus_silk_seconds: f64 = 20.0;
 const opus_silk_target_speedup: f64 = 100.0;
 const opus_silk_total_frames: u64 = 96_000;
+
+/// 2 s of pure Hybrid audio at 32 kbps CBR, mono, 20 ms frames: all 101 packets
+/// are configuration 15 (Hybrid, fullband, 20 ms), so every frame pays for both
+/// layers — SILK synthesis, the 16-to-48 kHz resampler, CELT from band 17 up,
+/// and the sample-wise addition. Generated with
+/// `ffmpeg -f lavfi -i anoisesrc=color=pink:sample_rate=48000:duration=2
+///  -c:a libopus -b:a 32k -application voip -frame_duration 20 -vbr off`,
+/// where libopus chose Hybrid for every packet.
+const opus_hybrid_fixture = @embedFile("fixtures/opus-hybrid-mono-48k.opus");
+const opus_hybrid_seconds: f64 = 20.0;
+const opus_hybrid_target_speedup: f64 = 100.0;
+const opus_hybrid_total_frames: u64 = 96_000;
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -90,6 +102,7 @@ pub fn main() !void {
     try benchVorbis(allocator, io);
     try benchOpus(allocator, io);
     try benchOpusSilk(allocator, io);
+    try benchOpusHybrid(allocator, io);
     try benchLegacy(allocator, io);
 }
 
@@ -526,4 +539,41 @@ fn benchOpusSilk(allocator: std.mem.Allocator, io: std.Io) !void {
     const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
     if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
     try report("Opus 12k mono (SILK)", elapsed_ns, @floatFromInt(decoded_frames), 48_000, 1, opus_silk_target_speedup, files);
+}
+
+/// Hybrid row: mono too, but every frame runs both layers and adds them.
+fn benchOpusHybrid(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 48_000 < opus_hybrid_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(opus_hybrid_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.channels != 1) return error.UnexpectedChannelCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            decoded_frames += n;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+        if (dec.info.total_frames != opus_hybrid_total_frames) return error.UnexpectedFrameCount;
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report(
+        "Opus 32k mono (Hybrid)",
+        elapsed_ns,
+        @floatFromInt(decoded_frames),
+        48_000,
+        1,
+        opus_hybrid_target_speedup,
+        files,
+    );
 }

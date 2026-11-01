@@ -295,10 +295,13 @@ test "celta vectors: info reports the stream length after the last page" {
     try testing.expectEqual(@as(?u64, 96_000), dec.info.total_frames);
 }
 
-test "celta vectors: a hybrid packet is refused, not approximated" {
-    // The VOIP vector mixes SILK-only, Hybrid and CELT packets and *starts* with
-    // Hybrid: the decoder must say so instead of emitting only part of the
-    // frame. (SILK itself decodes now; see opus_silk_vectors_test.zig.)
+test "celta vectors: the mixed-mode VOIP file decodes end to end" {
+    // This file starts with nine Hybrid packets and then moves to SILK-only and
+    // CELT-only ones, so it returned `error.Unsupported` at the first read until
+    // Hybrid was implemented. Now it must produce its declared length: the
+    // per-mode mixing is compared against ffmpeg in
+    // `opus_hybrid_vectors_test.zig`, and this test only pins that the CELT
+    // decoder is reachable through a stream that began in another layer.
     const name = "opus-48k-24-voip.opus";
     const bytes = readVector(testing.allocator, name) catch |err| switch (err) {
         error.SkipZigTest => return error.SkipZigTest,
@@ -309,6 +312,14 @@ test "celta vectors: a hybrid packet is refused, not approximated" {
     var reader = std.Io.Reader.fixed(bytes);
     var dec = try opus.Decoder.open(testing.allocator, &reader, "");
     defer dec.deinit();
-    var buffer: [64]i16 = undefined;
-    try testing.expectError(error.Unsupported, dec.read(&buffer));
+
+    var buffer: [4096]i16 = undefined;
+    var total: usize = 0;
+    while (true) {
+        const written = try dec.read(&buffer);
+        if (written == 0) break;
+        total += written;
+    }
+    try testing.expectEqual(@as(usize, 96_000), total);
+    try testing.expectEqual(@as(?u64, 96_000), dec.info.total_frames);
 }

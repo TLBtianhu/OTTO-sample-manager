@@ -106,13 +106,18 @@ pub const Decoder = struct {
         self.allocator.destroy(self);
     }
 
-    /// Drop all decoder state, as if the stream restarted.
+    /// Drop all decoder state, as if the stream restarted. This is the
+    /// reference's "flush" (`ff_celt_flush`), which is what a stream that
+    /// leaves CELT for SILK and comes back sees: the overlap history, the
+    /// post-filter and the folding seed go to zero, the *current* envelope goes
+    /// to zero (it is the next inter frame's prediction) and both past
+    /// envelopes go to silence.
     pub fn reset(self: *Decoder) void {
         @memset(std.mem.asBytes(&self.decode_mem), 0);
         self.preemph_mem = .{ 0.0, 0.0 };
         self.old_band_e = @splat(0.0);
-        self.old_log_e = @splat(-28.0);
-        self.old_log_e2 = @splat(-28.0);
+        self.old_log_e = @splat(energy.energy_silence);
+        self.old_log_e2 = @splat(energy.energy_silence);
         self.pf_period = 0;
         self.pf_period_old = 0;
         self.pf_gain = 0;
@@ -133,7 +138,24 @@ pub const Decoder = struct {
         frame_size: usize,
         stream_channels: u8,
     ) Error!void {
-        if (data.len == 0 or data.len > 1275) return error.Corrupt;
+        var dec = range.Decoder.init(data);
+        try self.decodeFrameWithEc(&dec, frame_size, stream_channels);
+    }
+
+    /// Same, but continuing a range decoder that already carries state: a
+    /// hybrid packet's SILK half consumed the first bits of the *same*
+    /// arithmetic coder, so CELT must start where SILK stopped. `dec.buf` is
+    /// the CELT payload (the reference excludes a trailing redundancy section
+    /// from its storage, which also fixes the raw-bit tail and the frame's bit
+    /// budget).
+    pub fn decodeFrameWithEc(
+        self: *Decoder,
+        dec: *range.Decoder,
+        frame_size: usize,
+        stream_channels: u8,
+    ) Error!void {
+        const total_bits_in: i32 = @intCast(dec.buf.len * 8);
+        if (dec.buf.len == 0 or dec.buf.len > 1275) return error.Corrupt;
         if (frame_size != 120 and frame_size != 240 and frame_size != 480 and frame_size != 960) {
             return error.Unsupported;
         }
@@ -147,9 +169,6 @@ pub const Decoder = struct {
         while ((@as(usize, 1) << lm) * tables.short_mdct != frame_size) : (lm += 1) {}
         const m = @as(usize, 1) << lm;
         const n = frame_size;
-
-        var dec = range.Decoder.init(data);
-        const total_bits_in: i32 = @intCast(data.len * 8);
 
         // A mono decoder keeps its energy history in channel 0 only.
         if (c_ch == 1) {
@@ -197,9 +216,9 @@ pub const Decoder = struct {
         const short_blocks: usize = if (is_transient) m else 0;
 
         const intra_ener = tell + 3 <= total_bits_in and dec.decodeBitLogp(3) == 1;
-        energy.unquantCoarseEnergy(self.start, self.end, &self.old_band_e, intra_ener, &dec, c_ch, lm);
+        energy.unquantCoarseEnergy(self.start, self.end, &self.old_band_e, intra_ener, dec, c_ch, lm);
 
-        self.decodeTf(is_transient, lm, &dec, total_bits_in);
+        self.decodeTf(is_transient, lm, dec, total_bits_in);
 
         tell = dec.tell();
         var spread: u8 = pvq.spread_normal;
@@ -235,7 +254,7 @@ pub const Decoder = struct {
         else
             5;
 
-        var bits: i32 = @as(i32, @intCast(data.len * 8)) << range.bitres;
+        var bits: i32 = total_bits_in << range.bitres;
         bits -= @intCast(dec.tellFrac());
         bits -= 1;
         const anti_collapse_rsv: i32 = if (is_transient and lm >= 2 and
@@ -254,11 +273,11 @@ pub const Decoder = struct {
             &self.fine_priority,
             c_ch,
             lm,
-            &dec,
+            dec,
             &self.scratch,
         );
 
-        energy.unquantFineEnergy(self.start, self.end, &self.old_band_e, &self.ebits, &dec, c_ch);
+        energy.unquantFineEnergy(self.start, self.end, &self.old_band_e, &self.ebits, dec, c_ch);
 
         // Slide the overlap history down by one frame.
         for (0..cc_ch) |c| {
@@ -280,11 +299,11 @@ pub const Decoder = struct {
             .dual_stereo = result.dual_stereo,
             .intensity = result.intensity,
             .tf_res = &self.tf_res,
-            .total_bits = @as(i32, @intCast(data.len * 8)) * (1 << range.bitres) - anti_collapse_rsv,
+            .total_bits = total_bits_in * (1 << range.bitres) - anti_collapse_rsv,
             .balance = result.balance,
             .coded_bands = result.coded_bands,
             .disable_inv = self.disable_inv,
-            .dec = &dec,
+            .dec = dec,
         };
         self.rng = frame_mod.quantAllBands(bp, self.coeffs[0 .. c_ch * n], &self.collapse_masks, &self.pulses, self.rng, &self.ws);
 
@@ -298,7 +317,7 @@ pub const Decoder = struct {
             &self.ebits,
             &self.fine_priority,
             total_bits_in - dec.tell(),
-            &dec,
+            dec,
             c_ch,
         );
 

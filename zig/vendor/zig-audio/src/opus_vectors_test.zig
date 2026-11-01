@@ -39,12 +39,13 @@ const Vector = struct {
     configs: []const ConfigCount,
 };
 
-/// Whether this library can decode the file at all: every packet CELT-only and
-/// no packet carrying more than two frames.
+/// Whether this library can decode the file at all: no packet carries more than
+/// two frames, and a packet that uses the speech layer (SILK-only or Hybrid)
+/// needs a mono stream, because the layered path here is mono.
 fn decodable(vector: *const Vector) bool {
-    if (vector.frames != vector.packets) return false;
+    if (vector.frames > vector.packets * 2) return false;
     for (vector.configs) |entry| {
-        if (entry.config < 16) return false;
+        if (entry.config < 16 and vector.channels != 1) return false;
     }
     return true;
 }
@@ -156,10 +157,9 @@ test "opus vectors: header fields, length and packet structure match ffprobe" {
 
         // An `.opus` file is always named by probe, and a well-formed one always
         // opens: what a stream can decode is decided per packet, by `read`. The
-        // CELT-only and SILK-only single-frame files must produce samples; the
-        // file whose first packet is Hybrid, and the three-frames-per-packet
-        // file, must answer `Unsupported` on the first read rather than invent
-        // audio.
+        // CELT-only, SILK-only and mixed-mode single-frame files must produce
+        // samples; the three-frames-per-packet file must answer `Unsupported` on
+        // the first read rather than invent audio.
         try testing.expectEqual(root.Format.ogg_opus, root.probe(bytes).?);
         var open_reader = std.Io.Reader.fixed(bytes);
         var opened = try root.open(testing.allocator, &open_reader);

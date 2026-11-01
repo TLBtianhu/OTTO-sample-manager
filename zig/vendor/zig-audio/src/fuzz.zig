@@ -332,13 +332,15 @@ fn buildAiffTemplate(allocator: std.mem.Allocator, bits: u16) ![]u8 {
     return testutil.buildAiff(allocator, 1, 44_100, bits, frames, payload);
 }
 
-/// A complete Ogg Opus file with three audio packets: one code 0 (20 ms CELT,
-/// stereo), one code 3 (SILK 10 ms, two VBR frames, six bytes of padding) and
-/// one code 0 SILK narrowband 40 ms packet. The last one is what drives the
-/// SILK decoder deep: two 20 ms frames, the low sample rate, the narrower
-/// bandwidth tables.
+/// A complete Ogg Opus file with five audio packets: one code 0 (20 ms CELT,
+/// stereo), one code 3 (SILK 10 ms, two VBR frames, six bytes of padding), one
+/// code 0 SILK narrowband 40 ms packet, and two Hybrid packets (20 ms fullband
+/// and 10 ms superwideband). The SILK 40 ms packet drives the SILK decoder deep
+/// (two 20 ms frames, the low sample rate, the narrower bandwidth tables); the
+/// Hybrid ones drive the shared range decoder, its bit split and the CELT
+/// half's band range.
 /// Mutations therefore land in `OpusHead`, `OpusTags`, the frame count byte,
-/// the length fields and the padding run.
+/// the length fields, the padding run and every Hybrid parsing decision.
 fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
     const frame_a = try allocator.alloc(u8, 48);
     defer allocator.free(frame_a);
@@ -348,10 +350,16 @@ fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(frame_c);
     const frame_d = try allocator.alloc(u8, 30);
     defer allocator.free(frame_d);
+    const frame_e = try allocator.alloc(u8, 60);
+    defer allocator.free(frame_e);
+    const frame_f = try allocator.alloc(u8, 44);
+    defer allocator.free(frame_f);
     for (frame_a, 0..) |*byte, i| byte.* = @truncate(i * 11 + 3);
     for (frame_b, 0..) |*byte, i| byte.* = @truncate(i * 5 + 1);
     for (frame_c, 0..) |*byte, i| byte.* = @truncate(i * 17 + 9);
     for (frame_d, 0..) |*byte, i| byte.* = @truncate(i * 23 + 5);
+    for (frame_e, 0..) |*byte, i| byte.* = @truncate(i * 29 + 7);
+    for (frame_f, 0..) |*byte, i| byte.* = @truncate(i * 13 + 2);
 
     const plain = try opus_build.packet(allocator, .{ .stereo = true, .frames = &.{frame_a} });
     defer allocator.free(plain);
@@ -368,10 +376,20 @@ fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
         .frames = &.{frame_d},
     });
     defer allocator.free(silk40);
+    const hybrid20 = try opus_build.packet(allocator, .{
+        .config = 15, // Hybrid FB, 20 ms
+        .frames = &.{frame_e},
+    });
+    defer allocator.free(hybrid20);
+    const hybrid10 = try opus_build.packet(allocator, .{
+        .config = 12, // Hybrid SWB, 10 ms
+        .frames = &.{frame_f},
+    });
+    defer allocator.free(hybrid10);
 
     return opus_build.file(allocator, .{
         .comments = &.{"ENCODER=zig-audio-fuzz"},
-        .packets = &.{ plain, padded, silk40 },
+        .packets = &.{ plain, padded, silk40, hybrid20, hybrid10 },
     });
 }
 

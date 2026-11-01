@@ -1,4 +1,4 @@
-﻿//! SILK conformance against `ffmpeg -f f32le` / `-f s16le`, end to end.
+//! SILK conformance against `ffmpeg -f f32le` / `-f s16le`, end to end.
 //!
 //! The corpus lives outside the repository in `..\zig-audio-vectors\ogg`, so a
 //! checkout without it prints one line and stays green.
@@ -8,16 +8,16 @@
 //!
 //!   * `silk-12k-nb.opus` — 101 packets, **all configuration 9**: SILK-only,
 //!     *wideband*, 20 ms. The "nb" in the name is the bitrate label, not the
-//!     bandwidth; this is the one pure-SILK file, and it is the acceptance
-//!     vector.
-//!   * `silk-20k-wb.opus` — 91 packets of configuration 9 plus 10 Hybrid
-//!     packets (configuration 15 and 13), and the *first nine packets are
-//!     Hybrid*. The file is not SILK-only.
+//!     bandwidth; this is the one pure-SILK file.
+//!   * `silk-20k-wb.opus` — 91 packets of configuration 9, 9 Hybrid packets of
+//!     configuration 15 at the front and one 10 ms Hybrid (configuration 13) at
+//!     the end. The file is not SILK-only.
 //!   * `opus-48k-24-voip.opus` — 11 SILK, 9 Hybrid, 81 CELT, Hybrid first.
 //!
-//! For the two mixed files the honest behaviour of a SILK-only decoder is to
-//! refuse at the first Hybrid packet, which is packet 1: they yield no samples
-//! at all, and the tests below pin that down instead of pretending otherwise.
+//! All three decode end to end now that Hybrid is implemented, and the mixed
+//! files are compared against ffmpeg here as well as in
+//! `opus_hybrid_vectors_test.zig`: SILK has to stay bit-compatible when it is
+//! interleaved with the other layers, and this is the test that says so.
 //!
 //! Thresholds, as for CELT: f32 SNR >= 90 dB and max < 1e-4, because the target
 //! is a different float implementation of the same synthesis; s16 SNR >= 70 dB
@@ -25,10 +25,11 @@
 //! 0.5 LSB on a full-scale signal, so a 90 dB bar in the s16 domain would
 //! measure the rounding rule rather than the decoder.
 //!
-//! The measured numbers are far better than the bars: 145.30 dB f32 and
-//! 107.28 dB s16 with a 1 LSB maximum. That is not a coincidence — the SILK
-//! synthesis here is a port of the same float arithmetic the comparison target
-//! uses, so the residual is float rounding, not modelling error.
+//! The measured numbers for the pure-SILK file are far better than the bars:
+//! 145.30 dB f32 and 107.28 dB s16 with a 1 LSB maximum. That is not a
+//! coincidence — the SILK synthesis here is a port of the same float arithmetic
+//! the comparison target uses, so the residual is float rounding, not modelling
+//! error.
 
 const std = @import("std");
 const opus = @import("opus.zig");
@@ -43,9 +44,6 @@ const Vector = struct {
     name: []const u8,
     frames: usize,
     configs: [32]u64,
-    /// Packets the decoder should get through before the first refusal; the
-    /// whole stream when it is SILK-only.
-    decodes_fully: bool,
 };
 
 fn expectedConfigs(comptime pairs: []const [2]u64) [32]u64 {
@@ -60,21 +58,18 @@ const vectors = [_]Vector{
         .name = "silk-12k-nb.opus",
         .frames = 96_000,
         .configs = expectedConfigs(&[_][2]u64{.{ 9, 101 }}),
-        .decodes_fully = true,
     },
-    // Hybrid at packet 1: a SILK-only decoder cannot start it.
+    // Hybrid at both ends around a long SILK run.
     .{
         .name = "silk-20k-wb.opus",
-        .frames = 0,
+        .frames = 96_000,
         .configs = expectedConfigs(&[_][2]u64{ .{ 9, 91 }, .{ 13, 1 }, .{ 15, 9 } }),
-        .decodes_fully = false,
     },
-    // The mixed-mode file: 11 SILK packets, but the first nine are Hybrid.
+    // The mixed-mode file: 11 SILK packets in the middle of Hybrid and CELT.
     .{
         .name = "opus-48k-24-voip.opus",
-        .frames = 0,
+        .frames = 96_000,
         .configs = expectedConfigs(&[_][2]u64{ .{ 9, 11 }, .{ 15, 9 }, .{ 23, 80 }, .{ 27, 1 } }),
-        .decodes_fully = false,
     },
 };
 
@@ -207,17 +202,6 @@ test "silk vectors: f32 and s16 match ffmpeg, sample counts identical" {
         const decoded = try decodeAll(testing.allocator, bytes);
         defer decoded.deinit(testing.allocator);
 
-        if (!vector.decodes_fully) {
-            // A mixed-mode stream that starts with a Hybrid packet: refuse by
-            // name, deliver nothing, do not fabricate silence.
-            try testing.expectEqual(@as(usize, 0), decoded.pcm_f32.len);
-            try testing.expectEqual(@as(usize, 0), decoded.pcm_i16.len);
-            try testing.expectEqual(opus.Error.Unsupported, decoded.err.?);
-            std.debug.print("silk {s}: refused (Hybrid packet first), 0 samples\n", .{vector.name});
-            ran += 1;
-            continue;
-        }
-
         try testing.expectEqual(vector.frames, decoded.pcm_f32.len);
         try testing.expectEqual(vector.frames, decoded.pcm_i16.len);
         try testing.expectEqual(null, decoded.err);
@@ -269,12 +253,12 @@ test "silk vector: the stream reports its length only after the last page" {
     try testing.expectEqual(@as(?u64, 96_000), dec.info.total_frames);
 }
 
-test "silk: samples are delivered before a Hybrid packet stops the stream" {
-    // The supplied mixed files all happen to *start* with a Hybrid packet, so
-    // they cannot show what "partly usable" means. This builds the shape the
-    // decoder must handle: one real SILK packet (taken from the fixture) and
-    // then a Hybrid packet. The SILK samples come out, and the Hybrid packet
-    // stops the stream with a named error instead of silence.
+test "silk: a SILK packet followed by a Hybrid packet decodes both" {
+    // The corpus cannot show this shape: its mixed files use Hybrid and SILK in
+    // separate packets but no small stream starts with SILK and then switches.
+    // This builds one from a real SILK packet of the fixture and a synthetic
+    // Hybrid packet (configuration 15, 20 ms, 24 zero bytes), which the decoder
+    // must accept as two frames of 960 samples, not stop at the mode change.
     const fixture = @embedFile("fixtures/opus-silk-wb-12k.opus");
     var reader = std.Io.Reader.fixed(fixture);
     var demux = try ogg.Demuxer.init(testing.allocator, &reader, "");
@@ -304,14 +288,8 @@ test "silk: samples are delivered before a Hybrid packet stops the stream" {
 
     var pcm: [4096]i16 = undefined;
     const delivered = try dec.read(&pcm);
-    // 969 samples come out of the first call: 936 are what the 16-tap
-    // interpolation filter can produce from one 320-sample SILK frame plus its
-    // lookahead, and 33 are the priming zeros' own contribution (11 input
-    // samples at 3x). The reference decoder splits the same stream at different
-    // points and accounts for the difference with a delayed-samples counter;
-    // only the concatenated sequence matters, and that is what the ffmpeg
-    // comparison above pins down. Drop the 312-sample pre-skip and 657 are
-    // delivered before the Hybrid packet stops the stream.
-    try testing.expectEqual(@as(usize, 969 - 312), delivered);
-    try testing.expectError(opus.Error.Unsupported, dec.read(&pcm));
+    // Two 20 ms frames of 960 samples each, minus the 312-sample pre-skip. The
+    // first read drains both packets; a second one ends the stream cleanly.
+    try testing.expectEqual(@as(usize, 2 * 960 - 312), delivered);
+    try testing.expectEqual(@as(usize, 0), try dec.read(&pcm));
 }

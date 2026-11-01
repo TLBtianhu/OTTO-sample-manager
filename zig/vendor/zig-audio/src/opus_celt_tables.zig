@@ -250,6 +250,16 @@ pub const window120_reference = [120]f32{
 /// The pre-emphasis pole; the de-emphasis filter is `1/(1 - a z^-1)`.
 pub const preemph: f32 = 0.85000610;
 
+/// The crossfade window for a mode-switch redundancy frame, i.e. the reference's
+/// `ff_celt_window2`: `window120` squared, which is what its `smooth_fade` uses
+/// (the reference squares the window at the call site, ffmpeg stores it
+/// squared). The splice is 2.5 ms, so it reads the first 120 entries.
+pub const window2: [overlap]f32 = blk: {
+    var w: [overlap]f32 = undefined;
+    for (&w, 0..) |*slot, n| slot.* = window120_reference[n] * window120_reference[n];
+    break :blk w;
+};
+
 /// `cos(2*pi*(i + 1/8)/N)` for the largest IMDCT size, N = 1920. Smaller sizes
 /// (N = 240/480/960 for 2.5/5/10 ms, and N = 240 per short block) index it with
 /// a stride, since they all divide 1920.

@@ -7,12 +7,12 @@
 | --- | --- |
 | 上游 | https://github.com/TLBtianhu/zig-audio |
 | 分支 | `main`（上游只有一个真源，没有 OTTO 专用分支） |
-| 本副本对应提交 | `4832f2c`（`v0.14.1: Opus decodes, the music half of it`，版本 **v0.14.1**） |
+| 本副本对应提交 | `a85c9c7`（`v0.15: Opus decodes, the music half of it`，版本 **v0.15**） |
 | 本副本的用途 | WAV 全变体（PCM / float / µ-law / A-law / IMA ADPCM / MS ADPCM）+ FLAC + MP3 + AIFF + Ogg Vorbis + **Ogg Opus 的 CELT 层** 解码（`providers/audio.zig` 与 `providers/native_audio.zig` 共用 `audio/decode.zig`） |
 
 ## 这个副本带了哪些补丁
 
-**零补丁**，逐字节等于上游 `4832f2c` 的 `src/`、`build.zig`、`build.zig.zon`、`LICENSE`
+**零补丁**，逐字节等于上游 `a85c9c7` 的 `src/`、`build.zig`、`build.zig.zon`、`LICENSE`
 （`src/fixtures/` 按下面的规矩不带）。OTTO 侧的适配全部在
 `zig/app/src/audio/decode.zig` 与两个 provider 文件（自己的代码），不改这个目录里的
 任何一行。app 侧不再有 `audio/wav.zig`：整段 WAV 解码也走这里。
@@ -30,18 +30,18 @@ Get-ChildItem "$up\src" -File -Recurse | Where-Object { $_.FullName -notmatch '\
   }
 ```
 
-v0.14.1 同步时的实测：**82 个文件，missing=0 / extra=0 / mismatch=0**；`build.zig` /
+v0.15 同步时的实测：**82 个文件，missing=0 / extra=0 / mismatch=0**；`build.zig` /
 `build.zig.zon` / `LICENSE` 同样逐字节一致（`build.zig.zon` 的 `.version` 是 `0.13.0`）。
 
-这次是从 **v0.10（`b8a3a05`）** 跨到 v0.14.1，中间隔着 v0.11 / v0.12 / v0.14.1 三个提交：
+这次是从 **v0.10（`b8a3a05`）** 跨到 v0.15，中间隔着 v0.11 / v0.12 / v0.15 三个提交：
 `src/` 新增 24 个文件（21 个 `opus*`：容器 / 头部 / 包 / CELT 的分配、带、能量、PVQ、
 后处理、表；3 个 `vorbis_*`），10 个既有文件内容有改动，`src/` 从 58 个文件变成 82 个。
 **升级必须整目录镜像，不能只补新文件**——v0.12 把 Vorbis 的 meta/codebook 拆成了
 `vorbis_meta.zig` / `vorbis_types.zig`，只拷新文件会留下一半旧 import。
 
-## v0.14.1 的能力边界（OTTO 依赖这里）
+## v0.15 的能力边界（OTTO 依赖这里）
 
-Opus 不是一个编解码器，是 SILK（语音）+ CELT（其余）+ 逐包切换三层。v0.14.1 只做了
+Opus 不是一个编解码器，是 SILK（语音）+ CELT（其余）+ 逐包切换三层。v0.15 只做了
 **CELT（configuration 16–31）**：
 
 * `zig_audio.open` 对一个 `.opus` 文件**会成功**，`info.format = .ogg_opus`，

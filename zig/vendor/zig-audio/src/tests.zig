@@ -31,6 +31,8 @@ test {
     _ = @import("opus_celt_vectors_test.zig");
     _ = @import("opus_silk_test.zig");
     _ = @import("opus_silk_vectors_test.zig");
+    _ = @import("opus_hybrid.zig");
+    _ = @import("opus_hybrid_vectors_test.zig");
     _ = @import("ffmpeg_test.zig");
     _ = @import("fuzz.zig");
 }

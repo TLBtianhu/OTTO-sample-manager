@@ -63,7 +63,7 @@ test "opus: inspect reads the length from the last granule" {
     defer direct.deinit();
 }
 
-test "opus: SILK-only packets decode, Hybrid packets are refused" {
+test "opus: SILK-only and Hybrid packets both decode" {
     // SILK (configuration 0-11) is implemented: a real wideband SILK stream has
     // to come out whole, at the stream length the granule promises.
     const silk_bytes = @embedFile("fixtures/opus-silk-wb-12k.opus");
@@ -82,24 +82,32 @@ test "opus: SILK-only packets decode, Hybrid packets are refused" {
         try testing.expectEqual(@as(?u64, 96_000), dec.info.total_frames);
     }
 
-    // Hybrid (configuration 12-15) needs SILK and CELT on the same frame and a
-    // mix of the two; decoding one layer would drop the speech or the music
-    // band, so the whole packet is refused by name.
-    const frame = try frameBytes(testing.allocator, 40, 7);
-    defer testing.allocator.free(frame);
+    // Hybrid (configuration 12-15) runs SILK and CELT on the same frame and adds
+    // them; a real one is compared against ffmpeg in
+    // `opus_hybrid_vectors_test.zig`, so what this packet checks is the
+    // framing path: a mono Hybrid packet must produce samples, not a refusal.
+    // The bytes are a fixed pattern, so the *values* are arbitrary — only the
+    // count and the absence of an error are asserted.
+    var hybrid_frame: [40]u8 = undefined;
+    for (&hybrid_frame, 0..) |*byte, i| byte.* = 7 +% @as(u8, @truncate(i * 7));
     const packet_bytes = try opus_build.packet(testing.allocator, .{
         .config = 15, // Hybrid, fullband, 20 ms
-        .frames = &.{frame},
+        .frames = &.{&hybrid_frame},
     });
     defer testing.allocator.free(packet_bytes);
-    const bytes = try opus_build.file(testing.allocator, .{ .packets = &.{packet_bytes} });
+    const bytes = try opus_build.file(testing.allocator, .{
+        .head = .{ .channels = 1, .coupled_count = 0 },
+        .packets = &.{packet_bytes},
+    });
     defer testing.allocator.free(bytes);
 
     var reader = std.Io.Reader.fixed(bytes);
     var dec = try opus.Decoder.open(testing.allocator, &reader, "");
     defer dec.deinit();
-    var pcm: [64]i16 = undefined;
-    try testing.expectError(error.Unsupported, dec.read(&pcm));
+    var pcm: [4096]i16 = undefined;
+    // One 20 ms frame is 960 samples; the default pre-skip drops 312 of them.
+    try testing.expectEqual(@as(usize, 960 - 312), try dec.read(&pcm));
+    try testing.expectEqual(@as(usize, 0), try dec.read(&pcm));
 }
 test "opus: end trimming makes the granule shorter than the packet sum" {
     const frame = try frameBytes(testing.allocator, 20, 51);

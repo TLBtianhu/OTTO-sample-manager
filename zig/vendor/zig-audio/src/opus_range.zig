@@ -240,6 +240,15 @@ pub const Decoder = struct {
         return ret;
     }
 
+    /// Shrink the region the coder may read, front and back. A hybrid or SILK
+    /// packet can end in a CELT redundancy section: the reference subtracts
+    /// those bytes from its decoder's storage so the raw-bit tail starts at the
+    /// end of the coded data instead of the end of the packet. `len` is measured
+    /// from the start of the original buffer; a no-op when nothing is cut.
+    pub fn shrink(self: *Decoder, len: usize) void {
+        if (len < self.buf.len) self.buf = self.buf[0..len];
+    }
+
     /// Advance the "bits consumed" counter past everything left, for a frame
     /// whose silence flag says the rest of the payload is unused.
     pub fn skipToEnd(self: *Decoder, len_bits: i32) void {

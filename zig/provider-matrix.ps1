@@ -131,6 +131,7 @@ $script:cases = @(
   # (`providers/native_audio_opus_test.zig`), because a `none` row here would
   # make the table claim "we play every .opus".
   [pscustomobject]@{ Name = 'opus-music.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
+[pscustomobject]@{ Name = 'opus-hybrid.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
 [pscustomobject]@{ Name = 'opus-silk.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' }
   # Legacy formats decoded by zig-audio v0.8: MS ADPCM WAV stays with the WAV
   # provider; AIFF is claimed by native-audio.

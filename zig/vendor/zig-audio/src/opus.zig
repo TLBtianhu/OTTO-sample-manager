@@ -1,5 +1,6 @@
 //! Ogg Opus: the container, both headers, every audio packet's framing, the
-//! stream length, and both decoding layers (CELT for music, SILK for speech).
+//! stream length, and all three decoding layers (CELT for music, SILK for
+//! speech, and Hybrid, which runs both on one frame).
 //!
 //! Opus is not one codec but two layers plus a per-packet switch between them,
 //! so the honest split is:
@@ -7,7 +8,7 @@
 //!   1. container, packet structure and length  <- this file;
 //!   2. CELT decoding                           <- `opus_celt.zig` and friends;
 //!   3. SILK decoding                           <- `opus_silk.zig` and friends;
-//!   4. Hybrid (both layers at once)            <- not supported, and refused.
+//!   4. Hybrid, both layers on the same frame   <- `opus_hybrid.zig`.
 //!
 //! `inspect` walks the whole first Opus logical stream once and reports what a
 //! player's file list needs: channel count, pre-skip, mapping, packet count,
@@ -15,12 +16,10 @@
 //! It never produces PCM.
 //!
 //! `Decoder` is the streaming decoder. It decodes CELT-only packets
-//! (configuration 16-31) and SILK-only packets (configuration 0-11) and refuses
-//! Hybrid (12-15) with `error.Unsupported`: a Hybrid packet needs SILK and CELT
-//! to run on the same frame and be mixed, and returning only one of the two
-//! layers would be "half correct", which is worse than a named error. Packets
-//! carrying more than two frames are refused for the same reason. None of these
-//! refusals fabricates silence.
+//! (configuration 16-31), SILK-only packets (configuration 0-11) and Hybrid
+//! packets (12-15), refuses stereo Hybrid with `error.Unsupported` (no vector
+//! exercises the unmixing path), and refuses packets carrying more than two
+//! frames. None of these refusals fabricates silence.
 //!
 //! Opus always runs at 48 kHz. Only the encoder's `input_sample_rate` hint
 //! suggests otherwise, and RFC 7845 5.1 says that field is "not the sample rate
@@ -40,9 +39,7 @@ const ogg = @import("ogg.zig");
 const head_mod = @import("opus_head.zig");
 const packet_mod = @import("opus_packet.zig");
 const celt_mod = @import("opus_celt.zig");
-const silk_mod = @import("opus_silk.zig");
-const resample_mod = @import("opus_silk_resample.zig");
-const range_mod = @import("opus_range.zig");
+const hybrid_mod = @import("opus_hybrid.zig");
 
 pub const Error = types.Error;
 
@@ -172,12 +169,14 @@ pub fn inspect(
     return info;
 }
 
-/// A CELT-only Opus decoding stream.
+/// An Opus decoding stream: all three packet modes, one 48 kHz timeline.
 ///
-/// CELT-only (configuration 16..31) and SILK-only (0..11) packets are decoded.
-/// Hybrid (12..15) has no implementation here, and a stream that uses it returns
-/// `error.Unsupported` rather than noise. Packets carrying more than two frames
-/// are refused for the same reason — the multi-frame packing path is not
+/// All three packet modes are decoded: CELT-only (configuration 16..31),
+/// SILK-only (0..11) and Hybrid (12..15). Hybrid needs both layers on the same
+/// frame — the same arithmetic coder, the same 48 kHz timeline — and that
+/// plumbing lives in `opus_hybrid.zig`; stereo Hybrid is refused with a named
+/// error because no vector has exercised the unmixing path. Packets carrying
+/// more than two frames are refused too: the multi-frame packing path is not
 /// implemented, and decoding only the first frame would quietly drop audio.
 ///
 /// Two timeline details are the whole reason this type has state:
@@ -196,12 +195,9 @@ pub const Decoder = struct {
     allocator: std.mem.Allocator,
     demux: ogg.Demuxer,
     celt: ?*celt_mod.Decoder = null,
-    silk: ?silk_mod.Decoder = null,
-    /// The SILK-to-48-kHz resampler, created with the first SILK packet.
-    silk_resampler: ?resample_mod.Resampler = null,
-    /// SILK output for one Opus frame at the bandwidth's own rate: at most
-    /// 960 samples (60 ms at 16 kHz), one array per coded channel.
-    silk_rate: [2][silk_max_rate_samples]f32 = @splat(@splat(0.0)),
+    /// Everything the speech layer owns: SILK state, the resampler, and the
+    /// mode-switch crossfade bookkeeping.
+    layer: hybrid_mod.Layer = .{},
     info: types.Info,
     pre_skip: u32,
     channels: usize,
@@ -226,10 +222,6 @@ pub const Decoder = struct {
     done: bool = false,
     pending_error: ?Error = null,
 
-    /// Samples one SILK frame can produce at its own rate.
-    const silk_max_rate_samples: usize = 60 * 16;
-    /// Samples one SILK frame can produce at 48 kHz: 60 ms.
-    const silk_max_output: usize = silk_max_rate_samples * 3;
     /// Largest packet this decoder will produce: 120 ms of audio, the format's
     /// own bound (RFC 6716 3.1). A 60 ms SILK frame alone is 2880 samples, so
     /// this cannot be "two frames of 20 ms" any more.
@@ -303,11 +295,20 @@ pub const Decoder = struct {
     fn decodePacket(self: *Decoder, bytes: []const u8) Error!usize {
         const packet = try packet_mod.parse(bytes);
         const config = packet_mod.configInfo(packet.config);
+        const end_band = endBand(config.bandwidth);
         switch (config.mode) {
             .celt => return self.decodeCeltPacket(bytes, packet, config),
-            .silk => return self.decodeSilkPacket(bytes, packet, config),
-            // Hybrid needs SILK and CELT on the same frame, mixed. Not yet.
-            .hybrid => return error.Unsupported,
+            .silk => {
+                // The SILK layer here is mono: the unmixer exists but no vector
+                // has exercised it, and a stereo stream would need the
+                // resampler and the i16 conversion to interleave two channels.
+                if (self.channels != 1) return error.Unsupported;
+                return self.layer.decodeSilkPacket(self.celt.?, self.fbuf, bytes, packet, config, end_band);
+            },
+            .hybrid => {
+                if (self.channels != 1) return error.Unsupported;
+                return self.layer.decodeHybridPacket(self.celt.?, self.fbuf, bytes, packet, config, end_band);
+            },
         }
     }
 
@@ -319,7 +320,13 @@ pub const Decoder = struct {
     ) Error!usize {
         if (packet.frame_count > 2) return error.Unsupported;
 
+        // A CELT-only packet always codes from band 0: a Hybrid packet may have
+        // left `start` at 17, so it is set here rather than assumed.
+        self.celt.?.start = 0;
         self.celt.?.end = endBand(config.bandwidth);
+        // Leaving SILK for CELT flushes the speech layer, as the reference does
+        // when it closes its resampler.
+        self.layer.leave();
         const stream_channels: u8 = if (packet.stereo) 2 else 1;
         const per_frame = config.samples;
         const stride = self.channels;
@@ -332,63 +339,6 @@ pub const Decoder = struct {
             const src = self.celt.?.pcmFrame(per_frame);
             @memcpy(self.fbuf[frames * stride ..][0 .. per_frame * stride], src);
             frames += per_frame;
-        }
-        return frames;
-    }
-
-    /// SILK-only: one arithmetic-coded frame per Opus frame, resampled from the
-    /// bandwidth's rate to 48 kHz.
-    ///
-    /// Two refusals live here rather than in `opus_silk.zig`, because both are
-    /// about *this* layer's plumbing rather than the bitstream: a stereo SILK
-    /// stream (the decoder has an unmixer, but no vector has exercised it yet,
-    /// and silent wrongness is worse than a named error) and a frame that
-    /// carries a CELT redundancy section, which would need the CELT layer to
-    /// decode its last few milliseconds.
-    fn decodeSilkPacket(
-        self: *Decoder,
-        bytes: []const u8,
-        packet: packet_mod.Packet,
-        config: packet_mod.Config,
-    ) Error!usize {
-        const bandwidth: silk_mod.Bandwidth = switch (config.bandwidth) {
-            .narrow => .narrow,
-            .medium => .medium,
-            .wide => .wide,
-            else => return error.Unsupported,
-        };
-        if (packet.stereo or self.channels != 1) return error.Unsupported;
-        if (packet.frame_count > 2) return error.Unsupported;
-
-        if (self.silk == null) {
-            self.silk = silk_mod.Decoder.init(1);
-            self.silk_resampler = try resample_mod.Resampler.init(bandwidth.sampleRate());
-            self.silk_resampler.?.primeZeros(bandwidth.resamplerDelay());
-        }
-
-        const stride = self.channels;
-        const duration_ms: u32 = config.samples / 48;
-        var frames: usize = 0;
-        for (0..packet.frame_count) |i| {
-            const data = packet.frame(bytes, i);
-            if (data.len == 0) return error.Corrupt;
-            var rc = range_mod.Decoder.init(data);
-            const rate_samples = try self.silk.?.decodeSuperframe(
-                &rc,
-                .{ self.silk_rate[0][0..], self.silk_rate[1][0..] },
-                bandwidth,
-                1,
-                duration_ms,
-            );
-            // RFC 6716 4.2.3: if at least 17 bits are left after the SILK data,
-            // the rest of the frame is a CELT redundancy section. Decoding only
-            // the speech half would drop the end of the frame.
-            if (rc.tell() + 17 <= @as(i32, @intCast(data.len * 8))) return error.Unsupported;
-            const written = self.silk_resampler.?.convert(
-                self.fbuf[frames * stride ..][0..silk_max_output],
-                self.silk_rate[0][0..rate_samples],
-            );
-            frames += written;
         }
         return frames;
     }
