@@ -31,8 +31,9 @@ pub const Options = struct {
     budget_bytes: usize = default_budget_bytes,
     failure_memory: usize = default_failure_memory,
     /// 是否把"碰 Shell"交给 `otto-thumb-host.exe`（M4 第一块）。
-    /// 默认 `true`：第三方 handler 崩了/卡死/弹框只带走 helper，OTTO 列表照常滚；
-    /// `false` 是显式对照开关（`--no-isolation`），退回进程内 `thumb.get`。
+    /// 默认 `true`：第三方 handler 只在 helper 执行；缺失/启动失败、超时或崩溃
+    /// 都是具名失败，绝不自动回主进程。`false` 只来自显式 `--no-isolation`，
+    /// 此时日志必须写 `execution_domain=in_process`。
     isolation: bool = true,
     /// 行内小图是否也遵守 `--no-shell-preview`：`true` 时 `registryForIcon(true)`
     /// 里根本没有 Shell provider，PSD 之类只能显示占位，绝不偷偷问系统缩略图。

@@ -172,8 +172,8 @@ pub const Thumbs = struct {
                 self.queue.deinit();
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 std.debug.print(
-                    "otto-lite: 缩略图隔离 helper 不可用（{s}）；zig build 应同时产出 otto-thumb-host.exe。\n" ++
-                        "          确实要退回进程内取图（第三方 handler 与 OTTO 同生共死）加 --no-isolation。\n",
+                    "otto-lite: 缩略图 helper 不可用（{s}）：默认隔离，缺失/启动失败均为具名失败，绝不自动进程内取图。\n" ++
+                        "          只有显式 --no-isolation 才允许 execution_domain=in_process；超时/崩溃永不回主进程重试。zig build 应同时产出 otto-thumb-host.exe。\n",
                     .{@errorName(err)},
                 );
                 return error.HelperUnavailable;

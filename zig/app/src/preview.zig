@@ -71,9 +71,10 @@
 //! `Provider.open` 是**同步阻塞**调用：缩略图 provider 会进第三方 COM handler，
 //! 可能卡住或崩溃。**不要在 UI 线程上调它**；`preview_panel.Panel` 把它放在一条
 //! 工作线程上，视图只读一份已经落地的 `Outcome`（同一约定见 `thumbs.zig`）。
-//! `Provider.isolation` 是"provider 打算跑在哪里"的声明；Shell 缩略图 provider 的
-//! `open` 本身仍在进程内执行，但它会主动把像素提取交给 helper 进程（`thumb_host`），
-//! `Request.allow_isolation = false`（`--no-isolation`）时才退回进程内取图。
+//! `Provider.isolation` 是"provider 默认在哪里执行不可信工作"的声明；Shell 缩略图
+//! provider 的 `open` 本身仍在主进程，但像素提取默认只交给 helper（`thumb_host`）。
+//! helper 不可用是 `none.failed`；只有 `Request.allow_isolation = false`
+//! （用户显式 `--no-isolation`）才进程内取图，超时/崩溃永不回主进程重试。
 //!
 //! 音频还有**第二条**线程：`audio/player.Player` 的播放线程由它自己拥有，
 //! 只通过 `std.atomic.Value(u64)` 把播放位置交给 UI；播放线程不碰任何视图对象。
@@ -111,8 +112,9 @@ pub const Request = struct {
     at_ms: ?i64 = null,
     /// 允许 provider 把"碰第三方 handler"的工作交给隔离 helper 进程。
     ///
-    /// 只有 Shell 缩略图 provider 会读它：`true`（默认）时先走 `thumb_host`，
-    /// helper 不可用才退回进程内；`false`（`--no-isolation`）时直接进程内取图。
+    /// 只有 Shell 缩略图 provider 会读它：`true`（默认）时只走 `thumb_host`；
+    /// helper 缺失/启动失败是 `none.failed`，绝不自动退回主进程。只有 `false`
+    /// （用户显式 `--no-isolation`）才直接进程内取图。超时/崩溃也永不回主进程重试。
     /// 图片 / 视频 / 音频 provider 不碰第三方 handler，忽略这个字段。
     allow_isolation: bool = true,
     /// 这次请求是列表行内小图（32pt / 64px），不是预览条。
@@ -300,7 +302,8 @@ pub const Outcome = union(enum) {
     }
 };
 
-/// provider 将来跑在哪里。当前全是 `.in_process`；M4 的 helper 进程读这个字段。
+/// provider 默认在哪里执行不可信工作。自给自足 provider 是 `.in_process`；
+/// Shell 缩略图是 `.worker_process`，`--no-isolation` 才显式改成主进程取图。
 pub const Isolation = enum { in_process, worker_process };
 
 /// 一个预览 provider。字段顺序与 ROADMAP 一致，只把函数类型写成 `*const fn`。
@@ -316,10 +319,9 @@ pub const Provider = struct {
     /// `no_handler` 是谢绝，`failed` / `file_missing` 是认领后失败，见文件头），
     /// 不要返回 error——只有 OOM 算 error。
     open: *const fn (std.mem.Allocator, Request) Error!Outcome,
-    /// 这个 provider 将来跑在哪里。当前全是 `.in_process`；M4 的 helper 进程读这个
-    /// 字段。注意它与 `Request.allow_isolation` 是两件事：Shell provider 的 `open`
-    /// 本身仍在进程内执行，但它会**主动**把像素提取交给 helper（见
-    /// `providers/thumb.zig`），`allow_isolation = false` 时才退回进程内。
+    /// 默认执行域声明，不等于本次实际执行域。Shell provider 的 `open` 仍在主进程，
+    /// 但第三方 handler 默认只在 helper 执行；`allow_isolation = false` 才显式选
+    /// 主进程。`--preview` 分别打印 `declared_isolation` 与 `execution_domain`。
     isolation: Isolation = .in_process,
     /// 能否生成 32pt 级别的"小图"（列表行内 64px）。
     ///

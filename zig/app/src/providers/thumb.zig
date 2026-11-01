@@ -6,16 +6,17 @@
 //! 这两个口岸已经按 CHARTER「八」把 Win32 / COM / PIDL 全部关在 `ports/` 里，
 //! 本文件只做结局映射。
 //!
-//! ## 隔离优先
+//! ## 默认隔离，失败不越界
 //!
-//! `open` **默认先走 `thumb_host.get`**：第三方 `IThumbnailProvider` 在 helper 进程里
-//! 执行，崩溃 / 卡死 / 弹框只带走 helper；只有 helper 不可用（exe 缺失、起不来、
-//! 路径非法）时才退回进程内 `thumb.get`。这解决了旧实现的不一致：预览条用进程内
-//! `thumb.get`，列表行内图却走 helper——同一个 PSD 在两条路径上生死不同。
+//! `open` **默认只走 `thumb_host.get`**：第三方 `IThumbnailProvider` 在 helper 进程里
+//! 执行，崩溃 / 卡死 / 弹框只带走 helper。helper 缺失、启动失败或路径非法都是
+//! `none.failed`（认领后的具名失败），**绝不**自动退回进程内 `thumb.get`。
+//! 预览条、`--preview` 与列表行内图共用这一条契约，没有第二条真相。
 //!
-//! `Request.allow_isolation == false`（`--no-isolation`）时**直接**进程内取图，
-//! 连 helper 都不尝试；这是显式的对照开关。`Timeout` **不**退回进程内：handler
-//! 已经卡死，把它请回 OTTO 进程只会让 UI 线程一起等。
+//! 只有 `Request.allow_isolation == false`（用户显式 `--no-isolation`）才直接进程内
+//! 取图，连 helper 都不尝试。`Timeout` / 崩溃同样**永不**回主进程重试；隔离层可以
+//! 重启 helper，但不能把不可信 handler 请回 OTTO。每次调用都打印实际
+//! `execution_domain=helper|in_process`，成功与失败都可诊断。
 //!
 //! 列表左侧的 32px 缩略图走 `thumbs.zig`（缓存 + 有界队列 + 工作线程）；
 //! 本 provider 是**同步**的，线程由 `preview_panel.Panel` / `thumbs.zig` 的工作线程
@@ -55,6 +56,8 @@ pub const provider: preview.Provider = .{
     .kind = .image,
     .supports = supports,
     .open = open,
+    // 默认把第三方 handler 交给 helper；`--no-isolation` 是唯一的进程内显式选择。
+    .isolation = .worker_process,
     // 行内 64px 小图也是它：PSD/AI/BLEND 这类没有系统解码器的格式，只能问 Shell。
     .icon_capable = true,
 };
@@ -70,22 +73,15 @@ pub fn supports(sample: *const core.model.Sample) bool {
 }
 
 fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!preview.Outcome {
-    const got = fetch(allocator, request) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.NoHandler => return .{ .none = .no_handler },
-        error.FileNotFound => return .{ .none = .file_missing },
-        error.InvalidPath, error.InvalidSize, error.Unsupported => return .{ .none = .unsupported },
-        // HelperUnavailable 在 fetch 里已经退回进程内；走到这里说明退回也失败，
-        // 或者调用方显式禁用了隔离。两种都按一次取图失败处理。
-        error.HelperUnavailable => return .{ .none = .failed },
-        error.Timeout => {
+    const got = fetch(allocator, request) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (err == error.Timeout) {
             std.debug.print(
-                "otto-lite: Shell 缩略图超时（helper 已重启，不在进程内重试） file={s}\n",
+                "otto-lite: Shell 缩略图超时 execution_domain=helper（helper 已重启，永不回主进程重试） file={s}\n",
                 .{request.sample.file_path},
             );
-            return .{ .none = .failed };
-        },
-        error.ShellFailure => return .{ .none = .failed },
+        }
+        return .{ .none = reasonForError(err) };
     };
 
     // 像素形状是 `preview.Bitmap` 的契约（stride == width * 4）。端口承诺如此，
@@ -103,26 +99,46 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
     } };
 }
 
-/// 取一张图：隔离优先，helper 不可用才退回进程内。
-///
-/// 返回类型是 `thumb_host.Error`（`thumb.Error` 的超集）。`Timeout` 故意**不**退回：
-/// 卡死的 handler 不应该被请进 OTTO 的进程。
+/// `HelperUnavailable` 是 `supports` 已认领之后的执行失败，不是格式谢绝：
+/// 归为 `failed` 才能终止注册表查找，保留 helper 缺失这个最终答案。
+fn reasonForError(err: thumb_host.Error) preview.Reason {
+    return switch (err) {
+        error.OutOfMemory => unreachable, // open 已单独处理；OOM 不属于四态。
+        error.NoHandler => .no_handler,
+        error.FileNotFound => .file_missing,
+        error.InvalidPath, error.InvalidSize, error.Unsupported => .unsupported,
+        error.HelperUnavailable, error.Timeout, error.ShellFailure => .failed,
+    };
+}
+
+/// 取一张图：默认只在 helper 执行；唯一进程内入口是显式 `--no-isolation`。
+/// `HelperUnavailable` / `Timeout` / 崩溃都原样上交，由 `open` 归为 `none.failed`。
 fn fetch(allocator: std.mem.Allocator, request: preview.Request) thumb_host.Error!thumb.Thumbnail {
     const path = request.sample.file_path;
     const size = sizeFor(request.max_px);
 
-    if (!request.allow_isolation) return thumb.get(allocator, path, size);
+    if (!request.allow_isolation) {
+        const got = thumb.get(allocator, path, size) catch |err| {
+            logFetch("in_process", path, @errorName(err));
+            return err;
+        };
+        logFetch("in_process", path, "image");
+        return got;
+    }
 
-    return thumb_host.get(allocator, path, size) catch |err| switch (err) {
-        error.HelperUnavailable => blk: {
-            std.debug.print(
-                "otto-lite: 缩略图 helper 不可用，Shell provider 退回进程内取图 file={s}\n",
-                .{path},
-            );
-            break :blk thumb.get(allocator, path, size);
-        },
-        else => |other| other,
+    const got = thumb_host.get(allocator, path, size) catch |err| {
+        logFetch("helper", path, @errorName(err));
+        return err;
     };
+    logFetch("helper", path, "image");
+    return got;
+}
+
+fn logFetch(domain: []const u8, path: []const u8, result: []const u8) void {
+    std.debug.print(
+        "otto-lite: Shell 缩略图 execution_domain={s} result={s} file={s}\n",
+        .{ domain, result, path },
+    );
 }
 
 /// 请求边长：0 会被口岸判非法，所以夹到 1；上限跟口岸的 `max_size_px` 走，
@@ -153,7 +169,19 @@ test "sizeFor 把 0 夹到 1、把超大请求夹到口岸上限" {
     try testing.expectEqual(thumb.max_size_px, sizeFor(100_000));
 }
 
-test "provider 声明：Shell 缩略图可以服务行内小图" {
+test "provider 声明：Shell 缩略图服务行内小图，默认执行域是 helper" {
     try testing.expect(provider.icon_capable);
     try testing.expectEqualStrings("shell-thumbnail", provider.name);
+    try testing.expectEqual(preview.Isolation.worker_process, provider.isolation);
+}
+
+test "helper 不可用是认领后 failed，不是 unsupported 谢绝" {
+    try testing.expectEqual(preview.Reason.failed, reasonForError(error.HelperUnavailable));
+    try testing.expect(preview.isTerminal(reasonForError(error.HelperUnavailable)));
+    try testing.expectEqual(preview.Reason.failed, reasonForError(error.Timeout));
+    try testing.expectEqual(preview.Reason.failed, reasonForError(error.ShellFailure));
+    // 四态边界不动：真正的格式/路径能力问题仍然谢绝，文件缺失保留自己的终态。
+    try testing.expectEqual(preview.Reason.unsupported, reasonForError(error.Unsupported));
+    try testing.expectEqual(preview.Reason.no_handler, reasonForError(error.NoHandler));
+    try testing.expectEqual(preview.Reason.file_missing, reasonForError(error.FileNotFound));
 }
