@@ -23,6 +23,7 @@
 //!   产出一条 `.overflow` 原始事件（lost 未知记 0），由上层变成显式 Event 与计数。
 
 const std = @import("std");
+const path_win = @import("otto_win_path");
 const builtin = @import("builtin");
 
 /// 平台闸门：这是 Windows 口岸，其它平台 init 直接 error.Unsupported。
@@ -302,9 +303,9 @@ pub const Context = struct {
     pub fn open(allocator: std.mem.Allocator, directory: []const u8) OpenError!Context {
         if (!supported) return error.Unsupported;
 
-        const wide = std.unicode.wtf8ToWtf16LeAllocZ(allocator, directory) catch |err| switch (err) {
+        const wide = path_win.wide(allocator, directory, 0) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidWtf8 => return error.InvalidPath,
+            error.InvalidPath => return error.InvalidPath,
         };
         defer allocator.free(wide);
 

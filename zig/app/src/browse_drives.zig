@@ -40,16 +40,30 @@ pub const Drive = struct {
     letter: u8,
     kind: Kind,
     available: bool,
+    volume: [261 * 3]u8 = @splat(0),
+    volume_len: u16 = 0,
+
+    pub fn volumeLabel(self: *const Drive) []const u8 {
+        return self.volume[0..self.volume_len];
+    }
+
+    pub fn displayLabel(self: *const Drive) []const u8 {
+        return if (self.volume_len > 0) self.volumeLabel() else self.kind.label();
+    }
 
     pub fn root(self: Drive, buffer: *[3]u8) []const u8 {
         buffer.* = .{ self.letter, ':', '\\' };
         return buffer;
     }
 
-    pub fn probeText(self: Drive, buffer: *[64]u8) []const u8 {
-        return std.fmt.bufPrint(buffer, "{c}:\\={s}{s}", .{
+    pub fn probeText(self: *const Drive, buffer: []u8) []const u8 {
+        const label = self.volumeLabel();
+        return std.fmt.bufPrint(buffer, "{c}:\\={s}{s}{s}{s}{s}", .{
             self.letter,
             self.kind.text(),
+            if (label.len > 0) "[" else "",
+            label,
+            if (label.len > 0) "]" else "",
             if (self.available) "" else "(unavailable)",
         }) catch buffer[0..0];
     }
@@ -73,7 +87,7 @@ pub const List = struct {
     pub fn text(self: *const List, buffer: []u8) []const u8 {
         var used: usize = 0;
         for (self.slice()) |drive| {
-            var item_buffer: [64]u8 = undefined;
+            var item_buffer: [1024]u8 = undefined;
             const item = drive.probeText(&item_buffer);
             if (used + item.len + @intFromBool(used > 0) > buffer.len) break;
             if (used > 0) {
@@ -110,6 +124,12 @@ pub fn enumerate() List {
             .kind = kind,
             .available = raw != 0 and raw != 1,
         };
+        var volume_name: [261]u16 = @splat(0);
+        if (GetVolumeInformationW(wide[0..3 :0], &volume_name, volume_name.len, null, null, null, null, 0) != 0) {
+            const label = std.mem.sliceTo(&volume_name, 0);
+            const written = std.unicode.wtf16LeToWtf8(&result.items[result.len].volume, label);
+            result.items[result.len].volume_len = @intCast(written);
+        }
         result.len += 1;
     }
     return result;
@@ -117,6 +137,16 @@ pub fn enumerate() List {
 
 extern "kernel32" fn GetLogicalDrives() callconv(.winapi) u32;
 extern "kernel32" fn GetDriveTypeW(root: [*:0]const u16) callconv(.winapi) u32;
+extern "kernel32" fn GetVolumeInformationW(
+    root: [*:0]const u16,
+    volume_name: ?[*]u16,
+    volume_name_size: u32,
+    serial_number: ?*u32,
+    maximum_component_length: ?*u32,
+    flags: ?*u32,
+    file_system_name: ?[*]u16,
+    file_system_name_size: u32,
+) callconv(.winapi) i32;
 
 test "驱动器列表保留类型与不可访问名字" {
     var list = List{};

@@ -387,6 +387,7 @@ pub fn browsing(options: *options_mod.Options, args: anytype, index: *usize, arg
         options.browse_address_probe = arg["--browse-address-probe=".len..];
         return true;
     }
+    if (try @import("options_browse_robust.zig").parse(options, args, index, arg)) return true;
     if (std.mem.startsWith(u8, arg, "--set-path=")) {
         options.browse_set_path = arg["--set-path=".len..];
         return true;

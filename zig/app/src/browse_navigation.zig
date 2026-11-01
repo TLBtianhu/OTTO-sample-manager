@@ -8,6 +8,7 @@ const selection_mod = @import("selection.zig");
 const reconcile = @import("browse_reconcile.zig");
 const crumbs = @import("browse_crumbs.zig");
 const types = @import("browse_types.zig");
+const browse_dir = @import("otto_browse_dir");
 
 pub const Error = error{
     OutOfMemory,
@@ -15,6 +16,7 @@ pub const Error = error{
     PathNotFound,
     InvalidPath,
     AccessDenied,
+    NotReady,
     Unexpected,
     AtFilesystemRoot,
     NoBackHistory,
@@ -66,10 +68,10 @@ pub fn enterPath(
     defer session.allocator.free(rooted);
     const candidate = try std.fs.path.resolveAlloc(session.allocator, &.{ session.root, rooted });
     defer session.allocator.free(candidate);
+    const attributes = browse_dir.attributesOf(session.allocator, candidate) catch |err| return mapPathError(err);
+    if (attributes & browse_dir.FILE_ATTRIBUTE_DIRECTORY == 0) return error.NotDirectory;
     const absolute = types.realPathAlloc(session.allocator, session.io, candidate) catch |err| return mapPathError(err);
     defer session.allocator.free(absolute);
-    const stat = std.Io.Dir.cwd().statFile(session.io, absolute, .{}) catch |err| return mapPathError(err);
-    if (stat.kind != .directory) return error.NotDirectory;
     if (std.ascii.eqlIgnoreCase(absolute, session.root)) return;
     try activate(session, absolute, selected, .push);
 }
@@ -93,12 +95,19 @@ fn mapPathError(err: anyerror) Error {
         error.FileNotFound, error.PathNotFound => error.PathNotFound,
         error.NotDir => error.NotDirectory,
         error.AccessDenied => error.AccessDenied,
+        error.NotReady => error.NotReady,
         error.InvalidUtf8, error.NameTooLong => error.InvalidPath,
         else => error.Unexpected,
     };
 }
 
 const Mode = enum { push, back, forward };
+
+/// F5：先捕获选中身份，再 epoch+1 全量重枚举；不改历史、不清空草稿。
+pub fn refresh(session: *browse.Session, selected: *selection_mod.Selection) Error!void {
+    try session.tracker.capture(session.io, session.entries.items, selected, &session.unreadable);
+    reconcile.startRescan(session, session.last_event_seq);
+}
 
 /// 路径不可用后的交互重试：不轮询，成功才重开监听与枚举。
 pub fn retryUnavailable(session: *browse.Session) void {
@@ -110,6 +119,7 @@ pub fn retryUnavailable(session: *browse.Session) void {
     if (session.watch_enabled and session.watcher == null) return;
     session.unavailable = false;
     session.denied = false;
+    session.path_error = null;
     session.reconciling = false;
     session.replay_after_rescan = false;
     session.reconcile_again = false;
@@ -145,6 +155,7 @@ fn activate(
     session.done_ns = null;
     session.unavailable = false;
     session.denied = false;
+    session.path_error = null;
     session.enumerating = true;
     session.loading_more = false;
     session.has_more = false;

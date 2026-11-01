@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const core = @import("otto_core");
+const path_win = @import("otto_win_path");
 
 /// 默认页大小：同时是 0.35.0 的截断上限（`--browse-limit` 改它）。
 pub const default_limit: usize = 50_000;
@@ -40,6 +41,8 @@ pub const Entry = struct {
     deleted: bool = false,
     /// 与 deleted 共用原结构尾部 padding：Win64 的 Entry 仍为 64 字节。
     is_directory: bool = false,
+    /// junction / symlink：只影响链接图标；Enter 仍由系统跟随，不递归。
+    is_reparse_point: bool = false,
 };
 
 comptime {
@@ -53,6 +56,8 @@ pub const Status = enum {
     path_unavailable,
     /// 没有列目录的权限。
     denied,
+    /// 介质未就绪（Win32 ERROR_NOT_READY）。
+    not_ready,
     /// 其它失败（枚举中途的 IO 错误）。
     failed,
 };
@@ -104,6 +109,8 @@ pub const Info = struct {
     enumerating: bool,
     unavailable: bool,
     denied: bool,
+    /// Win32 具名原因：`NotReady` / `PathNotFound` / `AccessDenied`。
+    path_error: ?[]const u8 = null,
     skipped: u32,
     /// 列出来了、但打不开（拿不到身份/预览）的条目数。
     unreadable: u32,
@@ -148,7 +155,8 @@ pub fn hasSeparator(path: []const u8) bool {
 pub fn trimTrailingSeparators(path: []const u8) []const u8 {
     var end = path.len;
     while (end > 1 and std.fs.path.isSep(path[end - 1])) {
-        if (end == 3 and path[1] == ':') break;
+        if ((end == 3 and path[1] == ':') or
+            (end == 7 and path_win.hasExtendedPrefix(path) and path[5] == ':')) break;
         end -= 1;
     }
     return path[0..end];
@@ -166,7 +174,13 @@ pub fn joinPath(allocator: std.mem.Allocator, root: []const u8, name: []const u8
 pub fn realPathAlloc(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try std.Io.Dir.cwd().realPathFile(io, path, &buffer);
-    return allocator.dupe(u8, buffer[0..len]);
+    const resolved = buffer[0..len];
+    // GetFinalPathNameByHandle 的 DOS 形式会规范掉显式 `\\?\`。用户给了这个
+    // 前缀就恢复同等形态（含 `\\?\UNC\`），否则保持普通路径，避免显示层被污染。
+    if (path_win.hasExtendedPrefix(path) and !path_win.hasExtendedPrefix(resolved)) {
+        return path_win.extendedAlloc(allocator, resolved);
+    }
+    return allocator.dupe(u8, resolved);
 }
 
 pub fn nowNs(io: std.Io) i128 {

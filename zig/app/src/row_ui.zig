@@ -54,8 +54,13 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     defer ui.end(c);
 
     const is_directory = State.isDirectory(s, index);
+    const is_link = if (s.browse) |session|
+        index < session.entries.items.len and session.entries.items[index].is_reparse_point
+    else
+        false;
     const drew_image = if (is_directory) blk: {
         ui.icon(c, "folder", .{ .size = 28, .color = c.theme.accent });
+        if (is_link) ui.text(c, "↗", .{ .size = 10, .color = c.theme.accent });
         break :blk false;
     } else row_thumb.draw(c, s.thumbs, sample);
     if (drew_image) s.rows_with_image += 1;
@@ -75,7 +80,7 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
         return it;
     }
     if (is_directory) {
-        ui.text(c, "目录", .{ .size = 10, .color = c.theme.accent });
+        ui.text(c, if (is_link) "目录·链接" else "目录", .{ .size = 10, .color = c.theme.accent });
         return it;
     }
     // 估算时长必须显示成 `≈40.9s`：这个数是从文件大小 / 比特率推出来的，不是

@@ -24,6 +24,7 @@
 //! 是预览注册表的一次谢绝（见 `preview.zig` 的 decline 规则）。
 
 const std = @import("std");
+const path_win = @import("otto_win_path");
 const win = @import("../audio/win32.zig");
 const com = @import("mf_com.zig");
 
@@ -157,9 +158,9 @@ pub fn existingWidePath(allocator: std.mem.Allocator, path: []const u8) Error![:
     if (!supported) return error.Unavailable;
     if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
 
-    const wide = std.unicode.wtf8ToWtf16LeAllocZ(allocator, path) catch |err| switch (err) {
+    const wide = path_win.wide(allocator, path, 0) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidWtf8 => return error.InvalidPath,
+        error.InvalidPath => return error.InvalidPath,
     };
     errdefer allocator.free(wide);
 

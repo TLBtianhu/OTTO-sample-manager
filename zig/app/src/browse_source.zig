@@ -76,6 +76,7 @@ pub const Source = struct {
         size: u64,
         mtime: i64,
         is_directory: bool,
+        is_reparse_point: bool,
     };
 
     /// 起线程并立刻排第一趟枚举。返回的对象在堆上（线程持有它的指针）。
@@ -235,6 +236,7 @@ pub const Source = struct {
                 self.publishDone(epoch, append, switch (err) {
                     error.PathNotFound, error.NotDirectory => .path_unavailable,
                     error.AccessDenied => .denied,
+                    error.NotReady => .not_ready,
                     else => .failed,
                 }, false, false, 0, 0, 0, false);
                 return;
@@ -275,6 +277,7 @@ pub const Source = struct {
                     .size = pending.size,
                     .mtime = pending.mtime,
                     .is_directory = pending.is_directory,
+                    .is_reparse_point = pending.is_reparse_point,
                 }) catch {
                     self.allocator.free(pending.path);
                     join_failures += 1;
@@ -309,6 +312,7 @@ pub const Source = struct {
                 .size = entry.size,
                 .mtime = entry.mtime,
                 .is_directory = entry.isDirectory(),
+                .is_reparse_point = entry.isReparsePoint(),
             }) catch {
                 self.allocator.free(path);
                 join_failures += 1;
@@ -361,7 +365,13 @@ pub const Source = struct {
                 skipped.* += 1;
                 continue;
             };
-            self.pending = .{ .path = path, .size = entry.size, .mtime = entry.mtime, .is_directory = entry.isDirectory() };
+            self.pending = .{
+                .path = path,
+                .size = entry.size,
+                .mtime = entry.mtime,
+                .is_directory = entry.isDirectory(),
+                .is_reparse_point = entry.isReparsePoint(),
+            };
             return;
         }
     }

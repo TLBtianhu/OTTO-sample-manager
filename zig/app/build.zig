@@ -73,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
         // 目录浏览（Stage 0）：不递归列目录 + 单文件身份（FindFirstFileExW）。
         .{ .name = "otto_browse_dir", .module = ports_dep.module("otto_browse_dir") },
+        .{ .name = "otto_win_path", .module = ports_dep.module("otto_win_path") },
         // WAV 头部解析：图标粗采样（audio/coarse.zig）与 probe 共用同一份块扫描。
         // 整段解码已交给 zig_audio，app 侧不再有 WAV 解码器。
         .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
@@ -160,6 +161,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
             .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
             .{ .name = "otto_browse_dir", .module = ports_dep.module("otto_browse_dir") },
+        .{ .name = "otto_win_path", .module = ports_dep.module("otto_win_path") },
             .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
             .{ .name = "otto_feed", .module = ports_dep.module("otto_feed") },
         },

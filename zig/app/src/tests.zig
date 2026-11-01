@@ -60,6 +60,7 @@ test {
     // Stage 1：目录导航 / 唯一历史 / 身份选中恢复 / 排序。
     _ = @import("browse_nav_test.zig");
     _ = @import("browse_address_model.zig");
+    _ = @import("browse_complete.zig");
     _ = @import("browse_crumbs.zig");
     _ = @import("browse_drives.zig");
     _ = @import("browse_sort.zig");

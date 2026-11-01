@@ -88,7 +88,9 @@ pub fn drawBanner(c: *ui.Context, info: browse.Info) Action {
     defer row.end();
 
     ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "浏览 {s} · {d} 个项目", .{ info.name, info.entries });
-    if (info.unavailable) {
+    if (info.path_error) |reason| {
+        ui.textf(c, .{ .size = 11, .color = c.theme.danger }, "· {s}", .{pathErrorText(reason)});
+    } else if (info.unavailable) {
         // 保持"路径不可用"的显示；恢复只在用户下一次交互时发生（没有定时轮询）。
         ui.text(c, "· 路径不可用（点击或滚动时重试）", .{ .size = 11, .color = c.theme.danger });
     } else if (info.denied) {
@@ -133,6 +135,11 @@ pub fn drawEmpty(c: *ui.Context, info: browse.Info) void {
     const box = ui.div(c).sizeFull().column().itemsCenter().justifyCenter().gap(8).px(24);
     defer box.end();
     ui.icon(c, "folder", .{ .size = 30, .color = c.theme.muted });
+    if (info.path_error) |reason| {
+        ui.text(c, pathErrorText(reason), .{ .size = 15, .weight = .semibold });
+        ui.text(c, "目录当前不可读；点击窗口、滚动或按 F5 时会再试一次。", .{ .size = 12, .color = c.theme.muted });
+        return;
+    }
     if (info.unavailable) {
         ui.text(c, "路径不可用", .{ .size = 15, .weight = .semibold });
         ui.text(c, "目录已被删除或移走；点击窗口或滚动时会再试一次。", .{ .size = 12, .color = c.theme.muted });
@@ -156,6 +163,12 @@ pub fn drawEmpty(c: *ui.Context, info: browse.Info) void {
     }
     ui.text(c, "此目录为空", .{ .size = 15, .weight = .semibold });
     ui.text(c, "只列当前这一层；双击目录可进入。", .{ .size = 12, .color = c.theme.muted });
+}
+
+fn pathErrorText(reason: []const u8) []const u8 {
+    if (std.mem.eql(u8, reason, "NotReady")) return "介质未就绪";
+    if (std.mem.eql(u8, reason, "AccessDenied")) return "没有访问权限";
+    return "路径不存在";
 }
 
 /// 小号可点区域：只有 hover 时的浅底，点击面比文字略大一圈（与 `list_header` 同款）。

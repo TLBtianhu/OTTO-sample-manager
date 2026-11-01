@@ -49,6 +49,7 @@ pub fn errorText(err: anyerror) []const u8 {
         error.PathNotFound => "路径不存在",
         error.NotDirectory => "不是目录",
         error.AccessDenied => "没有访问权限",
+        error.NotReady => "介质未就绪",
         error.InvalidPath, error.PathTooLong => "路径无效",
         error.OutOfMemory => "内存不足",
         else => "路径不可用",

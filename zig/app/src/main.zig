@@ -485,7 +485,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = init.gpa,
         .live = boot.live,
         .browse = boot.browse,
-        .address = browse_address.Bar.init(if (boot.browse) |session| session.rootPath() else ""),
+        .address = browse_address.Bar.init(init.gpa, if (boot.browse) |session| session.rootPath() else ""),
         .samples = if (boot.browse) |session| session.samples() else boot.live.samples(),
         .duration_trust = duration_trust.Trust.init(init.gpa, init.io),
         .thumbs = boot.thumbs,

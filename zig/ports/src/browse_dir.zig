@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const path_win = @import("otto_win_path");
 
 pub const supported = builtin.os.tag == .windows;
 
@@ -41,7 +42,8 @@ const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
 
 /// `FILE_ATTRIBUTE_DIRECTORY`：条目是目录（浏览模式只列文件，所以调用方要跳过它）。
 pub const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x0000_0010;
-const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x0000_0400;
+pub const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x0000_0400;
+extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) DWORD;
 
 /// `FINDEX_INFO_LEVELS`：FindExInfoBasic = 1（不给 8.3 短名）。
 const FindExInfoBasic: DWORD = 1;
@@ -139,7 +141,7 @@ pub const Entry = struct {
         return self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
     }
 
-    /// 符号链接 / junction：浏览模式把它当普通条目列出来，但不跟随。
+    /// 符号链接 / junction：条目保留链接标记；进入目录时由 Win32 跟随，不递归展开。
     pub fn isReparsePoint(self: Entry) bool {
         return self.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
     }
@@ -155,6 +157,8 @@ pub const OpenError = error{
     PathNotFound,
     /// 没有列出目录的权限。
     AccessDenied,
+    /// 驱动器存在，但介质未就绪（例如空光驱 / 未准备的设备）。
+    NotReady,
     InvalidPath,
     Unexpected,
 };
@@ -258,7 +262,7 @@ pub fn identityOf(io: std.Io, path: []const u8) !?Identity {
 }
 
 fn identityOfDirectory(path: []const u8) !?Identity {
-    const wide = try std.unicode.wtf8ToWtf16LeAllocZ(std.heap.page_allocator, path);
+    const wide = try path_win.wide(std.heap.page_allocator, path, 0);
     defer std.heap.page_allocator.free(wide);
     const handle = CreateFileW(wide.ptr, 0, FILE_SHARE_READ_WRITE_DELETE, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
     if (handle == INVALID_HANDLE_VALUE) return error.AccessDenied;
@@ -280,31 +284,24 @@ fn identityFromHandle(handle: HANDLE) ?Identity {
 // 路径与时间
 // ---------------------------------------------------------------------------
 
-/// `<directory>\*` → 以 0 结尾的 UTF-16，带 `\\?\` 长路径前缀。
-///
-/// 前缀规则与 `scan.widePath` 一致（这里不能复用它：两个文件属于两个模块）。
-fn widePattern(allocator: std.mem.Allocator, directory: []const u8) OpenError![:0]u16 {
-    if (directory.len == 0) return error.InvalidPath;
-
-    const prefixed = if (isSep(directory[0]) and directory.len >= 2 and isSep(directory[1]))
-        try std.fmt.allocPrint(allocator, "\\\\?\\UNC\\{s}\\*", .{directory[2..]})
-    else if (directory.len >= 3 and std.ascii.isAlphabetic(directory[0]) and directory[1] == ':' and isSep(directory[2]))
-        try std.fmt.allocPrint(allocator, "\\\\?\\{s}\\*", .{directory})
-    else if (directory.len >= 4 and isSep(directory[0]) and isSep(directory[1]) and
-        (directory[2] == '?' or directory[2] == '.') and isSep(directory[3]))
-        try std.fmt.allocPrint(allocator, "{s}\\*", .{directory})
-    else
-        try std.fmt.allocPrint(allocator, "{s}\\*", .{directory});
-    defer allocator.free(prefixed);
-
-    return std.unicode.wtf8ToWtf16LeAllocZ(allocator, prefixed) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidWtf8 => error.InvalidPath,
-    };
+/// 目录 / 文件属性查询。GetFileAttributesW 跟随 junction / symlink，同时保留
+/// 返回属性里的 REPARSE_POINT 位；进入链接目录和列子项都不需要递归展开。
+pub fn attributesOf(allocator: std.mem.Allocator, path: []const u8) OpenError!DWORD {
+    if (!supported) return error.Unsupported;
+    const wide = try path_win.wide(allocator, path, 0);
+    defer allocator.free(wide);
+    const attributes = GetFileAttributesW(wide.ptr);
+    if (attributes == std.math.maxInt(DWORD)) return mapOpenError(GetLastError());
+    return attributes;
 }
 
-fn isSep(ch: u8) bool {
-    return ch == '\\' or ch == '/';
+/// `<directory>\*` → 以 0 结尾的 UTF-16。仅当路径加模式会越过 MAX_PATH 时
+/// 才补 `\\?\`；短路径保留普通 Win32 形态，已有设备前缀不重复处理。
+fn widePattern(allocator: std.mem.Allocator, directory: []const u8) OpenError![:0]u16 {
+    if (directory.len == 0) return error.InvalidPath;
+    const with_pattern = try std.fmt.allocPrint(allocator, "{s}\\*", .{directory});
+    defer allocator.free(with_pattern);
+    return path_win.wide(allocator, with_pattern, 0);
 }
 
 fn nameOf(data: *const WIN32_FIND_DATAW) []const u16 {
@@ -320,8 +317,9 @@ fn isDot(name: []const u16) bool {
 
 fn mapOpenError(code: DWORD) OpenError {
     return switch (code) {
-        2, 3 => error.PathNotFound, // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND
+        2, 3, 53, 67 => error.PathNotFound, // FILE/PATH_NOT_FOUND、BAD_NETPATH、BAD_NET_NAME
         5 => error.AccessDenied, // ERROR_ACCESS_DENIED
+        21 => error.NotReady, // ERROR_NOT_READY
         267 => error.NotDirectory, // ERROR_DIRECTORY
         123, 161 => error.InvalidPath, // ERROR_INVALID_NAME / ERROR_BAD_PATHNAME
         else => error.Unexpected,

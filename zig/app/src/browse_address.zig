@@ -4,6 +4,7 @@ const nanoui = @import("nanoui");
 const model = @import("browse_address_model.zig");
 const crumbs = @import("browse_crumbs.zig");
 const drives_mod = @import("browse_drives.zig");
+const complete_mod = @import("browse_complete.zig");
 const ui = nanoui.ui;
 
 pub const Action = struct {
@@ -17,15 +18,17 @@ pub const Bar = struct {
     buffer: ui.TextBuffer = .{},
     focused: bool = false,
     drives_open: bool = false,
+    completion: complete_mod.State,
 
-    pub fn init(root: []const u8) Bar {
-        var self = Bar{};
+    pub fn init(allocator: std.mem.Allocator, root: []const u8) Bar {
+        var self = Bar{ .completion = complete_mod.State.init(allocator) };
         self.editor.cancel(root);
         self.buffer.set(root);
         return self;
     }
 
     pub fn deinit(self: *Bar) void {
+        self.completion.deinit();
         self.buffer.deinit();
     }
 
@@ -38,10 +41,12 @@ pub const Bar = struct {
     }
 
     pub fn failure(self: *const Bar) ?[]const u8 {
+        if (self.completion.noMatches()) return "无匹配";
         return self.editor.failure;
     }
 
     pub fn submitted(self: *Bar, c: *ui.Context, root: []const u8, err: ?anyerror) void {
+        self.completion.invalidate();
         if (err) |submit_error| {
             self.editor.fail(submit_error);
             return;
@@ -55,6 +60,7 @@ pub const Bar = struct {
     }
 
     pub fn navigated(self: *Bar, root: []const u8) void {
+        self.completion.invalidate();
         self.editor.finish(root);
         self.buffer.set(root);
         self.focused = false;
@@ -69,7 +75,8 @@ pub const Bar = struct {
     /// 画在工具条地址区域。Ctrl+L 聚焦并全选；Esc 在 nanoui 看到按键前取消编辑。
     pub fn drawField(self: *Bar, c: *ui.Context, root: []const u8) Action {
         var action = Action{};
-        if (c.shortcut(.{ .key = 'l', .ctrl = true })) {
+        if (c.shortcut(.{ .key = 'l', .ctrl = true }) or c.shortcut(.{ .key = 'd', .alt = true })) {
+            self.completion.invalidate();
             self.editor.begin(root);
             self.buffer.set(root);
             self.buffer.want_selection = .{ 0, root.len };
@@ -78,11 +85,23 @@ pub const Bar = struct {
         }
         if (self.editor.editing and c.input.key == .escape) {
             c.input.key = null;
+            self.completion.invalidate();
             self.editor.cancel(root);
             self.buffer.set(root);
             self.focused = false;
             c.focus = 0;
             c.changed = true;
+        }
+
+        if (self.editor.editing and c.input.key == .tab and !c.input.ctrl and !c.input.alt) {
+            c.input.key = null;
+            _ = self.completion.complete(root, &self.editor, c.input.shift) catch |err| {
+                self.editor.fail(err);
+                return action;
+            };
+            self.buffer.set(self.editor.text());
+            c.changed = true;
+            return action;
         }
 
         if (self.editor.editing) {
@@ -93,7 +112,10 @@ pub const Bar = struct {
                 .select_all_on_focus = true,
             });
             self.focused = result.focused;
-            if (result.changed or result.submitted) self.editor.set(self.buffer.text()) catch {};
+            if (result.changed or result.submitted) {
+                self.completion.invalidate();
+                self.editor.set(self.buffer.text()) catch {};
+            }
             if (result.submitted) {
                 c.input.key = null; // 不许同一次 Enter 又激活旧列表行。
                 action.submit = true;
@@ -138,7 +160,7 @@ pub const Bar = struct {
             const root = drive.root(&root_buffer);
             const label = std.fmt.allocPrint(c.alloc(), "{s}  {s}{s}", .{
                 root,
-                drive.kind.label(),
+                drive.displayLabel(),
                 if (drive.available or drive.kind == .no_root) "" else "（不可访问）",
             }) catch continue;
             const it = ui.button(c, label, .{ .variant = .ghost, .width = .fill, .size = 10 });

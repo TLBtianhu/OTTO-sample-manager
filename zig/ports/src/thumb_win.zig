@@ -40,6 +40,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const thumb = @import("thumb.zig");
+const path_win = @import("otto_win_path");
 
 /// 平台闸门：这是 Windows 口岸，其它平台返回 error.Unsupported。
 pub const supported = builtin.os.tag == .windows;
@@ -230,9 +231,9 @@ pub fn get(
     // 请求尺寸夹到上限：Shell 本来也给不出更大的图，而第三方 handler 可能相信它。
     const size: LONG = @intCast(@min(size_px, thumb.max_size_px));
 
-    const wide = std.unicode.wtf8ToWtf16LeAllocZ(allocator, path_utf8) catch |err| switch (err) {
+    const wide = path_win.wide(allocator, path_utf8, 0) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidWtf8 => return error.InvalidPath,
+        error.InvalidPath => return error.InvalidPath,
     };
     defer allocator.free(wide);
 

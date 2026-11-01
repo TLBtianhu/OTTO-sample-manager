@@ -46,6 +46,7 @@
 //! 没有消息循环要求，不弹窗、不抢焦点。手写 extern / vtable，没有 @cImport、没有 C shim。
 
 const std = @import("std");
+const path_win = @import("otto_win_path");
 const builtin = @import("builtin");
 
 /// 平台闸门：这是 Windows 解码器，其它平台返回 `error.Unsupported`。
@@ -322,9 +323,9 @@ pub fn decode(allocator: std.mem.Allocator, path: []const u8, max_px: u32) Error
         return error.Unsupported;
     }
 
-    const wide = std.unicode.wtf8ToWtf16LeAllocZ(allocator, path) catch |err| switch (err) {
+    const wide = path_win.wide(allocator, path, 0) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidWtf8 => return error.Unsupported,
+        error.InvalidPath => return error.Unsupported,
     };
     defer allocator.free(wide);
 

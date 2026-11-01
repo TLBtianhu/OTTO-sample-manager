@@ -3,6 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const win_path_module = b.addModule("otto_win_path", .{
+        .root_source_file = b.path("src/path_win.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     // 文件监听口岸：只产出静态库 + 模块。消费方（zig/app、将来的 Cutrans）链接
     // otto_watch，或 `@import("otto_watch")`。平台限定 Windows（见 src/win_watch.zig）。
@@ -11,6 +16,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    library_module.addImport("otto_win_path", win_path_module);
     const library = b.addLibrary(.{
         .linkage = .static,
         .name = "otto_watch",
@@ -26,6 +32,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    thumb_module.addImport("otto_win_path", win_path_module);
     thumb_module.linkSystemLibrary("ole32", .{});
     thumb_module.linkSystemLibrary("shell32", .{});
     thumb_module.linkSystemLibrary("gdi32", .{});
@@ -183,7 +190,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     // 模块本身只由 app 消费；测试图另建（同一个源文件不能属于两个模块）。
-    _ = browse_dir_module;
+    browse_dir_module.addImport("otto_win_path", win_path_module);
 
     // L1 元数据口岸：只读前 64 KiB，WAV 头部解析与解码器共用 otto_wav_header。
     // WAV 头部解析是独立模块（app 的解码器也 import 它），这里是唯一的实现：
@@ -224,6 +231,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    test_module.addImport("otto_win_path", win_path_module);
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     test_step.dependOn(&run_tests.step);
 
@@ -232,6 +240,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    thumb_test_module.addImport("otto_win_path", win_path_module);
     thumb_test_module.linkSystemLibrary("ole32", .{});
     thumb_test_module.linkSystemLibrary("shell32", .{});
     thumb_test_module.linkSystemLibrary("gdi32", .{});
@@ -249,6 +258,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    caps_test_module.addImport("otto_win_path", win_path_module);
     caps_test_module.linkSystemLibrary("advapi32", .{});
     caps_test_module.linkSystemLibrary("ole32", .{});
     caps_test_module.linkSystemLibrary("shell32", .{});
@@ -424,6 +434,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    browse_dir_test_module.addImport("otto_win_path", win_path_module);
     const run_browse_dir_tests = b.addRunArtifact(b.addTest(.{ .root_module = browse_dir_test_module }));
     run_browse_dir_tests.step.dependOn(&run_win_window_tests.step);
     test_step.dependOn(&run_browse_dir_tests.step);

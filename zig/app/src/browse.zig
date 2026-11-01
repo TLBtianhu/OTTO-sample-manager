@@ -17,11 +17,7 @@
 //!      `卷序列号 + 文件索引`（退化时用路径），变更后按身份找回它；文件被删掉时
 //!      那一行留成墓碑（`deleted`），选中项移到相邻的存活行。
 //!
-//! 路径不可用（目录被删 / U 盘拔出）时监听线程会硬退出：界面保持「路径不可用」，
-//! **只在用户下一次交互时**（点击 / 滚动 / 键盘 / 获得焦点）重试一次——不是定时轮询。
-//!
-//! 只读纪律：本文件没有任何写调用——不建文件、不写库、不写缩略图到源目录。唯一的
-//! 文件系统操作是"列目录 / stat / 打开句柄问身份"。
+//! 路径不可用时保留具名原因，只在用户下一次交互时重试；全程只读，不做定时轮询。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -38,6 +34,7 @@ const sort_mod = @import("browse_sort.zig");
 const history_mod = @import("browse_history.zig");
 const navigation = @import("browse_navigation.zig");
 const view = @import("browse_view.zig");
+const browse_dir = @import("otto_browse_dir");
 
 const Entry = types.Entry;
 const Batch = types.Batch;
@@ -50,7 +47,6 @@ pub const max_entries = types.default_limit;
 pub const hard_limit = types.hard_limit;
 pub const storm_threshold = types.storm_threshold;
 
-/// 入口解析在 `browse_target.zig`（只碰一次 `statFile`）；这里转出给 `main` 用。
 pub const Target = browse_target.Target;
 pub const TargetError = browse_target.TargetError;
 pub const resolveTarget = browse_target.resolve;
@@ -61,6 +57,7 @@ pub const InitError = error{
     PathNotFound,
     NotDirectory,
     AccessDenied,
+    NotReady,
     Unexpected,
 } || std.Thread.SpawnError;
 
@@ -83,6 +80,7 @@ pub const Session = struct {
     /// 目录不存在 / 被删掉 / 监听硬退出：界面显示"路径不可用"，其余行为照常（不崩）。
     unavailable: bool = false,
     denied: bool = false,
+    path_error: ?[]const u8 = null,
     /// 这次会话允许"加载更多"到多少条（总硬上限 200000）。
     limit: usize,
     watch_enabled: bool,
@@ -144,12 +142,12 @@ pub const Session = struct {
     event_paths: std.ArrayListUnmanaged([]const u8) = .empty,
     /// 选中项的身份跟踪（`browse_select.zig`）。
     tracker: select_mod.Tracker,
-    /// 全量重枚举之前记下的选中项：等新行到了再按身份找回。
+    /// 全量重枚举之前记下的选中项，以及导航历史恢复状态。
     restore_pending: bool = false,
     /// 导航历史 / 返回时的身份选中快照。
     history: history_mod.History,
     navigation_restore: bool = false,
-    /// 当前排序；一批行收尾后只排一次。
+    /// 当前排序与历史恢复状态。
     sort_key: sort_mod.Key = .name,
     needs_sort: bool = false,
 
@@ -161,12 +159,11 @@ pub const Session = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, options: Options) InitError!*Session {
         const trimmed = types.trimTrailingSeparators(directory);
         if (trimmed.len == 0) return error.InvalidPath;
+        const attributes = browse_dir.attributesOf(allocator, trimmed) catch |err| return mapInitError(err);
+        if (attributes & browse_dir.FILE_ATTRIBUTE_DIRECTORY == 0) return error.NotDirectory;
         const absolute = types.realPathAlloc(allocator, io, trimmed) catch |err| return mapInitError(err);
         errdefer allocator.free(absolute);
-        // 入口是文件 / 盘符不存在：在**建会话之前**就说清楚（不要等到枚举才报
-        // "路径不可用"——那会让 `--browse <文件>` 看起来像一次成功的空目录）。
-        const stat = std.Io.Dir.cwd().statFile(io, absolute, .{}) catch |err| return mapInitError(err);
-        if (stat.kind != .directory) return error.NotDirectory;
+        // 入口在建会话前就给出具名原因，不把文件 / 不可用介质伪装成空目录。
 
         const self = try allocator.create(Session);
         errdefer allocator.destroy(self);
@@ -187,8 +184,7 @@ pub const Session = struct {
         self.history = try history_mod.History.init(allocator, absolute);
         errdefer self.history.deinit();
 
-        // 监听先于枚举：枚举期间的新文件也要能看到（RDCW 的读取窗口越小越好）。
-        // 非递归是**要求**：浏览模式只列当前这一层。
+        // 监听先于枚举且保持非递归。
         if (options.watch) self.watcher = openWatcher(allocator, absolute);
         errdefer if (self.watcher) |watcher| {
             watcher.deinit();
@@ -252,6 +248,7 @@ pub const Session = struct {
             .enumerating = self.enumerating,
             .unavailable = self.unavailable,
             .denied = self.denied,
+            .path_error = self.path_error,
             .skipped = self.skipped,
             .unreadable = self.unreadable,
             .first_page_ms = if (self.first_page_ns) |ns| types.nsToMs(ns - self.started_ns) else 0,
@@ -288,8 +285,7 @@ pub const Session = struct {
         return self.entries.items[index].identity;
     }
 
-    /// 基准用：同步跑完第一轮枚举（`--bench-scroll` 自己泵消息时不跑 `tick`，
-    /// 行不会自己到视图里）。只搬行，不计时；超时也继续——基准会如实报 0 行。
+    /// 基准用：同步跑完第一轮枚举，超时也继续并如实报行数。
     pub fn prime(self: *Session, selection: ?*selection_mod.Selection, timeout_s: f64) void {
         const deadline = types.nowNs(self.io) + @as(i128, @intFromFloat(timeout_s * 1_000_000_000.0));
         while (self.enumerating and types.nowNs(self.io) < deadline) {
@@ -303,15 +299,14 @@ pub const Session = struct {
     // 分页：加载更多 / 内存拒绝
     // -----------------------------------------------------------------------
 
-    /// 还能不能点「加载更多」：本页有更多、没在忙、没被内存拒绝、路径可用。
+    /// 还能不能点「加载更多」。
     pub fn canLoadMore(self: *const Session) bool {
         return self.has_more and !self.enumerating and !self.mem_refused and
             !self.unavailable and !self.denied and
             self.entries.items.len < types.hard_limit;
     }
 
-    /// 「加载更多」：先按实测每行字节判断 90 MiB 预算，再让生产线程接着上一页读。
-    /// 返回是否真的排上了一页；拒绝时 `mem_refused` 为 true（随后会数出剩余条数）。
+    /// 「加载更多」：先按实测每行字节判断预算，再续读当前枚举句柄。
     pub fn loadMore(self: *Session) error{OutOfMemory}!bool {
         if (!self.canLoadMore()) return false;
         const rows = self.entries.items.len;
@@ -396,7 +391,7 @@ pub const Session = struct {
     }
 
     // -----------------------------------------------------------------------
-    // 枚举批次：消费侧
+    // 枚举批次
     // -----------------------------------------------------------------------
 
     /// 搬走队列里的全部批次。返回行列表是否变了。
@@ -435,10 +430,24 @@ pub const Session = struct {
                     .ok => {
                         self.unavailable = false;
                         self.denied = false;
+                        self.path_error = null;
                     },
-                    .path_unavailable => self.unavailable = true,
-                    .denied => self.denied = true,
-                    .failed => self.unavailable = true,
+                    .path_unavailable => {
+                        self.unavailable = true;
+                        self.path_error = "PathNotFound";
+                    },
+                    .denied => {
+                        self.denied = true;
+                        self.path_error = "AccessDenied";
+                    },
+                    .not_ready => {
+                        self.unavailable = true;
+                        self.path_error = "NotReady";
+                    },
+                    .failed => {
+                        self.unavailable = true;
+                        self.path_error = null;
+                    }
                 }
                 if (self.reconciling and !node.append) {
                     // 重扫的 done 到了：事件步骤把队列里的补应用一遍。
@@ -465,7 +474,6 @@ pub const Session = struct {
         return changed;
     }
 
-    /// 追加一条：先查"监听事件先加进来的路径"，同一条不装第二次。
     fn appendRow(self: *Session, entry: Entry) void {
         for (self.event_paths.items) |known| {
             if (std.mem.eql(u8, known, entry.path)) {
@@ -558,7 +566,6 @@ pub const Session = struct {
     }
 };
 
-/// 监听器在堆上（`start()` 之后对象不能移动）；起不来返回 null——静态列表照样能看。
 fn openWatcher(allocator: std.mem.Allocator, root: []const u8) ?*watch.Watcher {
     const watcher = allocator.create(watch.Watcher) catch return null;
     watcher.* = watch.Watcher.init(allocator, root, .{
@@ -583,10 +590,11 @@ fn openWatcher(allocator: std.mem.Allocator, root: []const u8) ?*watch.Watcher {
 fn mapInitError(err: anyerror) InitError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.FileNotFound => error.PathNotFound,
-        error.NotDir => error.NotDirectory,
         error.AccessDenied => error.AccessDenied,
-        error.InvalidUtf8, error.NameTooLong => error.InvalidPath,
+        error.NotReady => error.NotReady,
+        error.FileNotFound, error.PathNotFound => error.PathNotFound,
+        error.NotDir, error.NotDirectory => error.NotDirectory,
+        error.InvalidUtf8, error.InvalidPath, error.NameTooLong => error.InvalidPath,
         else => error.Unexpected,
     };
 }

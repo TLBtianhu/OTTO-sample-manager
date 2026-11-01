@@ -9,6 +9,23 @@ const ui = nanoui.ui;
 
 pub fn handleKeys(s: *State, c: *ui.Context) void {
     const session = s.browse orelse return;
+    // F4/F5 在搜索框与地址栏编辑态也保持 Explorer 语义：打开盘符菜单 / 刷新，
+    // 不插入字符；地址草稿与搜索文本都保留。Alt+D 在地址栏控件里与 Ctrl+L 同路。
+    if (c.input.key == .f4 and !c.input.ctrl and !c.input.alt) {
+        c.input.key = null;
+        if (!s.address.drives_open) s.address.toggleDrives(&s.drives);
+        c.changed = true;
+        return;
+    }
+    if (c.input.key == .f5 and !c.input.ctrl and !c.input.alt) {
+        c.input.key = null;
+        navigation.refresh(session, &s.selection) catch |err| {
+            logFailure("refresh", err);
+            return;
+        };
+        c.changed = true;
+        return;
+    }
     if (s.address.keyboardOwned()) return;
     if (c.shortcut(.{ .key = ui.Shortcut.left, .alt = true })) {
         session.goBack(&s.selection) catch |err| {

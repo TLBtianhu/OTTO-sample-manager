@@ -22,6 +22,7 @@ const demo_watch = @import("demo_watch.zig");
 const browse_watch_probe = @import("browse_watch_probe.zig");
 const browse_nav_probe = @import("browse_nav_probe.zig");
 const browse_address_probe = @import("browse_address_probe.zig");
+const browse_robust_probe = @import("browse_robust_probe.zig");
 const import_cli = @import("import_cli.zig");
 const library_cli = @import("library_cli.zig");
 const mode_mod = @import("mode.zig");
@@ -65,6 +66,8 @@ pub fn run(
     // 放在其它自检之前：它们与库无关，也不该被 `--filter` / `--import` 抢走。
     if (options.browse_probe) |dir| return try browse_probe.runProbe(init, allocator, dir, options);
     if (options.browse_address_probe) |dir| return try browse_address_probe.run(init, dir, options);
+    if (options.browse_complete_probe) |dir| return try browse_robust_probe.complete(init, dir, options);
+    if (options.browse_path_probe) |dir| return try browse_robust_probe.path(init, dir);
     if (options.browse_nav_probe) |dir| return try browse_nav_probe.run(init, allocator, dir, options, false);
     if (options.browse_nav_watch_probe) |dir| return try browse_nav_probe.run(init, allocator, dir, options, true);
     if (options.browse_watch_probe) |dir| {

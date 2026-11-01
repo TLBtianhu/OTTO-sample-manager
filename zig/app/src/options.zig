@@ -72,6 +72,10 @@ pub const Options = struct {
     browse_nav_watch_probe: ?[]const u8 = null,
     /// `--browse-address-probe <dir>`：地址栏 / 面包屑 / 盘符无头探针。
     browse_address_probe: ?[]const u8 = null,
+    /// 按需 Tab 补全与路径/介质探针；均不建窗口。
+    browse_complete_probe: ?[]const u8 = null,
+    browse_path_probe: ?[]const u8 = null,
+    browse_text: ?[]const u8 = null,
     /// `--set-path=<路径>`：直接执行一次“编辑地址栏 + Enter”。
     browse_set_path: ?[]const u8 = null,
     browse_steps: []const u8 = "",
@@ -188,7 +192,9 @@ pub const Options = struct {
             self.browse_watch_probe != null or
             self.browse_nav_probe != null or
             self.browse_nav_watch_probe != null or
-            self.browse_address_probe != null;
+            self.browse_address_probe != null or
+            self.browse_complete_probe != null or
+            self.browse_path_probe != null;
     }
 };
 

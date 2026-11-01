@@ -20,6 +20,7 @@ pub fn printUsage() void {
             "      otto-lite --browse-nav-probe <目录> --steps=enter:sub,back,up,sort:size\n" ++
             "      otto-lite --browse-nav-watch-probe <目录> --steps=enter:sub [--watch-seconds=4]\n" ++
             "      otto-lite --browse-address-probe <目录> [--set-path=<路径>] [--steps=set:p,enter,crumb:2,drive:C]\n" ++
+            "      otto-lite --browse-complete-probe <目录> --text=<前缀> | --browse-path-probe <路径>\n" ++
             "      otto-lite --thumb-bench <dir> [--no-isolation] [--cache-budget-kib=<n>]\n" ++
             "      otto-lite --bench <library> [--bench-samples <dir>]\n" ++
             "      otto-lite --bench-scroll <library|目录> [--frames N] [--d3d] [--bench-scroll-edge] [--no-prefetch] [--no-vsync]\n" ++
