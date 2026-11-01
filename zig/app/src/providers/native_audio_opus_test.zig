@@ -1,5 +1,5 @@
 //! `providers/native_audio.zig` 的 **Ogg Opus 播放**侧测试（vendor 的 zig-audio
-//! **v0.15**：CELT / SILK / Hybrid 三种包都解）。
+//! **v0.16**：CELT / SILK / Hybrid 三种包都解，立体声与单声道都解）。
 //!
 //!   * 真素材 `opus-music.opus`（128k、config 31 纯 CELT、2 s）整段解码：
 //!     48000 Hz / 2 声道 / 96000 帧 / 2000 ms / 384000 字节；
@@ -10,8 +10,12 @@
 //!     config 15 的 Hybrid 和少量 CELT（config 23），两层都解 → 48000 Hz / 1 声道 /
 //!     96000 帧 / 192000 字节；provider 交出 `audio` 会话，注册表里赢在 native-audio
 //!     名下。v0.15 之前这里第一次 `read` 就 `Unsupported`，所以旧断言写的是"谢绝"。
-//!   * **谢绝语义仍然在**，只是换成了 v0.15 真正不支持的输入（多帧包 / 立体声 SILK），
-//!     见 `native_audio_opus_decline_test.zig`。
+//!   * **立体声 SILK / Hybrid 也能播**（v0.16 起）：`stereo-silk-24k.opus` 与
+//!     `stereo-hybrid-32k.opus` 各解出 48000 Hz / **2 声道** / 96000 帧 / 384000 字节，
+//!     左右声道不是同一份样本（mid/side 解映射真的跑了），并与 ffmpeg 逐样本一致。
+//!     v0.15 时这两层只做单声道，同一个包会 `error.Unsupported`——旧断言写的是"谢绝"。
+//!   * **谢绝语义仍然在**，只是换成了 v0.16 真正不支持的输入（一包多于两帧，
+//!     TOC code 3），见 `native_audio_opus_decline_test.zig`。
 //!
 //! 缺素材（或 ffmpeg 不在）时 `SkipZigTest`，不把外部文件变成测试的硬依赖。
 //! 从 provider 文件里拆出来是为了守住单文件行数；FLAC/AIFF 侧在
@@ -37,12 +41,22 @@ const music_path = sample_dir ++ "\\opus-music.opus";
 /// 24k voip：configuration 9（SILK WB）+ hybrid 15 + 少量 CELT 23；v0.15 起三种都解。
 const voice_path = sample_dir ++ "\\opus-voice.opus";
 
+/// 立体声素材在 vector 目录：v0.16 起这两层也解立体声。
+const vector_dir = "C:\\src\\zig-audio-vectors\\ogg";
+/// 24k VBR 立体声 SILK（mid/side）：v0.15 时这一层只做单声道。
+const stereo_silk_path = vector_dir ++ "\\stereo-silk-24k.opus";
+/// 32k 立体声 Hybrid（SILK + CELT 两层都在立体声上叠加）。
+const stereo_hybrid_path = vector_dir ++ "\\stereo-hybrid-32k.opus";
+
 /// 2.000 s × 48000 × 2 声道。granule 96312 − pre_skip 312 = 96000 帧。
 const music_frames: u64 = 96_000;
 const music_bytes: usize = 384_000;
 /// 同一份 2.000 s，单声道：96000 帧 × 1 声道 × 2 字节。
 const voice_frames: u64 = 96_000;
 const voice_bytes: usize = 192_000;
+/// 立体声素材同规格：96000 帧 × 2 声道 × 2 字节。
+const stereo_frames: u64 = 96_000;
+const stereo_bytes: usize = 384_000;
 
 fn hasFile(path: []const u8) bool {
     if (builtin.os.tag != .windows) return false;
@@ -267,5 +281,151 @@ test "注册表（--no-shell-preview）：opus-music 出 audio 会话（2000ms /
         // 文件前几条与 `audio/decode_test.zig` 覆盖。
         .none => return error.SkipZigTest,
         else => return error.ExpectedAudio,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 立体声 SILK / Hybrid（v0.16 起能播；v0.15 的断言写的是"谢绝"）
+// ---------------------------------------------------------------------------
+
+/// 交错 i16 里左右两个声道不同的帧数。
+///
+/// mid/side 解映射接错时会退化成"单声道复制两份"，那时这个数是 0；真立体声素材上
+/// 它接近总帧数（ffmpeg 解同样两份文件是 95994 / 95992）。所以它比"峰值不是 0"
+/// 更能证明立体声那条路真的跑了。
+fn framesWithDistinctChannels(bytes: []const u8) usize {
+    const samples = std.mem.bytesAsSlice(i16, bytes);
+    var differing: usize = 0;
+    var i: usize = 0;
+    while (i + 1 < samples.len) : (i += 2) {
+        if (samples[i] != samples[i + 1]) differing += 1;
+    }
+    return differing;
+}
+
+/// ffmpeg 对照的统计量：SNR 是不随音量缩放的"解对了没有"，max_diff 抓局部塌陷。
+const FfmpegStats = struct { snr_db: f64, max_diff: u32 };
+
+/// 把 `path` 交给 ffmpeg 解成 s16le，与我们的整段 PCM 比：样本数必须相等（尾部或
+/// 重采样尾巴丢了就是"解错了"，不是舍入），返回 SNR 与最大样本差。ffmpeg 不在或解
+/// 不动时返回 null（调用方 Skip）。
+fn ffmpegStats(pcm_bytes: []const u8, path: []const u8) !?FfmpegStats {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buffer);
+    const raw_path = try std.fs.path.join(testing.allocator, &.{ root_buffer[0..root_len], "ffmpeg-s16le.raw" });
+    defer testing.allocator.free(raw_path);
+
+    const result = try std.process.run(testing.allocator, testing.io, .{
+        .argv = &.{ ffmpeg, "-v", "error", "-y", "-i", path, "-f", "s16le", raw_path },
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    if (!result.term.success()) return null;
+
+    const raw = try std.Io.Dir.cwd().readFileAlloc(
+        testing.io,
+        raw_path,
+        testing.allocator,
+        .limited(16 * 1024 * 1024),
+    );
+    defer testing.allocator.free(raw);
+
+    try testing.expectEqual(raw.len, pcm_bytes.len);
+    const expected = std.mem.bytesAsSlice(i16, raw);
+    const actual = std.mem.bytesAsSlice(i16, pcm_bytes);
+    var signal: f64 = 0;
+    var noise: f64 = 0;
+    var max_diff: u32 = 0;
+    for (expected, actual) |theirs, ours| {
+        const value: f64 = @floatFromInt(theirs);
+        const diff = @as(i32, theirs) - @as(i32, ours);
+        signal += value * value;
+        noise += @as(f64, @floatFromInt(diff)) * @as(f64, @floatFromInt(diff));
+        max_diff = @max(max_diff, @abs(diff));
+    }
+    return .{
+        .snr_db = 10.0 * std.math.log10(signal / @max(noise, 1e-300)),
+        .max_diff = max_diff,
+    };
+}
+
+/// 立体声 Opus 的共同验收：48000 Hz / 2 声道 / 96000 帧 / 2000 ms / 384000 字节，
+/// 有声音、左右不是同一份样本，provider 交出 `audio` 会话（`channels = 2`）。
+fn expectStereoPlays(path: []const u8) !void {
+    var decoded = try native_audio.decode(testing.allocator, path);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 48_000), decoded.sample_rate);
+    try testing.expectEqual(@as(u16, 2), decoded.channels);
+    try testing.expectEqual(@as(u16, 16), decoded.bits);
+    try testing.expectEqual(stereo_frames, decoded.frames);
+    try testing.expectEqual(@as(u64, 2000), decoded.duration_ms);
+    try testing.expectEqual(stereo_bytes, decoded.pcm.len);
+    try testing.expect(peakOf(decoded.pcm) > 1_000);
+
+    const differing = framesWithDistinctChannels(decoded.pcm);
+    std.debug.print(
+        "otto-lite: {s} distinct_channels={d}/{d}\n",
+        .{ std.fs.path.basename(path), differing, stereo_frames },
+    );
+    try testing.expect(differing > stereo_frames * 9 / 10);
+
+    var sample = sampleFor(path, ".opus");
+    const outcome = try native_audio.provider.open(testing.allocator, .{ .sample = &sample, .max_px = 128 });
+    defer outcome.deinit(testing.allocator);
+    switch (outcome) {
+        .audio => |session| {
+            try testing.expectEqual(@as(u32, 48_000), session.sample_rate);
+            try testing.expectEqual(@as(u16, 2), session.channels);
+            try testing.expectEqual(@as(u64, 2000), session.duration_ms);
+            try testing.expectEqual(stereo_bytes, session.pcm.len);
+        },
+        // 没有音频端点时 session.build 会失败；解码本身已由上面的断言钉住。
+        .none => return error.SkipZigTest,
+        else => return error.ExpectedAudio,
+    }
+}
+
+test "真 stereo-silk-24k：立体声 SILK 能播（48000Hz / 2 声道 / 96000 帧 / 384000 字节）" {
+    if (!hasFile(stereo_silk_path)) return error.SkipZigTest;
+    try expectStereoPlays(stereo_silk_path);
+}
+
+test "真 stereo-hybrid-32k：立体声 Hybrid 能播（48000Hz / 2 声道 / 96000 帧 / 384000 字节）" {
+    if (!hasFile(stereo_hybrid_path)) return error.SkipZigTest;
+    try expectStereoPlays(stereo_hybrid_path);
+}
+
+/// ffmpeg 只是**对照物**，不是逐位标准。库自己的向量测试对这两个立体声文件记录的
+/// 门槛就是下面这两个数（`vendor/zig-audio/src/opus_silk_vectors_test.zig`：
+/// `stereo-silk-24k` s16 SNR ≥ 80 dB / max ≤ 24 LSB，`stereo-hybrid-32k` 45 dB /
+/// max ≤ 1400 LSB——立体声 Hybrid 的残余来自 CELT 的 anti-collapse 瞬态帧）。OTTO
+/// 这一层钉的是**样本数**（尾部/重采样尾巴不能丢）加"不比库自己松"的 SNR 与
+/// max_diff，而不是假装和 swresample 逐位相同。
+const FfmpegFloor = struct {
+    path: []const u8,
+    snr_db: f64,
+    max_diff: u32,
+};
+
+test "立体声 Opus 与 ffmpeg 对照：样本数一致，SNR / max_diff 不比库自己的门槛松" {
+    if (!hasFile(ffmpeg)) return error.SkipZigTest;
+    for ([_]FfmpegFloor{
+        .{ .path = stereo_silk_path, .snr_db = 80.0, .max_diff = 24 },
+        .{ .path = stereo_hybrid_path, .snr_db = 45.0, .max_diff = 1400 },
+    }) |floor| {
+        if (!hasFile(floor.path)) return error.SkipZigTest;
+        var decoded = try native_audio.decode(testing.allocator, floor.path);
+        defer decoded.deinit(testing.allocator);
+
+        const stats = (try ffmpegStats(decoded.pcm, floor.path)) orelse return error.SkipZigTest;
+        std.debug.print(
+            "otto-lite: {s} vs ffmpeg samples={d} snr={d:.2}dB max_diff={d}\n",
+            .{ std.fs.path.basename(floor.path), decoded.pcm.len / 4, stats.snr_db, stats.max_diff },
+        );
+        try testing.expect(stats.snr_db >= floor.snr_db);
+        try testing.expect(stats.max_diff <= floor.max_diff);
     }
 }

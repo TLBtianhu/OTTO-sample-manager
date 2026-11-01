@@ -331,8 +331,16 @@ test "ogg: Opus is identified, but never claimed as Vorbis" {
     var root_reader = std.Io.Reader.fixed(bytes);
     var opened = try root.open(testing.allocator, &root_reader);
     defer opened.deinit();
-    var pcm: [8]i16 = undefined;
-    try testing.expectError(error.Unsupported, opened.read(&pcm));
+    // The dispatch is what this test is about: the Opus decoder took the stream,
+    // so the sample rate and the channel count come from `OpusHead` (two
+    // channels), not from a Vorbis identification header. The single "audio"
+    // packet is a structurally valid 10 ms Hybrid packet whose contents are
+    // nonsense; decoding two channels of it is a PCM question, not a dispatch
+    // one, and the decoder now does it rather than refusing the channel count.
+    try testing.expectEqual(root.opus.sample_rate, opened.info.sample_rate);
+    try testing.expectEqual(@as(u8, 2), opened.info.channels);
+    var pcm: [4096]i16 = undefined;
+    try testing.expect(try opened.read(&pcm) > 0);
 }
 
 test "ogg: an Ogg file with no audio stream is Unsupported" {

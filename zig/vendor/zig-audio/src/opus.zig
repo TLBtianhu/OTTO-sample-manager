@@ -17,9 +17,16 @@
 //!
 //! `Decoder` is the streaming decoder. It decodes CELT-only packets
 //! (configuration 16-31), SILK-only packets (configuration 0-11) and Hybrid
-//! packets (12-15), refuses stereo Hybrid with `error.Unsupported` (no vector
-//! exercises the unmixing path), and refuses packets carrying more than two
-//! frames. None of these refusals fabricates silence.
+//! packets (12-15), on **mono and stereo** streams alike, and refuses packets
+//! carrying more than two frames. None of these refusals fabricates silence.
+//!
+//! Stereo is the packet's own business, not the stream's: the TOC's 's' bit says
+//! whether a frame codes one channel or two, so a stereo stream may carry mono
+//! packets (which upmix) and every layer has its own stereo form. CELT has a
+//! mid/side (or dual) transform of its own; SILK codes a mid channel plus a side
+//! channel with three prediction weights per frame (RFC 6716 4.2.2), so its
+//! stereo is *not* two independent SILK streams; Hybrid runs both, summing the
+//! two per channel. See `opus_hybrid.zig`.
 //!
 //! Opus always runs at 48 kHz. Only the encoder's `input_sample_rate` hint
 //! suggests otherwise, and RFC 7845 5.1 says that field is "not the sample rate
@@ -31,7 +38,9 @@
 //! Length comes from the granule position, which counts samples *including* the
 //! pre-skip: RFC 7845 4.3 gives "PCM sample position = granule position -
 //! pre-skip". Summing the packets instead overstates the length, because end
-//! trimming lets the last granule cut into the final packet.
+//! trimming lets the last granule cut into the final packet. The SILK resampler
+//! also comes up a few samples short at the end; that tail is emitted after the
+//! trim, exactly where the reference puts it (see `Decoder.produceChunk`).
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -174,9 +183,9 @@ pub fn inspect(
 /// All three packet modes are decoded: CELT-only (configuration 16..31),
 /// SILK-only (0..11) and Hybrid (12..15). Hybrid needs both layers on the same
 /// frame — the same arithmetic coder, the same 48 kHz timeline — and that
-/// plumbing lives in `opus_hybrid.zig`; stereo Hybrid is refused with a named
-/// error because no vector has exercised the unmixing path. Packets carrying
-/// more than two frames are refused too: the multi-frame packing path is not
+/// plumbing lives in `opus_hybrid.zig`. Stereo streams decode too: SILK's
+/// mid/side and CELT's own stereo are combined per channel. Packets carrying
+/// more than two frames are refused: the multi-frame packing path is not
 /// implemented, and decoding only the first frame would quietly drop audio.
 ///
 /// Two timeline details are the whole reason this type has state:
@@ -218,7 +227,17 @@ pub const Decoder = struct {
     ahead_valid: bool = false,
     skipped: u64 = 0,
     delivered: u64 = 0,
+    /// The trim point currently in force. It is `granule - pre_skip` except
+    /// while the last packet is being converted, where the samples the SILK
+    /// resampler still owes are held back (see `full_total`).
     total: ?u64 = null,
+    /// `granule - pre_skip`: the stream's own length, known once the last packet
+    /// has been read. The reference emits the resampler's remaining samples
+    /// *after* the last packet is trimmed, so they are the stream's final
+    /// samples and `delivered` still ends here.
+    full_total: ?u64 = null,
+    /// Frames held in `layer.out` for the flush tail, not yet delivered.
+    tail_len: usize = 0,
     done: bool = false,
     pending_error: ?Error = null,
 
@@ -267,6 +286,10 @@ pub const Decoder = struct {
         demux_owned = true;
         errdefer decoder.deinit();
         decoder.celt = try celt_mod.Decoder.init(allocator, head.channels);
+        // The speech layer needs the stream's channel count before its first
+        // packet: it decodes mid/side SILK into that many channels and keeps one
+        // resampler per channel.
+        decoder.layer.output_channels = head.channels;
         decoder.chunk = try allocator.alloc(i16, max_packet_frames * head.channels);
         decoder.fbuf = try allocator.alloc(f32, max_packet_frames * head.channels);
         return decoder;
@@ -299,14 +322,14 @@ pub const Decoder = struct {
         switch (config.mode) {
             .celt => return self.decodeCeltPacket(bytes, packet, config),
             .silk => {
-                // The SILK layer here is mono: the unmixer exists but no vector
-                // has exercised it, and a stereo stream would need the
-                // resampler and the i16 conversion to interleave two channels.
-                if (self.channels != 1) return error.Unsupported;
+                // The speech layer decodes mid/side SILK and keeps one resampler
+                // per output channel, so stereo SILK reaches the same 48 kHz
+                // interleaved buffer as mono does.
                 return self.layer.decodeSilkPacket(self.celt.?, self.fbuf, bytes, packet, config, end_band);
             },
             .hybrid => {
-                if (self.channels != 1) return error.Unsupported;
+                // Hybrid adds the SILK half and the CELT half per channel, so a
+                // stereo packet sums two stereo pairs.
                 return self.layer.decodeHybridPacket(self.celt.?, self.fbuf, bytes, packet, config, end_band);
             },
         }
@@ -368,10 +391,42 @@ pub const Decoder = struct {
         }
     }
 
+    /// Deliver the flush tail the SILK resampler still owed: the samples the
+    /// reference emits after the last packet's granule trim. They are already at
+    /// 48 kHz, so they skip the pre-skip and the trim both.
+    fn deliverTail(self: *Decoder) Error!void {
+        const channels = self.channels;
+        const frames = self.tail_len;
+        self.chunk_len = 0;
+        self.chunk_pos = 0;
+        for (0..frames) |f| {
+            const dst = self.chunk[self.chunk_len..][0..channels];
+            var sample: [2]f32 = .{ 0.0, 0.0 };
+            for (0..channels) |c| {
+                sample[c] = self.layer.out[c][f];
+                dst[c] = toI16(sample[c]);
+            }
+            if (self.capture) |sink| try sink.appendSlice(self.capture_gpa, sample[0..channels]);
+            self.chunk_len += channels;
+            self.delivered += 1;
+        }
+        self.tail_len = 0;
+        // The trim point goes back to the stream's own length, so the "we are
+        // done" test in `read` and `produceChunk` sees the whole stream again.
+        if (self.full_total) |total| self.total = total;
+    }
+
     /// Decode forward until a chunk with samples is ready. Returns false at end
     /// of stream, after trimming the final packet to the last granule.
     fn produceChunk(self: *Decoder) Error!bool {
         while (true) {
+            // The flush tail is the stream's last samples, so it is delivered
+            // once the trimmed packet has been handed out (and even if that
+            // packet produced nothing).
+            if (self.tail_len != 0) {
+                try self.deliverTail();
+                return true;
+            }
             if (self.total) |total| {
                 if (self.delivered >= total) return false;
             }
@@ -382,12 +437,25 @@ pub const Decoder = struct {
             if (is_last) {
                 const granule = self.demux.lastGranule() orelse return error.Truncated;
                 if (granule < self.pre_skip) return error.Corrupt;
-                self.total = granule - self.pre_skip;
-                self.info.total_frames = self.total;
+                const full = granule - self.pre_skip;
+                self.full_total = full;
+                self.info.total_frames = full;
+                self.total = full;
+                // The reference flushes the SILK resampler once the stream
+                // ends, *after* the demuxer has trimmed the last packet to the
+                // granule (libavcodec/opus/dec.c: the drain call runs
+                // `opus_flush_resample` with exactly `delayed_samples`). So the
+                // packet is trimmed early and the flushed samples are the
+                // stream's last ones.
+                if (self.delivered < full) {
+                    const room: usize = @intCast(full - self.delivered);
+                    self.tail_len = @min(self.layer.flushTail(), room);
+                    if (self.tail_len != 0) self.total = full - self.tail_len;
+                }
             }
             try self.convert(frames);
             if (self.chunk_len != 0) return true;
-            if (is_last) return false;
+            if (is_last and self.tail_len == 0) return false;
         }
     }
 

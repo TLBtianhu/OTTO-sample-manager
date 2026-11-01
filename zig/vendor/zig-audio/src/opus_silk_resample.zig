@@ -179,6 +179,28 @@ pub const Resampler = struct {
         self.filter[phase_count][0] = self.filter[0][self.filter_alloc - 1];
     }
 
+    /// The reference's end-of-stream flush (`resample_flush` in swresample):
+    /// append a *mirror* of the buffered input's tail to the buffer, so the
+    /// filter can produce the samples it still owes once the last packet has
+    /// been decoded. `libswresample/resample.c` computes
+    /// `reflection = (FFMIN(in_buffer_count, filter_length) + 1) / 2` and then
+    /// `in_buffer[count + j] = in_buffer[count - 1 - j]`; that exact rule (and
+    /// not a zero pad) is what makes the last samples agree with ffmpeg.
+    pub fn flush(self: *Resampler) void {
+        const reflection = (@min(self.in_buffer_count, self.filter_length) + 1) / 2;
+        const base = self.in_buffer_index;
+        const count = self.in_buffer_count;
+        std.debug.assert(base + count + reflection <= self.in_buffer.len);
+        for (0..reflection) |j| {
+            self.in_buffer[base + count + j] = self.in_buffer[base + count - 1 - j];
+        }
+        self.in_buffer_count += reflection;
+        // `swr_convert` clears this on the flush call too: the last packet's
+        // convert may have come up short, and a stale "out is still constrained"
+        // flag would make the flush produce nothing at all.
+        self.resample_in_constraint = false;
+    }
+
     /// Prime the resampler with `n` zero samples, as the reference decoder does
     /// before the first packet so that its group delay is cancelled.
     pub fn primeZeros(self: *Resampler, n: usize) void {
@@ -359,6 +381,46 @@ fn besselI0(x: f64) f64 {
         if (term <= sum * 1e-18) break;
     }
     return sum;
+}
+
+test "flush appends a mirror of the buffered tail" {
+    var r = try Resampler.init(8_000);
+    // Fill the buffer by hand: a 15-sample ramp, which is what one 20 ms
+    // narrowband packet leaves behind (the filter needs 16 to go on).
+    r.in_buffer_index = 0;
+    r.in_buffer_count = 15;
+    for (0..15) |i| r.in_buffer[i] = @floatFromInt(i);
+
+    r.flush();
+    // reflection = (min(15, 16) + 1) / 2 = 8.
+    try std.testing.expectEqual(@as(usize, 23), r.in_buffer_count);
+    for (0..8) |j| {
+        try std.testing.expectEqual(@as(f32, @floatFromInt(14 - j)), r.in_buffer[15 + j]);
+    }
+    // The appended samples are a reversed copy of the tail, not a zero pad.
+    try std.testing.expectEqual(@as(f32, 7.0), r.in_buffer[22]);
+}
+
+test "a flush produces exactly the samples the filter still owed" {
+    var r = try Resampler.init(8_000);
+    r.primeZeros(4);
+    var in: [160]f32 = undefined;
+    for (&in, 0..) |*v, i| v.* = 0.5 + @as(f32, @floatFromInt(i)) * 0.001;
+    var out: [960]f32 = @splat(0.0);
+
+    const n = r.convert(&out, &in);
+    // 20 ms at 8 kHz is 960 samples at 48 kHz, but the last few need input the
+    // filter has not been given yet.
+    try std.testing.expect(n < 960);
+    var tail: [64]f32 = @splat(0.0);
+    try std.testing.expectEqual(@as(usize, 0), r.convert(&tail, &.{}));
+
+    r.flush();
+    const owed = 960 - n;
+    const produced = r.convert(tail[0..owed], &.{});
+    try std.testing.expectEqual(owed, produced);
+    // The flushed samples continue the ramp instead of collapsing to zero.
+    try std.testing.expect(tail[owed - 1] > 0.5);
 }
 
 test "filter bank: phase 0 is the interpolating phase" {

@@ -5,9 +5,9 @@
 //!   * `Info.total_frames` 的 Vorbis 语义：开流时 null、读到 EOF 才由库填上
 //!     （`audio/decode.zig` 的"没有声明长度就估算"分支就是靠这个成立的）；
 //!   * `.ogg` 的声明是**容器**：同一个容器里装 Vorbis、装 CELT Opus、装 SILK/Hybrid
-//!     语音 Opus，都由库按内容解（v0.15 起三种包都能播）；判断只来自内容，不来自
-//!     扩展名。真正不支持的输入（多帧包 / 立体声 SILK）的**谢绝**语义在
-//!     `native_audio_opus_decline_test.zig` 钉住。
+//!     语音 Opus（单声道与立体声），都由库按内容解（v0.15 起三种包都能播，v0.16 起
+//!     立体声也解）；判断只来自内容，不来自扩展名。真正不支持的输入（多帧包）的
+//!     **谢绝**语义在 `native_audio_opus_decline_test.zig` 钉住。
 //!
 //! 从 provider 文件里拆出来是为了守住单文件行数（provider 正文只留解码路径）；
 //! FLAC/AIFF 侧在 `native_audio_test.zig`，MP3 侧在 `native_audio_mp3_test.zig`，

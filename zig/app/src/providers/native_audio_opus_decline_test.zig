@@ -1,22 +1,29 @@
 //! `providers/native_audio.zig` 的 **Ogg Opus 谢绝**侧测试。
 //!
-//! v0.15 把 CELT / SILK / Hybrid 三种包都做完了，但"谢绝"（`none.unsupported`）
-//! 这条四态语义不能因为能力变多就被删掉：它仍然是"库有能力边界"与"注册表继续问
-//! 下一个 provider"之间的唯一接口。这里用**两件 v0.15 真正还不支持**的输入钉住它：
+//! v0.16 之后 SILK / Hybrid 的立体声也能解了，所以"谢绝"（`none.unsupported`）
+//! 这条四态语义必须换一个**库真的还不支持**的输入来钉。v0.16 只剩一种：
+//! **一包多于两帧**（TOC code 3，`opus.zig` 的 `decodePacket` 与
+//! `opus_hybrid.zig` 的 `packet.frame_count > 2`）。这里用它的两个形态：
 //!
-//!   1. **多帧包**（TOC code 3、一包 3 帧）：`opus-48k-64-60ms.opus` 是 libopus 的
-//!      60 ms 帧输出（每包 3 × 20 ms）。库明说 `frame_count > 2` 不解 →
-//!      `open` 成功、第一次 `read` 就给 `error.Unsupported`，provider 把它映射成
-//!      `none.unsupported`（谢绝，**不是 failed**），注册表继续问下一个；
-//!   2. **立体声 SILK**：v0.15 的 SILK / Hybrid 只做**单声道**（`channels != 1`
-//!      明确 `error.Unsupported`）。把 `opus-music.opus`（2 声道、纯 CELT）最后
-//!      一个包的 TOC 改成 SILK（CRC 重算，文件其余字节一个不动）→ 前面 2 秒照样
-//!      解出样本，最后一个包才拒绝。这钉住的是"已经解出来的 PCM 由 `errdefer`
-//!      释放"（`testing.allocator` 在测试结束时查泄漏）。
+//!   1. 库自带的多帧素材 `opus-48k-64-60ms.opus`（libopus 的 60 ms 帧输出，每包
+//!      3 × 20 ms）：`open` 成功、第一次 `read` 就给 `error.Unsupported`，
+//!      provider 把它映射成 `none.unsupported`（谢绝，**不是 failed**），注册表
+//!      继续问下一个；
+//!   2. 同一个多帧包放在**流的最后**：从 `opus-music.opus` 现场改一个包（TOC 的
+//!      code 改成 3、flags 字节写帧数 3、补足 CBR 整除、只重算那一页的 CRC），
+//!      前面 2 秒照样解出样本，最后一个包才拒绝。这钉住的是"已经解出来的 PCM
+//!      由 `errdefer` 释放"（`testing.allocator` 在测试结束时查泄漏）。
 //!
-//! 缺素材时 `SkipZigTest`，不把外部文件变成测试的硬依赖。能播的三种包（含语音
-//! `opus-voice.opus`）在 `native_audio_opus_test.zig`；Vorbis 侧在
-//! `native_audio_ogg_test.zig`。
+//! 为什么不再是"立体声 SILK"：v0.15 的 SILK / Hybrid 只做单声道（`channels != 1`
+//! 直接 `error.Unsupported`），v0.16 补上了 mid/side 解映射与每声道一个重采样器
+//! （`opus_hybrid.zig` 的 `Layer`），那条断言随库一起过时了；立体声现在只有播放
+//! 侧测试（`native_audio_opus_test.zig`）。**下一次升级先看这里**：v0.16 的
+//! `error.Unsupported` 只剩"一包多于两帧"这一条解码路径，一旦它也做了，这两条
+//! 测试就要再找一个新的边界，而不是删掉。
+//!
+//! 缺素材时 `SkipZigTest`，不把外部文件变成测试的硬依赖。能播的几种包（含语音
+//! `opus-voice.opus` 与立体声 SILK / Hybrid）在 `native_audio_opus_test.zig`；
+//! Vorbis 侧在 `native_audio_ogg_test.zig`。
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,7 +40,7 @@ const sample_dir = "C:\\src\\otto-testkit\\samples";
 
 /// libopus 60 ms 帧：TOC code 3 + 帧数 3，configuration 27/31（CELT）。
 const multi_frame_path = vector_dir ++ "\\opus-48k-64-60ms.opus";
-/// 128k、20 ms 帧、configuration 31（纯 CELT）、2.000 s 立体声：拿来做"尾包改 SILK"。
+/// 128k、20 ms 帧、configuration 31（纯 CELT）、2.000 s 立体声：拿来做"尾包改多帧"。
 const music_path = sample_dir ++ "\\opus-music.opus";
 
 fn hasFile(path: []const u8) bool {
@@ -105,25 +112,22 @@ test "多帧包（60ms = 3×20ms，code 3）：库仍 Unsupported，provider 谢
 // 半截 PCM：前面解出来、最后一个包才拒绝
 // ---------------------------------------------------------------------------
 
-/// 从 `opus-music.opus` 造一个"CELT 打头、SILK 收尾"的流：把**最后一个**音频包的
-/// TOC 首字节改成 configuration 9（SILK WB，`0b01001 << 3`），其余字节一个不动，
-/// 只重算那一页的 CRC。
+/// 把 `source` 的**最后一个**音频包改成一个 code 3 多帧包（3 帧 CBR），其余字节
+/// 一个不动，只重算那一页的 CRC。
 ///
-/// 这个流是 2 声道，而 v0.15 的 SILK 只做单声道：解码器能正常解出前面 2 秒的样本，
-/// 到最后一个包才 `error.Unsupported`——"读到一半"不再只是"第一次就读到"，而是
-/// "解了一段之后"。
-fn spliceSilkTail(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+/// 一个合法的 3 帧 CBR 包要求"(包长 − TOC − flags − padding 长度字节 − padding)
+/// 能被 3 整除"，所以用 0..2 字节的 padding 补齐——padding 是同一个包里本来就有的
+/// 字段，不是伪造的越界长度。帧数 3 > 2 正是 v0.16 仍然 `Unsupported` 的那条边界。
+fn spliceMultiFrameTail(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     const bytes = try allocator.dupe(u8, source);
     errdefer allocator.free(bytes);
 
-    const silk_toc: u8 = 9 << 3;
-
     var offset: usize = 0;
     var packet_start: ?usize = null;
-    var packet_page_crc_at: ?usize = null;
-    var packet_page_start: usize = 0;
-    var packet_page_end: usize = 0;
-    var in_packet = false;
+    var packet_len: usize = 0;
+    var page_crc_at: ?usize = null;
+    var page_start: usize = 0;
+    var page_end: usize = 0;
 
     while (offset + 27 <= bytes.len) {
         if (!std.mem.eql(u8, bytes[offset..][0..4], "OggS")) return error.BadOgg;
@@ -137,29 +141,42 @@ fn spliceSilkTail(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
         if (body_end > bytes.len) return error.BadOgg;
 
         var cursor = body_start;
+        var current_start = body_start;
+        var current_len: usize = 0;
         for (bytes[table_start..body_start]) |segment| {
-            if (!in_packet) {
-                // 一个包的第一段：记住它的起点和所在页（改首字节只需重算这一页）。
-                in_packet = true;
-                packet_start = cursor;
-                packet_page_start = offset;
-                packet_page_end = body_end;
-                packet_page_crc_at = offset + 22;
-            }
+            current_len += segment;
             cursor += segment;
-            if (segment < 255) in_packet = false; // 这一段结束了当前包
+            if (segment < 255) {
+                // 一个完整包：这里记下它；循环结束后留下的就是最后一个包。
+                packet_start = current_start;
+                packet_len = current_len;
+                page_crc_at = offset + 22;
+                page_start = offset;
+                page_end = body_end;
+                current_start = cursor;
+                current_len = 0;
+            }
         }
         offset = body_end;
     }
 
-    const target = packet_start orelse return error.BadOgg;
-    if (target >= bytes.len) return error.BadOgg;
-    bytes[target] = silk_toc;
+    const start = packet_start orelse return error.BadOgg;
+    // TOC + 帧数字节 + padding 长度字节，再短就不成包了。
+    if (packet_len < 8) return error.BadOgg;
 
-    // Ogg 的 CRC：多项式 0x04C11DB7，不反射，初值 0；计算时 CRC 字段本身按 0 算。
-    const crc_at = packet_page_crc_at orelse return error.BadOgg;
+    // 保留 configuration（高 5 位）与 's' 位，只把 code 换成 3。
+    bytes[start] = (bytes[start] & 0b1111_1100) | 0x03;
+    // flags：帧数 3（低 6 位）+ padding 位（0x40）；VBR 位不置，走 CBR。
+    bytes[start + 1] = 0x40 | 3;
+    const body = packet_len - 3;
+    const pad: u8 = @intCast((3 - body % 3) % 3);
+    bytes[start + 2] = pad;
+
+    // 改了 TOC 与 flags 就必须重算这一页的 CRC：Ogg 用多项式 0x04C11DB7、
+    // 不反射、初值 0，计算时 CRC 字段本身按 0 算。
+    const crc_at = page_crc_at orelse return error.BadOgg;
     @memset(bytes[crc_at..][0..4], 0);
-    const crc = oggCrc(bytes[packet_page_start..packet_page_end]);
+    const crc = oggCrc(bytes[page_start..page_end]);
     std.mem.writeInt(u32, bytes[crc_at..][0..4], crc, .little);
     return bytes;
 }
@@ -175,7 +192,7 @@ fn oggCrc(bytes: []const u8) u32 {
     return crc;
 }
 
-test "立体声流的尾包改成 SILK：先解出样本、再中途 Unsupported，半截 PCM 不泄漏" {
+test "多帧包放在流的最后：先解出接近 2 秒的样本、再中途 Unsupported，半截 PCM 不泄漏" {
     if (!hasFile(music_path)) return error.SkipZigTest;
 
     const source = try std.Io.Dir.cwd().readFileAlloc(
@@ -185,15 +202,15 @@ test "立体声流的尾包改成 SILK：先解出样本、再中途 Unsupported
         .limited(8 * 1024 * 1024),
     );
     defer testing.allocator.free(source);
-    const patched = try spliceSilkTail(testing.allocator, source);
+    const patched = try spliceMultiFrameTail(testing.allocator, source);
     defer testing.allocator.free(patched);
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "celt-then-silk.opus", .data = patched });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "celt-then-multiframe.opus", .data = patched });
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(testing.io, &root_buffer);
-    const path = try std.fs.path.join(testing.allocator, &.{ root_buffer[0..root_len], "celt-then-silk.opus" });
+    const path = try std.fs.path.join(testing.allocator, &.{ root_buffer[0..root_len], "celt-then-multiframe.opus" });
     defer testing.allocator.free(path);
 
     // 解码器视角：先拿到 PCM（证明"前面是好的"），最后一个包才拒绝。
@@ -205,28 +222,30 @@ test "立体声流的尾包改成 SILK：先解出样本、再中途 Unsupported
 
         var chunk: [8192]i16 = undefined;
         var frames: usize = 0;
-        var failed = false;
+        var refused = false;
         while (true) {
             const got = decoder.read(&chunk) catch |err| {
                 try testing.expectEqual(error.Unsupported, err);
                 try testing.expectEqual(@as(u16, 2), decoder.info.channels);
-                failed = true;
+                refused = true;
                 break;
             };
             if (got == 0) break;
             frames += got / 2;
         }
-        try testing.expect(failed);
-        // 尾包之前的所有 CELT 帧都解出来了（20 ms 一包，最后一个包的边界不影响这条
-        // 下界；这里要求"至少解出一整秒"，而不是"只解出几个样本"）。
-        try testing.expect(frames >= 48_000);
-        std.debug.print("otto-lite: celt-then-silk frames_before_refusal={d}\n", .{frames});
+        try testing.expect(refused);
+        // 被拒的是**最后**一个 20 ms 包（100 个音频包之后那一包）：前面 100 包解出
+        // 96000 个样本，减 pre_skip 312 正好 95688。要的是"解了一大段之后才拒绝"，
+        // 不是"只解出几个样本"。
+        try testing.expect(frames >= 95_000);
+        std.debug.print("otto-lite: celt-then-multiframe frames_before_refusal={d}\n", .{frames});
     }
 
     // provider 视角：同一个错误值 → `unsupported`（谢绝），并且这次失败发生在
     // `decode` 已经往 `pcm` 里写过数据之后——半截 PCM 由 `errdefer` 释放，
     // `testing.allocator` 是泄漏探针（有残留这条测试直接红）。
     try testing.expectError(error.Unsupported, native_audio.decode(testing.allocator, path));
+    try testing.expectEqual(preview.Reason.unsupported, decode_mod.reason(error.Unsupported));
     var sample = sampleFor(path, ".opus");
     const outcome = try native_audio.provider.open(testing.allocator, .{ .sample = &sample, .max_px = 128 });
     defer outcome.deinit(testing.allocator);

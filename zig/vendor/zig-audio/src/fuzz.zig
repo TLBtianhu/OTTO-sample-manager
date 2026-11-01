@@ -354,12 +354,18 @@ fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(frame_e);
     const frame_f = try allocator.alloc(u8, 44);
     defer allocator.free(frame_f);
+    const frame_g = try allocator.alloc(u8, 52);
+    defer allocator.free(frame_g);
+    const frame_h = try allocator.alloc(u8, 58);
+    defer allocator.free(frame_h);
     for (frame_a, 0..) |*byte, i| byte.* = @truncate(i * 11 + 3);
     for (frame_b, 0..) |*byte, i| byte.* = @truncate(i * 5 + 1);
     for (frame_c, 0..) |*byte, i| byte.* = @truncate(i * 17 + 9);
     for (frame_d, 0..) |*byte, i| byte.* = @truncate(i * 23 + 5);
     for (frame_e, 0..) |*byte, i| byte.* = @truncate(i * 29 + 7);
     for (frame_f, 0..) |*byte, i| byte.* = @truncate(i * 13 + 2);
+    for (frame_g, 0..) |*byte, i| byte.* = @truncate(i * 19 + 4);
+    for (frame_h, 0..) |*byte, i| byte.* = @truncate(i * 31 + 6);
 
     const plain = try opus_build.packet(allocator, .{ .stereo = true, .frames = &.{frame_a} });
     defer allocator.free(plain);
@@ -386,10 +392,24 @@ fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
         .frames = &.{frame_f},
     });
     defer allocator.free(hybrid10);
+    // Stereo packets: the TOC 's' bit is what sends the speech layer through
+    // the mid/side unmixer and the two per-channel resamplers.
+    const silk_stereo = try opus_build.packet(allocator, .{
+        .config = 9, // SILK-only WB, 20 ms
+        .stereo = true,
+        .frames = &.{frame_g},
+    });
+    defer allocator.free(silk_stereo);
+    const hybrid_stereo = try opus_build.packet(allocator, .{
+        .config = 15, // Hybrid FB, 20 ms
+        .stereo = true,
+        .frames = &.{frame_h},
+    });
+    defer allocator.free(hybrid_stereo);
 
     return opus_build.file(allocator, .{
         .comments = &.{"ENCODER=zig-audio-fuzz"},
-        .packets = &.{ plain, padded, silk40, hybrid20, hybrid10 },
+        .packets = &.{ plain, padded, silk40, hybrid20, hybrid10, silk_stereo, hybrid_stereo },
     });
 }
 

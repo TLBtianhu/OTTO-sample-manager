@@ -37,8 +37,8 @@ test "supports：.flac/.wav/.mp3/.aiff/.aif/.ogg/.oga/.opus 归 native-audio 管
         try testing.expect(native_audio.supports(&sampleWith(ext)));
     }
     // `.aifc` 明确不在声明里：压缩 AIFC 在库中是 Unsupported，不假装能接。
-    // `.opus` 反过来是**声明了**：CELT / SILK / Hybrid 三种包都能解，真正不支持的
-    // （多帧包、立体声 SILK·Hybrid）由库在读到那个包时才拒绝（provider 谢绝为
+    // `.opus` 反过来是**声明了**：CELT / SILK / Hybrid 三种包都能解（v0.16 起含立体声），
+    // 真正不支持的（多帧包、TOC code 3）由库在读到那个包时才拒绝（provider 谢绝为
     // none.unsupported，不是 failed）。声明的粒度是扩展名，能不能解由 `open` +
     // `read` 回答——这正是 `supports` 只做廉价声明的原因。
     for ([_][]const u8{ ".aifc", ".mp4", ".flacx", "" }) |ext| {
