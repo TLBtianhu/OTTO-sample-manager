@@ -1,5 +1,5 @@
-//! 纯 Zig 音频 provider：**WAV / FLAC / MP3 / AIFF / Ogg Vorbis / Ogg Opus（CELT 层）**
-//! （vendor 的 zig-audio v0.13）。
+//! 纯 Zig 音频 provider：**WAV / FLAC / MP3 / AIFF / Ogg Vorbis / Ogg Opus（CELT /
+//! SILK / Hybrid 三层）**（vendor 的 zig-audio v0.15）。
 //!
 //! 它是"库能解什么，我就声明什么"的那一项：`supports` 只按扩展名做廉价声明，
 //! 真正的容器识别由 `zig_audio.open` 按**内容**完成。解出来的 PCM 统一交给
@@ -19,25 +19,25 @@
 //! `Unsupported` → 本 provider 谢绝为 `none.unsupported`，不是 `failed`。
 //!
 //! `.ogg` / `.oga` 也归这里，但**只认内容**：Ogg 是容器，里面可能是 Vorbis，也可能
-//! 是 Opus。Vorbis 与 Opus 的 CELT 层（configuration 16–31，音乐）都能解；Opus 的
-//! **SILK / Hybrid 包**（configuration 0–15，语音）库还没有实现，明确返回
-//! `error.Unsupported` → 本 provider 按同一条规则谢绝为 `none.unsupported`（文件没坏，
-//! 只是不是我们的编码），让后面的 provider 继续试，**不是 `failed`**。
+//! 是 Opus。v0.15 起 Opus 的三种包都解：CELT（configuration 16–31，音乐）、SILK
+//! （0–11，语音）与 Hybrid（12–15，两层叠加）。判断只来自内容，不来自扩展名。
 //!
-//! `.opus` 与它们**平等**：只是又一个扩展名。它不享受特权，也不因为"Opus 只做了一半"
-//! 就整体不声明——能解的播、不能解的照着四态表谢绝，这正是 `supports` + 谢绝语义该干
-//! 的事（见下面「读到一半」）。
+//! `.opus` 与它们**平等**：只是又一个扩展名。它不享受特权，也不因为"Opus 还有几类包
+//! 解不了"就整体不声明——能解的播、不能解的照着四态表谢绝，这正是 `supports` + 谢绝
+//! 语义该干的事（见下面「读到一半」）。
 //!
 //! ## 「读到一半才 Unsupported」是这套语义的关键一条
 //!
 //! Opus 的包模式是**逐包**声明的：一个文件可以前几个包是 CELT、后面混进 SILK/Hybrid
-//! （`opus-voice.opus` 里就有 config 9 的 SILK 与 config 15 的 Hybrid）。所以
-//! `zig_audio.open` 对一个语音 Opus 流**会成功**——它只知道"这是 Ogg Opus"，不知道
-//! 每个包解不解得动；真正的拒绝发生在 `Decoder.read` 的第 N 次调用。`audio/decode.zig`
-//! 的读取循环是 `try`：中途的 `Unsupported` 与开流时的 `Unsupported` 是**同一个错误
-//! 值**，走**同一张** `reason` 映射表（→ `unsupported`），`errdefer` 当场释放已经解出
-//! 来的半截 PCM，会话根本没开始装配。于是"能播的播、不能播的诚实谢绝"不需要第二套
-//! 分支，只需要这条路径不被吞掉（`native_audio_opus_test.zig` 钉住了它）。
+//! （`opus-voice.opus` 里就混着 config 9 的 SILK、config 15 的 Hybrid 与少量 CELT）。
+//! 所以 `zig_audio.open` 对一个 Opus 流**总是成功**——它只知道"这是 Ogg Opus"，不知道
+//! 每个包解不解得动；真正的拒绝发生在 `Decoder.read` 的第 N 次调用。v0.15 之后还会被
+//! 拒绝的是**多帧包**（TOC code 3、一包多于两帧）与**立体声 SILK / Hybrid**（这两层
+//! 只做单声道）。`audio/decode.zig` 的读取循环是 `try`：中途的 `Unsupported` 与开流时
+//! 的 `Unsupported` 是**同一个错误值**，走**同一张** `reason` 映射表（→ `unsupported`），
+//! `errdefer` 当场释放已经解出来的半截 PCM，会话根本没开始装配。于是"能播的播、不能播
+//! 的诚实谢绝"不需要第二套分支，只需要这条路径不被吞掉
+//! （`native_audio_opus_decline_test.zig` 钉住了它）。
 //!
 //! ## 输出与内存
 //!
@@ -96,7 +96,7 @@ pub const provider: preview.Provider = .{
 /// 需要额外的压缩类型字段，库明确返回 `Unsupported`；不声明就不会假装能接。
 /// `.ogg` / `.oga` 声明的是**容器**，编码由库按首包判断；`.opus` 声明的是**编码**，
 /// 由库按 OpusHead 判断。两者能不能解，最终由库按**每个包**的模式回答：
-/// SILK / Hybrid / 多帧包一律 `Unsupported` → 谢绝。
+/// 多帧包与立体声 SILK / Hybrid 仍 `Unsupported` → 谢绝。
 const extensions = [_][]const u8{ ".wav", ".flac", ".mp3", ".aiff", ".aif", ".ogg", ".oga", ".opus" };
 
 /// 整段 PCM 上限（与 `audio/decode.zig` / MF 同一常量）。
@@ -117,7 +117,7 @@ pub fn supportsExtension(ext: []const u8) bool {
 /// `.wav` / `.flac` / `.mp3` / `.aiff` / `.aif` / `.ogg` / `.oga` / `.opus` 归本 provider。
 /// 大小写不敏感；不碰文件、不碰注册表。真正的"能不能解"由 `open` 里的
 /// `zig_audio.open` **和随后的每一次 `read`** 回答——`.ogg` / `.opus` 里装的是
-/// SILK / Hybrid Opus 时，它的回答是"谢绝"（见文件头「读到一半」）。
+/// 多帧包或立体声 SILK / Hybrid 时，它的回答是"谢绝"（见文件头「读到一半」）。
 pub fn supports(sample: *const core.model.Sample) bool {
     return supportsExtension(sample.file_ext);
 }
@@ -172,8 +172,8 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
 
 /// 解码错误 → 谢绝原因。映射表在 `audio/decode.zig`，这里只做日志。
 ///
-/// **`Unsupported` 既可能来自 `open`，也可能来自读到一半的 `read`**（Opus 的
-/// SILK / Hybrid / 多帧包，见文件头）。两者是同一个错误值，所以这条谢绝路径不需要
+/// **`Unsupported` 既可能来自 `open`，也可能来自读到一半的 `read`**（Opus 的多帧包 /
+/// 立体声 SILK·Hybrid，见文件头）。两者是同一个错误值，所以这条谢绝路径不需要
 /// 第二个分支：`reason(err)` 给出 `unsupported`，`decode` 已经用 `errdefer` 释放了
 /// 半截 PCM，`decoded` 根本不存在，会话也没装配过——没有"半个 PCM / 半启动的会话"
 /// 要收拾。

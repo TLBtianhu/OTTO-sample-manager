@@ -1,4 +1,4 @@
-﻿# One row per sample: which preview provider answers, in two rounds (default and
+# One row per sample: which preview provider answers, in two rounds (default and
 # `--no-shell-preview`), plus the exit code. This is the gate for the
 # "every format is self-sufficient" registry (zig/app/src/providers/root.zig).
 #
@@ -46,7 +46,9 @@
 #   tone_440.wav       wasapi-pcm    wasapi-pcm
 #   tone_660.flac      native-audio  native-audio   (vendored zig-audio, pure Zig)
 #   vorbis-44k.ogg     native-audio  native-audio   (vendored zig-audio v0.10 Ogg Vorbis)
-#   opus-music.opus    native-audio  native-audio   (vendored zig-audio v0.13, Opus CELT layer)
+#   opus-music.opus    native-audio  native-audio   (vendored zig-audio v0.15, Opus CELT)
+#   opus-hybrid.opus   native-audio  native-audio   (v0.15: SILK + Hybrid two layers)
+#   opus-silk.opus     native-audio  native-audio   (v0.15: SILK speech layer)
 #   legacy-adpcm.wav   wasapi-pcm    wasapi-pcm     (MS ADPCM WAV, zig-audio v0.8)
 #   legacy.aiff        native-audio  native-audio   (AIFF PCM16, zig-audio v0.8)
 #   mystery.xyz        none          none
@@ -58,10 +60,11 @@
 # a FAIL by design -- the point of the gate is that audio preview works on this
 # machine, not that it would work on one where it cannot. `.ogg` / `.opus` are
 # declared by extension, so a stream whose packets the decoder cannot handle
-# (Opus SILK / Hybrid) is claimed and then *declined* (`unsupported`, not
-# `failed`) -- that half of the same codec is covered by the app tests
-# (`providers/native_audio_opus_test.zig`), not by this table, because a `none`
-# row here would claim the opposite of what the extension promises.
+# (multi-frame packets, stereo SILK / Hybrid -- the layers v0.15 only does in
+# mono) is claimed and then *declined* (`unsupported`, not `failed`) -- that
+# corner of the same codec is covered by the app tests
+# (`providers/native_audio_opus_decline_test.zig`), not by this table, because a
+# `none` row here would claim the opposite of what the extension promises.
 #
 # open_ms is printed for every round but has **no threshold**: a cold decoder or a
 # busy audio endpoint legitimately varies by hundreds of ms (viper.mp3 through
@@ -123,16 +126,17 @@ $script:cases = @(
   # Ogg Vorbis: zig-audio v0.10 decodes it in pure Zig; the registry claims
   # `.ogg` in native-audio and the duration comes from the last page's granule.
   [pscustomobject]@{ Name = 'vorbis-44k.ogg'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
-  # Ogg Opus, CELT layer (config 31, 128k, 2 s): zig-audio v0.13 decodes it, so
-  # `.opus` is claimed and answered by native-audio like any other extension.
-  # This row is also the guard for the *decline* half of the same codec: the
-  # voice sample (`opus-voice.opus`, SILK + hybrid) must answer none/unsupported
-  # instead of failed -- covered by the app tests
-  # (`providers/native_audio_opus_test.zig`), because a `none` row here would
-  # make the table claim "we play every .opus".
+  # Ogg Opus: zig-audio v0.15 decodes all three packet modes. `opus-music` is
+  # pure CELT (config 31, 128k, 2 s); `opus-hybrid` mixes SILK (config 9),
+  # hybrid (config 15) and a little CELT; `opus-silk` is speech only. All three
+  # are claimed and answered by native-audio like any other extension.
+  # The *decline* corner of the same codec (multi-frame packets, stereo SILK /
+  # Hybrid) is covered by the app tests
+  # (`providers/native_audio_opus_decline_test.zig`), because a `none` row here
+  # would make the table claim "we play every .opus".
   [pscustomobject]@{ Name = 'opus-music.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
-[pscustomobject]@{ Name = 'opus-hybrid.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
-[pscustomobject]@{ Name = 'opus-silk.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' }
+  [pscustomobject]@{ Name = 'opus-hybrid.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
+  [pscustomobject]@{ Name = 'opus-silk.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' }
   # Legacy formats decoded by zig-audio v0.8: MS ADPCM WAV stays with the WAV
   # provider; AIFF is claimed by native-audio.
   [pscustomobject]@{ Name = 'legacy-adpcm.wav'; Default = 'wasapi-pcm'; NoShell = 'wasapi-pcm'; Reason = '' },

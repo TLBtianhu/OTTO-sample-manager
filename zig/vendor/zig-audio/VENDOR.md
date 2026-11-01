@@ -7,8 +7,8 @@
 | --- | --- |
 | 上游 | https://github.com/TLBtianhu/zig-audio |
 | 分支 | `main`（上游只有一个真源，没有 OTTO 专用分支） |
-| 本副本对应提交 | `a85c9c7`（`v0.15: Opus decodes, the music half of it`，版本 **v0.15**） |
-| 本副本的用途 | WAV 全变体（PCM / float / µ-law / A-law / IMA ADPCM / MS ADPCM）+ FLAC + MP3 + AIFF + Ogg Vorbis + **Ogg Opus 的 CELT 层** 解码（`providers/audio.zig` 与 `providers/native_audio.zig` 共用 `audio/decode.zig`） |
+| 本副本对应提交 | `a85c9c7`（`v0.15: Opus runs both layers at once`，版本 **v0.15**） |
+| 本副本的用途 | WAV 全变体（PCM / float / µ-law / A-law / IMA ADPCM / MS ADPCM）+ FLAC + MP3 + AIFF + Ogg Vorbis + **Ogg Opus 的 CELT / SILK / Hybrid 三层** 解码（`providers/audio.zig` 与 `providers/native_audio.zig` 共用 `audio/decode.zig`） |
 
 ## 这个副本带了哪些补丁
 
@@ -41,18 +41,19 @@ v0.15 同步时的实测：**82 个文件，missing=0 / extra=0 / mismatch=0**�
 
 ## v0.15 的能力边界（OTTO 依赖这里）
 
-Opus 不是一个编解码器，是 SILK（语音）+ CELT（其余）+ 逐包切换三层。v0.15 只做了
-**CELT（configuration 16–31）**：
+Opus 不是一个编解码器，是 SILK（语音）+ CELT（其余）+ 逐包切换三层。v0.15 **三层都做了**：
 
 * `zig_audio.open` 对一个 `.opus` 文件**会成功**，`info.format = .ogg_opus`，
   `info.total_frames = null`（长度在尾页 granule 里，读到 EOF 才有值）；
-* `Decoder.read` 在遇到 **SILK / Hybrid 包（configuration 0–15）** 或**多于两帧的包**时
-  返回 `error.Unsupported`——**这个错误可能发生在第 N 次 `read`，不是 `open`**；
+* `Decoder.read` 能解 **CELT（configuration 16–31）**、**SILK（0–11）** 与
+  **Hybrid（12–15，两层叠加）**。仍然返回 `error.Unsupported` 的只剩两种：
+  **多于两帧的包**（TOC code 3）与**立体声 SILK / Hybrid**（这两层只做单声道，
+  见 `src/opus.zig` 的 `channels != 1`）——**这个错误可能发生在第 N 次 `read`，不是 `open`**；
 * 因此 OTTO 侧不能把"Open 成功"当成"能播"。`audio/decode.zig` 的读取循环是 `try`，
   中途的 `Unsupported` 与开流时的 `Unsupported` 走**同一张** `reason` 映射表
   （→ `preview.Reason.unsupported`，即**谢绝**，不是 `failed`），`errdefer` 释放已经解出来
   的半截 PCM。见 `zig/app/src/providers/native_audio.zig` 与
-  `zig/app/src/providers/native_audio_opus_test.zig`。
+  `zig/app/src/providers/native_audio_opus_decline_test.zig`。
 
 ## 怎么升级
 

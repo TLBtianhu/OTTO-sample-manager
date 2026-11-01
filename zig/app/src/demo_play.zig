@@ -22,9 +22,9 @@
 //!   * `.flac` / `.mp3` / `.aiff` / `.aif` / `.ogg` / `.oga` / `.opus` →
 //!     `providers/native_audio.zig`（vendor 的 zig-audio，纯 Zig 解码；`.wav` 也在该
 //!     provider 的声明里，但这里先问 wasapi-pcm，与预览表顺序一致）；
-//!     `.opus` / `.ogg` 装的是 SILK / Hybrid Opus 时解码给出 `Unsupported`，本自检按
-//!     失败退出——它确实不是可播的编码，这里不是预览注册表，没有"谢绝后继续问"的
-//!     下一步（预览侧的四态由 `--preview` 验收）；
+//!     `.opus` / `.ogg` 装的是多帧包或立体声 SILK / Hybrid 时解码给出 `Unsupported`，
+//!     本自检按失败退出——它确实不是可播的编码，这里不是预览注册表，没有"谢绝后继续
+//!     问"的下一步（预览侧的四态由 `--preview` 验收）；
 //!   * `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media Foundation，
 //!     16-bit PCM）；
 //! 三条路都落到 `audio/session.zig` 的 `build`，所以播放/seek/停止的断言是同一套
@@ -170,8 +170,8 @@ fn runNative(
     else if (std.ascii.eqlIgnoreCase(ext, ".ogg") or std.ascii.eqlIgnoreCase(ext, ".oga"))
         "vorbis"
     else if (std.ascii.eqlIgnoreCase(ext, ".opus"))
-        // `.opus` 能走到这里就说明解的是 CELT 层（SILK 会在 decode 里就谢绝）；
-        // 报告里写 "opus" 而不是默认的 "flac"，否则一行输出会把编码说错。
+        // 报告里写 "opus" 而不是默认的 "flac"，否则一行输出会把编码说错
+        // （CELT / SILK / Hybrid 都可能，报告只关心容器）。
         "opus"
     else if (std.ascii.eqlIgnoreCase(ext, ".wav"))
         "wav"

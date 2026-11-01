@@ -5,8 +5,8 @@
 //! 和 `duration_trust_ogg_test.zig` 一对：那一份守 Vorbis，这一份守 Opus。分开放是
 //! 为了守住单文件行数，也因为两者的验收对象不同——`.opus` 的**时长**只走容器
 //! （OpusHead + 尾页 granule），与**能不能解**是两条路：这条测试只测"列表行有数字"，
-//! 解码侧的验收（CELT 能播、SILK 读到一半才拒绝）在
-//! `providers/native_audio_opus_test.zig`。
+//! 解码侧的验收（CELT / SILK / Hybrid 都能播，多帧包与立体声 SILK·Hybrid 仍然谢绝）
+//! 在 `providers/native_audio_opus_test.zig` 与 `native_audio_opus_decline_test.zig`。
 //!
 //! 走的是 `row_ui.drawRow` 完全相同的一步（`display` → `format`），不建窗口、不读
 //! 库文件。

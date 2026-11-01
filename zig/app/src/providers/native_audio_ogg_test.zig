@@ -4,9 +4,10 @@
 //!   * 与 `ffmpeg -f s16le` 逐样本对比（`max_diff ≤ 1`、样本数一致）；
 //!   * `Info.total_frames` 的 Vorbis 语义：开流时 null、读到 EOF 才由库填上
 //!     （`audio/decode.zig` 的"没有声明长度就估算"分支就是靠这个成立的）；
-//!   * `.ogg` 的声明是**容器**：同一个容器里装 CELT Opus 现在能解（v0.13 起），
-//!     装 SILK Opus 仍然 `error.Unsupported` → provider 谢绝 `none.unsupported`
-//!     （不是 `failed`），注册表继续问下一个。
+//!   * `.ogg` 的声明是**容器**：同一个容器里装 Vorbis、装 CELT Opus、装 SILK/Hybrid
+//!     语音 Opus，都由库按内容解（v0.15 起三种包都能播）；判断只来自内容，不来自
+//!     扩展名。真正不支持的输入（多帧包 / 立体声 SILK）的**谢绝**语义在
+//!     `native_audio_opus_decline_test.zig` 钉住。
 //!
 //! 从 provider 文件里拆出来是为了守住单文件行数（provider 正文只留解码路径）；
 //! FLAC/AIFF 侧在 `native_audio_test.zig`，MP3 侧在 `native_audio_mp3_test.zig`，
@@ -30,8 +31,8 @@ const ffmpeg = "C:\\Users\\30680\\.zcode\\workspace\\default\\music-to-midi\\too
 const vorbis_path = sample_dir ++ "\\vorbis-44k.ogg";
 /// 纯 CELT（config 31）：v0.13 起能解，容器声明照旧由首包回答。
 const opus_celt_path = vector_dir ++ "\\opus-48k-96.opus";
-/// 24k voip（SILK + hybrid）：`open` 成功，`read` 才拒绝。这份文件把"容器认下、
-/// 编码谢绝"这条语义固定在一个 `.ogg` 文件名上——判断只来自内容，不来自扩展名。
+/// 24k voip（config 9 SILK + config 15 的 Hybrid）：v0.15 起两层都能解。这份文件
+/// 把"容器与编码分开判断"固定在一个 `.ogg` 文件名上——判断只来自内容，不来自扩展名。
 const opus_voice_path = vector_dir ++ "\\opus-48k-24-voip.opus";
 
 fn hasFile(path: []const u8) bool {
@@ -169,7 +170,7 @@ test ".ogg 里装 CELT Opus：容器声明按内容生效，解出 144000 帧（
     try testing.expectEqual(@as(usize, 144_000 * 2 * 2), decoded.pcm.len);
 }
 
-test ".ogg 里装 SILK Opus：库给 Unsupported，provider 谢绝 none.unsupported（不是 failed）" {
+test ".ogg 里装语音 Opus（SILK + Hybrid）：容器说了算，解出 2000ms / 1 声道" {
     if (!hasFile(opus_voice_path)) return error.SkipZigTest;
 
     var tmp = testing.tmpDir(.{});
@@ -186,20 +187,18 @@ test ".ogg 里装 SILK Opus：库给 Unsupported，provider 谢绝 none.unsuppor
     const path = try tempPath(&tmp, "voice-opus.ogg");
     defer testing.allocator.free(path);
 
-    // 库这一层：明确说"这不是我能解的编码"（SILK 包，open 成功、read 才拒绝）。
-    try testing.expectError(error.Unsupported, native_audio.decode(testing.allocator, path));
-
-    // provider 这一层：谢绝（unsupported），不是 failed——文件没坏。
-    var sample = sampleFor(path, ".ogg");
-    const outcome = try native_audio.provider.open(testing.allocator, .{ .sample = &sample, .max_px = 128 });
-    defer outcome.deinit(testing.allocator);
-    switch (outcome) {
-        .none => |reason| try testing.expectEqual(preview.Reason.unsupported, reason),
-        else => return error.ExpectedNone,
-    }
+    // v0.15 起 SILK 与 Hybrid 两层都解：`.ogg` 里装语音 Opus 不再是"谢绝"而是"能播"。
+    var decoded = try native_audio.decode(testing.allocator, path);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 48_000), decoded.sample_rate);
+    try testing.expectEqual(@as(u16, 1), decoded.channels);
+    try testing.expectEqual(@as(u64, 96_000), decoded.frames);
+    try testing.expectEqual(@as(u64, 2000), decoded.duration_ms);
+    // 96000 帧 × 1 声道 × 2 字节。
+    try testing.expectEqual(@as(usize, 192_000), decoded.pcm.len);
 }
 
-test "注册表：.ogg 里装 SILK Opus → native-audio 谢绝后继续问，最终 none/unsupported" {
+test "注册表：.ogg 里装语音 Opus → native-audio 交出 audio 会话（2000ms / 1 声道）" {
     if (!hasFile(opus_voice_path)) return error.SkipZigTest;
 
     var tmp = testing.tmpDir(.{});
@@ -216,16 +215,25 @@ test "注册表：.ogg 里装 SILK Opus → native-audio 谢绝后继续问，�
     defer testing.allocator.free(path);
 
     var sample = sampleFor(path, ".ogg");
-    // 去掉 Shell 的表：最终答案只能来自我们自己的 provider，链路可复现。
+    // 去掉 Shell 的表：答案只能来自我们自己的 provider，链路可复现。
     const answered = try providers.registryFor(true).openAnswered(testing.allocator, .{
         .sample = &sample,
         .max_px = 128,
     });
     defer answered.outcome.deinit(testing.allocator);
 
-    // 谢绝者仍是 native-audio（它声明了 .ogg），但答案不是终止性的 failed。
+    // 认领者仍是 native-audio（它声明了 .ogg），答案从"谢绝"变成了"能播"。
     try testing.expect(answered.provider == &providers.native_audio.provider);
-    try testing.expectEqual(preview.Reason.unsupported, answered.outcome.none);
+    switch (answered.outcome) {
+        .audio => |session| {
+            try testing.expectEqual(@as(u64, 2000), session.duration_ms);
+            try testing.expectEqual(@as(u16, 1), session.channels);
+            try testing.expectEqual(@as(usize, 192_000), session.pcm.len);
+        },
+        // 没有音频端点时 session.build 会失败；路由已由上面的断言钉住。
+        .none => return error.SkipZigTest,
+        else => return error.ExpectedAudio,
+    }
 }
 
 test "真 Ogg Vorbis：注册表出 audio 会话（3000ms / 2 声道 / 529200 字节）" {

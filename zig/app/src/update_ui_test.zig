@@ -122,6 +122,8 @@ test "poll：检查线程的结果落地成 available + 可下载 URL" {
 
 test "poll：下载线程成功 → verified；失败 → failed 且文案是「签名不匹配」" {
     var update = testUpdate(.downloading);
+    // `bytes` 只是让报告像真的（1629043 = 0.3.0 安装包的实际大小）；本用例断言的是
+    // 状态机与文案，**不断言这个数字，也不读 `zig\dist`**，所以 dist 在不在都不影响。
     var report = update_ui.DownloadReport{ .ok = true, .bytes = 1629043 };
     const version = try semver.parse("0.3.0");
     report.version_len = (try version.formatInto(&report.version)).len;
