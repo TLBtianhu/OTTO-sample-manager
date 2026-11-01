@@ -1,4 +1,4 @@
-# 目录浏览验收闸门：原 Stage 0/分页 18 行 + Stage 1 导航 9 行（共 27 行数字）。
+# 目录浏览验收闸门：原 Stage 0/分页 18 行 + Stage 1 导航 9 行 + 地址栏 11 行（共 38 行数字）。
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1 -Recreate -SkipScroll
@@ -747,6 +747,7 @@ function Invoke-MemoryRefusal {
 # ---------------------------------------------------------------------------
 
 . (Join-Path $PSScriptRoot 'browse_nav_accept.ps1')
+. (Join-Path $PSScriptRoot 'browse_address_accept.ps1')
 
 Write-Output 'OTTO Lite 目录浏览 Stage 0 + Stage 1 验收'
 Write-Output ('exe: {0}' -f $Exe)
@@ -780,6 +781,7 @@ Invoke-RescanKeep
 Invoke-VanishReturn
 Invoke-MemoryRefusal
 Invoke-NavAcceptance
+Invoke-AddressAcceptance
 
 # 清理 ACL 残留（deny 目录已删过；deny-root 恢复在上面做了）。
 $null = $previewOk

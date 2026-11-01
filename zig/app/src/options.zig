@@ -70,6 +70,10 @@ pub const Options = struct {
     /// Stage 1 导航探针；`--steps=enter:sub,back,up,sort:size`。
     browse_nav_probe: ?[]const u8 = null,
     browse_nav_watch_probe: ?[]const u8 = null,
+    /// `--browse-address-probe <dir>`：地址栏 / 面包屑 / 盘符无头探针。
+    browse_address_probe: ?[]const u8 = null,
+    /// `--set-path=<路径>`：直接执行一次“编辑地址栏 + Enter”。
+    browse_set_path: ?[]const u8 = null,
     browse_steps: []const u8 = "",
     /// `--browse-select=<文件名>`：探针用，先选中这一行（模拟用户点它）。
     browse_select: ?[]const u8 = null,
@@ -183,7 +187,8 @@ pub const Options = struct {
             self.browse_probe != null or
             self.browse_watch_probe != null or
             self.browse_nav_probe != null or
-            self.browse_nav_watch_probe != null;
+            self.browse_nav_watch_probe != null or
+            self.browse_address_probe != null;
     }
 };
 
@@ -506,6 +511,16 @@ test "浏览：--browse / 两个探针 / 探针参数各自两种写法，都不
     // 观察窗口为 0/负数没有意义：解析层直接拒，不让探针跑一个空窗口。
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--watch-seconds=0" }));
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--watch-seconds=abc" }));
+}
+
+test "地址栏探针：两种根目录写法、set-path 与无头判定" {
+    const spaced = try parse(&[_][]const u8{ "otto-lite", "--browse-address-probe", "D:\\samples", "--set-path=..\\drums" });
+    try testing.expectEqualStrings("D:\\samples", spaced.browse_address_probe.?);
+    try testing.expectEqualStrings("..\\drums", spaced.browse_set_path.?);
+    try testing.expect(spaced.isHeadlessCommand());
+    const joined = try parse(&[_][]const u8{ "otto-lite", "--browse-address-probe=C:\\samples" });
+    try testing.expectEqualStrings("C:\\samples", joined.browse_address_probe.?);
+    try testing.expectError(error.MissingValue, parse(&[_][]const u8{ "otto-lite", "--browse-address-probe" }));
 }
 
 test "分页/重扫/消失参数：默认值与两种写法；越界的页大小被拒" {

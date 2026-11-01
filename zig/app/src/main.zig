@@ -29,6 +29,8 @@ const app_boot = @import("app_boot.zig");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const browse_mod = @import("browse.zig");
+const browse_address = @import("browse_address.zig");
+const browse_drives = @import("browse_drives.zig");
 const browse_ui = @import("browse_ui.zig");
 const browse_action = @import("browse_action.zig");
 const commands = @import("commands.zig");
@@ -66,6 +68,9 @@ pub const State = struct {
     /// 浏览模式（`otto-lite <目录>` / `--browse <目录>`）：行来自这个会话，
     /// 不看 `live`；null = 库模式。只读：不写库、不写设置、不写源目录。
     browse: ?*browse_mod.Session = null,
+    /// 浏览地址栏的临时编辑态与驱动器快照；只在浏览模式显示。
+    address: browse_address.Bar,
+    drives: browse_drives.List = .{},
     /// 当前视图；每次 poll 之后都要重新取——`Index.apply` 的扩容会让数组搬家。
     samples: []const core.model.Sample,
     /// 行内时长的可信度 side table：MP3 的时长是不是按比特率估算的。
@@ -136,7 +141,7 @@ pub const State = struct {
         defer ui.end(c);
 
         if (s.browse) |session| {
-            const action = browse_ui.drawToolbar(c, session.info());
+            const action = browse_ui.drawToolbar(c, session.info(), &s.address, &s.drives);
             if (!busy) browse_action.handleToolbar(s, c, action);
         }
 
@@ -150,7 +155,13 @@ pub const State = struct {
         };
         if (!busy) {
             if (s.browse != null) browse_action.handleKeys(s, c);
-            const action = s.search.frame(c, s.samples, &s.selection, import_button);
+            var action: search_ui.Outcome = .{};
+            // 地址栏拥有键盘时，全局搜索/列表快捷键必须让路；这里只画搜索框，不处理 Enter/Esc。
+            if (s.browse != null and s.address.keyboardOwned()) {
+                _ = s.search.draw(c, import_button);
+            } else {
+                action = s.search.frame(c, s.samples, &s.selection, import_button);
+            }
             if (action.filter_changed) row_ui.noteSelection(s);
             if (action.activate) row_ui.activateCursor(s, c);
             if (action.toggle_play) c.changed = s.preview.togglePlay(row_ui.previewRow(s)) or c.changed;
@@ -474,6 +485,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = init.gpa,
         .live = boot.live,
         .browse = boot.browse,
+        .address = browse_address.Bar.init(if (boot.browse) |session| session.rootPath() else ""),
         .samples = if (boot.browse) |session| session.samples() else boot.live.samples(),
         .duration_trust = duration_trust.Trust.init(init.gpa, init.io),
         .thumbs = boot.thumbs,
@@ -491,6 +503,7 @@ pub fn main(init: std.process.Init) !void {
     defer state.update.deinit();
     defer state.settings.deinit();
     defer state.selection.deinit(init.gpa);
+    defer state.address.deinit();
     defer state.search.deinit();
     defer state.transport.deinit();
     defer state.duration_trust.deinit();

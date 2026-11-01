@@ -2,12 +2,14 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const browse_ui = @import("browse_ui.zig");
+const navigation = @import("browse_navigation.zig");
 const transport = @import("transport.zig");
 const State = @import("main.zig").State;
 const ui = nanoui.ui;
 
 pub fn handleKeys(s: *State, c: *ui.Context) void {
     const session = s.browse orelse return;
+    if (s.address.keyboardOwned()) return;
     if (c.shortcut(.{ .key = ui.Shortcut.left, .alt = true })) {
         session.goBack(&s.selection) catch |err| {
             logFailure("back", err);
@@ -64,6 +66,30 @@ pub fn handleToolbar(s: *State, c: *ui.Context, action: browse_ui.Action) void {
         };
         navigated = true;
     }
+    if (!navigated) {
+        if (action.address.submit) {
+            navigation.enterPath(session, s.address.text(), &s.selection) catch |err| {
+                s.address.submitted(c, session.rootPath(), err);
+                logFailure("address", err);
+                return;
+            };
+            navigated = true;
+        } else if (action.address.crumb) |index| {
+            navigation.crumb(session, index, &s.selection) catch |err| {
+                s.address.submitted(c, session.rootPath(), err);
+                logFailure("crumb", err);
+                return;
+            };
+            navigated = true;
+        } else if (action.address.drive) |letter| {
+            navigation.drive(session, letter, &s.selection) catch |err| {
+                s.address.submitted(c, session.rootPath(), err);
+                logFailure("drive", err);
+                return;
+            };
+            navigated = true;
+        }
+    }
     if (navigated) afterNavigation(s);
     if (action.copy_path) {
         transport.copyPath(c.alloc(), session.rootPath()) catch |err| {
@@ -104,6 +130,7 @@ pub fn activateCursor(s: *State, index: usize) bool {
 
 fn afterNavigation(s: *State) void {
     afterModelChange(s);
+    if (s.browse) |session| s.address.navigated(session.rootPath());
     s.preview.sync(null, .{});
 }
 

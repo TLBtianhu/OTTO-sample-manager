@@ -59,6 +59,9 @@ test {
     _ = @import("browse_page_test.zig");
     // Stage 1：目录导航 / 唯一历史 / 身份选中恢复 / 排序。
     _ = @import("browse_nav_test.zig");
+    _ = @import("browse_address_model.zig");
+    _ = @import("browse_crumbs.zig");
+    _ = @import("browse_drives.zig");
     _ = @import("browse_sort.zig");
     _ = @import("library_io.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。

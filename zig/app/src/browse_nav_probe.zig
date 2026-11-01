@@ -90,7 +90,7 @@ fn perform(session: *browse.Session, selected: *selection_mod.Selection, action:
     return error.InvalidStep;
 }
 
-fn pumpIdle(session: *browse.Session, selected: *selection_mod.Selection) !void {
+pub fn pumpIdle(session: *browse.Session, selected: *selection_mod.Selection) !void {
     const deadline = trace.now() + 120;
     while (session.info().enumerating and trace.now() < deadline) {
         _ = try session.poll(selected);

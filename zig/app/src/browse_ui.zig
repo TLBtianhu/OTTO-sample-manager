@@ -12,6 +12,8 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const browse = @import("browse.zig");
+const address_ui = @import("browse_address.zig");
+const drives_mod = @import("browse_drives.zig");
 const ui = nanoui.ui;
 
 /// 状态条高度（点）。一行小字，不抢列表的位置。
@@ -25,21 +27,35 @@ pub const Action = struct {
     forward: bool = false,
     up: bool = false,
     copy_path: bool = false,
+    address: address_ui.Action = .{},
     sort: ?browse.SortKey = null,
 };
 
 /// 地址栏与排序栏：无弹窗，按钮只发动作，Session 在 main 一侧执行。
-pub fn drawToolbar(c: *ui.Context, info: browse.Info) Action {
+pub fn drawToolbar(
+    c: *ui.Context,
+    info: browse.Info,
+    bar: *address_ui.Bar,
+    drives: *drives_mod.List,
+) Action {
     var action: Action = .{};
-    const address = ui.div(c).row().wFull().h(22).itemsCenter().px(8).gap(4);
+    const address = ui.div(c).row().wFull().h(24).itemsCenter().px(8).gap(3);
     if (navButton(c, "←", info.can_back)) action.back = true;
     if (navButton(c, "→", info.can_forward)) action.forward = true;
     if (navButton(c, "↑", true)) action.up = true;
-    const path_button = smallPressable(c);
-    ui.text(c, info.root, .{ .size = 10, .color = c.theme.muted, .truncate = .ellipsis });
+    if (navButton(c, "盘▾", true)) bar.toggleDrives(drives);
+    action.address = bar.drawField(c, info.root);
+    const copy_button = smallPressable(c);
+    ui.text(c, "复制", .{ .size = 9, .color = c.theme.muted });
     ui.end(c);
-    if (path_button.clicked) action.copy_path = true;
+    if (copy_button.clicked) action.copy_path = true;
     address.end();
+    if (bar.drawDrives(c, drives)) |letter| action.address.drive = letter;
+    if (bar.failure()) |message| {
+        const error_row = ui.div(c).row().wFull().h(18).itemsCenter().px(12);
+        ui.text(c, message, .{ .size = 10, .color = c.theme.danger });
+        error_row.end();
+    }
 
     const sorts = ui.div(c).row().wFull().h(20).itemsCenter().px(12).gap(5);
     defer sorts.end();

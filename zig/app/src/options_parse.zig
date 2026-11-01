@@ -379,6 +379,18 @@ pub fn browsing(options: *options_mod.Options, args: anytype, index: *usize, arg
         options.browse_nav_watch_probe = arg["--browse-nav-watch-probe=".len..];
         return true;
     }
+    if (std.mem.eql(u8, arg, "--browse-address-probe")) {
+        options.browse_address_probe = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-address-probe=")) {
+        options.browse_address_probe = arg["--browse-address-probe=".len..];
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--set-path=")) {
+        options.browse_set_path = arg["--set-path=".len..];
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--steps")) {
         options.browse_steps = try value(args, index);
         return true;
