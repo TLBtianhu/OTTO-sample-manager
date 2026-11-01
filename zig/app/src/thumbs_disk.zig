@@ -43,6 +43,21 @@ pub const L3 = struct {
         return self.cache.prune();
     }
 
+    /// 启动裁剪 + 一行日志。**不在 `Thumbs.init` 里同步调用**：枚举 308 个条目
+    /// （每条一次 `statFile`）本机 ≈25 ms，只决定"磁盘上的旧条目什么时候删掉"，
+    /// 对首帧零贡献；改由工作线程在第一批取图之后的空闲拍调用（见 `thumbs.workerMain`）。
+    /// 裁剪期间 `stats().bytes` 还是 0，UI 下一次刷新读到真值；失败只打一行，不挡取图。
+    pub fn pruneOnStart(self: *L3) void {
+        if (self.prune()) |report| {
+            std.debug.print(
+                "otto-lite: L3 缓存 dir={s} budget={d}B 启动裁剪 scanned={d} evicted={d} bytes={d}->{d}\n",
+                .{ self.cache.root_dir, report.budget_bytes, report.scanned, report.evicted, report.bytes_before, report.bytes_after },
+            );
+        } else |err| {
+            std.debug.print("otto-lite: L3 启动裁剪失败（{s}），继续。\n", .{@errorName(err)});
+        }
+    }
+
     /// 运行时换预算（设置面板）。下一次 `prune` / 超预算的 `put` 按新值裁剪。
     pub fn setBudget(self: *L3, budget_bytes: u64) void {
         self.cache.setBudget(budget_bytes);

@@ -102,7 +102,8 @@ pub const Thumbs = struct {
     /// 指向静态数组的切片，复制很便宜，调用时也不需要再查开关。
     icon_registry: preview.Registry,
     cache: core.cache.Cache,
-    /// L3 磁盘缓存。只在工作线程上读写（启动时的 prune 例外，在起线程之前）。
+    /// L3 磁盘缓存。只在工作线程上读写——包括启动裁剪（那条线程第一次空闲时做，
+    /// 见 `workerMain`）；`init` 只建目录、不枚举条目。
     disk: ?l3.L3 = null,
 
     lock: SpinLock = .{},
@@ -179,23 +180,14 @@ pub const Thumbs = struct {
             };
         }
 
-        // L3 磁盘缓存是**可选加速层**：目录建不出来、prune 失败都只打一行日志，
-        // 不让应用起不来；调用方传 null 时本次就不用 L3。
+        // L3 磁盘缓存是**可选加速层**：目录建不出来只打一行日志，不让应用起不来；
+        // 调用方传 null 时本次就不用 L3。**启动裁剪不在这里**（它要枚举全部条目、
+        // 每条一次 statFile，本机 ≈25 ms，对首帧零贡献）：见 `workerMain`。
         if (options.disk_cache_dir) |dir| {
             self.disk = l3.L3.open(self.allocator, self.io, dir, options.disk_cache_budget) catch |err| blk: {
                 std.debug.print("otto-lite: L3 缓存不可用（{s}），本次只用内存缓存。\n", .{@errorName(err)});
                 break :blk null;
             };
-            if (self.disk) |*disk| {
-                if (disk.prune()) |report| {
-                    std.debug.print(
-                        "otto-lite: L3 缓存 dir={s} budget={d}B 启动裁剪 scanned={d} evicted={d} bytes={d}->{d}\n",
-                        .{ dir, options.disk_cache_budget, report.scanned, report.evicted, report.bytes_before, report.bytes_after },
-                    );
-                } else |err| {
-                    std.debug.print("otto-lite: L3 启动裁剪失败（{s}），继续。\n", .{@errorName(err)});
-                }
-            }
         }
 
         // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：工作线程只做缓存查询、
@@ -465,10 +457,18 @@ pub const Thumbs = struct {
     // -----------------------------------------------------------------------
 
     fn workerMain(self: *Thumbs) void {
+        // L3 启动裁剪放在**队列第一次空下来之后**：先服务可见取图，再清理磁盘缓存。
+        // 不放在这里的第一行（那是线程刚起时，会和首帧的首个 HWND 抢 CPU/IO：
+        // 实测把 setup.app 从 62.6 拖到 66.5），也不放在 `init`（同步 25 ms）。
+        var pruned = self.disk == null;
         while (true) {
             self.wake.waitUncancelable(self.io);
             if (self.stop.load(.acquire)) break;
             while (self.takeJob()) |job| self.fetch(job);
+            if (!pruned) {
+                pruned = true;
+                if (self.disk) |*disk| disk.pruneOnStart();
+            }
         }
     }
 
