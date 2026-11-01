@@ -123,7 +123,49 @@ function Gh { param([string[]]$ghArgs) & gh @ghArgs }   # ← 函数里的 gh �
 
 我踩过两次同类：`$args`（自动变量）与 `Gh`（遮蔽 `gh` 命令）。**规则：函数名一律 `Verb-Noun` 形式**
 （`Invoke-GhApi`），形参一律不用自动变量名。
-## 8. 升级 vendored 库之后
+
+## 8. 工作树的生命周期
+
+并行开发靠 `git worktree`：一个分支一个目录，`C:\src\otto-zig-lite` 只是**主工作树**之一。
+工作树不是免费的——它占一份完整的 checkout，而且**合并之后它就只是一份过期的副本**。
+留着它的唯一后果，是下一次有人（尤其是代理）在过期副本上跑测试、读到旧事实。
+
+规矩就四条：
+
+```
+合并完成      → 立刻 git worktree remove <path>
+分支合并后    → 删本地分支（git branch -d，已经 -d 不掉才用 -D）
+删除前        → 打印完整路径清单并核对（见下）
+绝不对"来自 git 输出的路径"做递归删除
+```
+
+**为什么第四条是死规矩。** `git worktree list` 打印的是正斜杠：
+
+```
+C:/src/otto-zig-lite   d02fd81 [feat/zig-lite]
+C:/src/otto-nanoui091  a4790de [feat/nanoui-091]
+```
+
+而 PowerShell 的 `Test-Path` / `Resolve-Path` / `Remove-Item -Recurse` 拿到的、以及
+`$PWD` 打印的是反斜杠。`"C:/src/x" -eq "C:\src\x"` 是 **`False`**，`Test-Path 'C:/src/x'`
+却又是 `True`——两条判断对同一个路径给出相反答案，而**判断失败的默认分支是"不存在"**。
+把这种字符串直接喂给 `Remove-Item -Recurse`，最坏的结果是把当前目录当成"不存在"而跳过、
+或者把 `C:/` 拼成相对路径删到别处。**路径一律先 `[IO.Path]::GetFullPath()` 归一化再比较**，
+比较用 `-eq` 之前先确认两边都是同一种分隔符；做不到就先打印清单，让人看一眼。
+
+**删除前必须打印什么。** 一次删除的清单里至少要能看见：
+
+- 目标路径的**完整**形式（不是相对路径）；
+- 它**不是**这三处：主工作树、当前目录（`$PWD`）、仓库根；
+- 分支是否已经合并（`git branch --merged`），以及工作树是否干净（`git status --porcelain`）。
+
+清单是给人看的，不是给脚本看的：**脚本不会替你发现"你删错了"**，它只会执行。
+
+最后一条纪律：`git worktree remove` 失败通常是因为里面还有未提交的改动或未跟踪文件。
+这时候**不要**用 `Remove-Item -Recurse -Force` 绕过——那正是上一条在防的事。
+先看 `git status`，把该留的留下、该提交的提交，再 `git worktree remove --force`。
+
+## 9. 升级 vendored 库之后
 
 `zig/vendor/` 下的库（`zig-audio`、`nanoui`）是**源码副本**，不是 submodule，也没有版本锁：
 库一升级，app 里"它必须谢绝"的那批断言就有一半在说**旧事实**。这不是 bug，是断言的

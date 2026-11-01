@@ -1,4 +1,4 @@
-# One command: run the whole OTTO Lite verification gate and print one table.
+﻿# One command: run the whole OTTO Lite verification gate and print one table.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\health.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\health.ps1 -Quick
@@ -18,11 +18,19 @@
 #      under -Quick)
 #   7. --demo / --demo-rescan / --demo-thumbs / --demo-transport
 #   8. verify-minisign.js on the newest portable.zip + setup.exe in zig\dist
+#   9. fresh-user.ps1 (**only with -Fresh**): a brand-new user's whole trip --
+#      download -> verify -> silent install into a temp dir -> first start ->
+#      import -> silent uninstall -> older version -> zig-out purity. It really
+#      installs (into %TEMP%), takes ~4 s, and writes nothing outside its temp
+#      tree. Off by default so the pre-commit gate stays fast; the row reads
+#      SKIP（-Fresh）and SKIP never fails the run.
 #
 # -Quick keeps the pre-commit subset: builds + tests + distribution audit +
 # build-output purity + provider matrix + opacity + signatures (bench / scroll /
 # mem / self-checks are skipped). Opacity is cheap now: no pixel coordinates,
 # one hidden HWND per case, so it belongs in the pre-commit gate.
+# -Fresh adds the fresh-user row to whatever else is running (so
+# `-Quick -Fresh` is the full "could a stranger use this build" gate).
 # -Release skips the debug build; release is what ships.
 #
 # A sub-script failure is recorded and the run continues; the exit code is
@@ -41,6 +49,9 @@
 param(
   [switch]$Release,
   [switch]$Quick,
+  # 可选：跑 zig\fresh-user.ps1（会真装一次软件，约 4 s，全程在 %TEMP% 里）。
+  # 默认不跑：日常闸门不该被"装一遍再卸一遍"拖慢；不跑时那一行是 SKIP，不算失败。
+  [switch]$Fresh,
   [string]$Zig = 'C:\Users\30680\zig\zig-x86_64-windows-0.17.0\zig.exe',
   [string]$Samples = 'C:\src\otto-testkit\samples'
 )
@@ -829,6 +840,68 @@ function Invoke-Signing {
 }
 
 # ---------------------------------------------------------------------------
+# 9. 全新用户（zig\fresh-user.ps1，只有 -Fresh 才跑）
+# ---------------------------------------------------------------------------
+
+function Invoke-FreshUser {
+  $item = '全新用户'
+  Write-Step $item
+
+  if (-not $Fresh) {
+    # 不传 -Fresh 就只占一行：日常闸门不该被"真装一遍"拖慢，SKIP 也不算失败。
+    Add-Row $item 'SKIP' '—' 'SKIP（-Fresh）'
+    return
+  }
+
+  $freshScript = Join-Path $script:root 'fresh-user.ps1'
+  if (-not (Test-Path -LiteralPath $freshScript)) {
+    Add-Row $item 'FAIL' '—' ('缺少 {0}' -f $freshScript)
+    return
+  }
+
+  # 它自己会装、会卸、会清临时目录；这里只负责起进程、读那一行汇总。
+  $result = Invoke-Child $freshScript @()
+  $summary = @($result.Lines | Where-Object { $_ -match '^fresh-user: (PASS|FAIL) ' } | Select-Object -Last 1)
+  $line = ''
+  if ($summary.Count -gt 0) { $line = [string]$summary[$summary.Count - 1] }
+
+  if ($line.Length -eq 0) {
+    Add-Row $item 'FAIL' '—' ('exit {0}；没有 fresh-user 汇总行；{1:N1} s' -f $result.Code, $result.Seconds)
+    Write-FailureTail $result.Lines 20
+    return
+  }
+
+  $steps = '?'
+  $checks = '?'
+  $version = '?'
+  $oldVersion = '?'
+  $skipCount = '?'
+  $m = [regex]::Match($line, 'steps=(\d+)/(\d+)')
+  if ($m.Success) { $steps = '{0}/{1}' -f $m.Groups[1].Value, $m.Groups[2].Value }
+  $m = [regex]::Match($line, 'checks=(\d+)/(\d+)')
+  if ($m.Success) { $checks = '{0}/{1}' -f $m.Groups[1].Value, $m.Groups[2].Value }
+  $m = [regex]::Match($line, 'version=([0-9.]+)')
+  if ($m.Success) { $version = $m.Groups[1].Value }
+  $m = [regex]::Match($line, 'old=([0-9.]+|none)')
+  if ($m.Success) { $oldVersion = $m.Groups[1].Value }
+  $m = [regex]::Match($line, 'skip=(\d+)')
+  if ($m.Success) { $skipCount = $m.Groups[1].Value }
+
+  $stat = '{0} 步 / {1} 断言' -f $steps, $checks
+  $note = 'installed {0}' -f $version
+  if ($oldVersion -ne 'none' -and $oldVersion -ne '?') { $note += (' + {0}' -f $oldVersion) }
+  if ($skipCount -ne '0' -and $skipCount -ne '?') { $note += ('；{0} 项 SKIP' -f $skipCount) }
+  $note += ('；{0:N1} s' -f $result.Seconds)
+
+  if ($line -match '^fresh-user: PASS ' -and $result.Code -eq 0) {
+    Add-Row $item 'PASS' $stat $note
+  } else {
+    Add-Row $item 'FAIL' $stat ('exit {0}；{1}' -f $result.Code, $note)
+    Write-FailureTail $result.Lines 25
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -840,6 +913,11 @@ if ($Quick) {
   Write-Output '模式: 完整（-Release：只构建 release）'
 } else {
   Write-Output '模式: 完整（debug + release）'
+}
+if ($Fresh) {
+  Write-Output '全新用户: 开（-Fresh：装一遍再卸一遍，全程在 %TEMP%）'
+} else {
+  Write-Output '全新用户: 关（不传 -Fresh；表里那一行是 SKIP，不计入失败）'
 }
 
 if (-not (Test-Path -LiteralPath $Zig)) {
@@ -873,6 +951,9 @@ if (-not $Quick) {
 }
 
 Invoke-Signing
+
+# 全新用户：只有 -Fresh 才真跑；不传就是 SKIP（-Fresh），不算失败。
+Invoke-FreshUser
 
 $script:clock.Stop()
 Print-Table
