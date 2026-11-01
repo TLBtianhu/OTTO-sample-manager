@@ -320,6 +320,11 @@ pub fn bench(options: *options_mod.Options, args: anytype, index: *usize, arg: [
         options.d3d = true;
         return true;
     }
+    // 只给基准窗口关 vsync（`--bench-scroll`）；其它路径没有窗口，没有影响。
+    if (std.mem.eql(u8, arg, "--no-vsync")) {
+        options.no_vsync = true;
+        return true;
+    }
     return false;
 }
 

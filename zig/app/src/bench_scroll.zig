@@ -5,8 +5,7 @@
 //! 380×700 的真 `HWND`（**屏外** `-4000,0`，`WS_EX_NOACTIVATE` + `SW_SHOWNOACTIVATE`），
 //! 这样：
 //!   * 窗口是"可见"的，所以消息循环真的会收到 `WM_PAINT`（隐藏窗口收不到）；
-//!   * 它从来不是前台窗口，用户看不到、点不到，也不进任务栏（见 `run` 里的
-//!     `GetForegroundWindow` 采样：只断言"我们不是前台"，前后值仅作诊断）；
+//!   * 它从来不是前台窗口：看不到、点不到、不进任务栏（`run` 里只断言"不是前台"）；
 //!   * `paint` 走和用户滚动时**同一条**路：`pixels.draw` 光栅化 → GDI 位图复制
 //!     或 D3D11 `Present(1,0)`；缩略图、预览条、搜索框都在真实视图里。
 //!
@@ -17,13 +16,11 @@
 //! 同拍。帧的时间戳来自 nanoui 的通用帧日志（`Surface.recordFrames`：每帧 QPC +
 //! build/layout/paint/raster/present/wait），本文件只读它，不在视图里插桩。
 //!
-//! 报表：帧间隔 p50/p95/max、有效 fps、`>16.7 ms` 丢帧比例、真正超预算的帧数
-//! （`work > 16.67 ms`）、分阶段 p50/p95、`WorkingSetSize`，以及**前台窗口
-//! 不是我们的**证据（`GetForegroundWindow` 采样；无关程序抢前台不影响结论）。
+//! 报表：帧间隔 p50/p95/max、有效 fps、`>16.7 ms` 丢帧比例、超预算帧数（`work > 16.67`）、
+//! 分阶段 p50/p95、`WorkingSetSize`，以及**前台窗口不是我们的**证据（无关程序抢前台不影响结论）。
 //!
-//! 测量边界写在 `PERF.md` §7：屏外（或主屏 1 像素边缘）窗口、DWM 可能不给离屏窗口
-//! 上 vsync、节拍器是软件的（±0.4 ms）、机器负载会改变数字。跑完用 `std.process.exit`
-//! 退出，不 join 缩略图/预览工作线程（理由同 `--bench-first-frame`）。
+//! 测量边界写在 `PERF.md` §7：屏外窗口、DWM 可能不给离屏窗口上 vsync、节拍器是
+//! 软件的（±0.4 ms）、机器负载会改变数字。跑完 `std.process.exit`，不 join 工作线程。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -155,8 +152,7 @@ const Pacer = struct {
 // ---------------------------------------------------------------------------
 
 /// `main` 的入口：窗口由基准自己建——380×700、先不 show（`run` 里用
-/// `SW_SHOWNOACTIVATE` 显示），带 `WS_EX_NOACTIVATE`。建完跑一遍，直接以
-/// 基准的退出码退出：它不 join 工作线程，也不跑 `otto-lite` 的 150 ms tick。
+/// `SW_SHOWNOACTIVATE` 显示），带 `WS_EX_NOACTIVATE`；跑完以基准的退出码退出。
 pub fn runCli(
     init: std.process.Init,
     app: *nanoui.App,
@@ -177,6 +173,9 @@ pub fn runCli(
         .x = -4000,
         .y = 0,
     });
+    const bench_surface = window.surface orelse return error.NoSurface;
+    // `--no-vsync`：只给基准窗口关掉上屏的 vsync 等待（`ctx.vsync`，每次 present 现读）。
+    if (options.no_vsync) bench_surface.ctx.vsync = false;
     const code = try run(init, app, window, thumbs, probe, .{
         .library = library,
         .frames = options.frames,
@@ -242,7 +241,7 @@ pub fn run(
         "scroll-bench: ==== real-window scroll: {s} ====\n" ++
             "scroll-bench: library={s} frames={d} notches={d} size={d:.0}x{d:.0} scale={d:.2} pixels={d}x{d}\n" ++
             "scroll-bench: window hwnd=0x{x} visible={} ex_style=0x{x} non_activating_bit={} rect=({d},{d})-({d},{d}) monitor_attached={} cloaked={d}\n" ++
-            "scroll-bench: self_check gdi={}\n",
+            "scroll-bench: self_check gdi={} vsync={s}\n",
         .{
             if (surface.no_d3d) "GDI" else "D3D11",
             options.library,
@@ -264,6 +263,7 @@ pub fn run(
             monitor != null,
             cloaked,
             surface.no_d3d,
+            if (surface.no_d3d) "n/a" else if (surface.ctx.vsync) "on" else "off",
         },
     );
     reportRefresh(refresh);

@@ -1,6 +1,18 @@
 # One command: build OTTO Lite, make a 2000-row library whose rows have real
-# images, and run the real-window scroll benchmark twice (default GDI and
-# --d3d). See zig\PERF.md section 7 for the Chinese report.
+# images, and run the real-window scroll benchmark three times:
+#
+#   gdi             default path (no swap chain, so no vsync) - the charter's
+#                   60 fps row, asserted
+#   d3d --no-vsync  GPU path with the probe's present wait off - "how fast can
+#                   we draw", asserted
+#   d3d             GPU path with vsync on - "how fast is this display", printed
+#                   only, never asserted
+#
+# Why three: since nanoui 0.9.1 the D3D path waits for the display by default
+# (ctx.vsync = true), so a d3d frame's present time is the monitor's, not ours.
+# Measuring only that line would say "we got slower" when what changed is who
+# the frame waits for. --no-vsync is a benchmark/probe switch, not a user
+# option: the desktop window still presents with vsync.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\scroll.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\scroll.ps1 -Release
@@ -58,6 +70,7 @@ if (-not (Test-Path $Samples)) { throw "samples dir not found: $Samples" }
 
 $config = if ($Release) { 'release' } elseif ($NoBuild) { 'as-built' } else { 'debug' }
 Write-Output ("== scroll-bench: samples={0} rows={1} frames={2} build={3} edge={4} ==" -f $Samples, $Rows, $Frames, $config, [bool]$Edge)
+Write-Output '== rows: gdi (no swap chain) | d3d --no-vsync (ours, asserted) | d3d vsync on (display ceiling, printed only) =='
 
 if (-not $NoBuild) {
   Write-Output ("== build ({0}) ==" -f $config)
@@ -167,15 +180,19 @@ public class ScrollFocus {
 $exe = Join-Path $appDir 'zig-out\bin\otto-lite.exe'
 if (-not (Test-Path $exe)) { throw "missing exe: $exe" }
 
+# Asserted rows must stay at/above 60 fps. The bench itself also asserts
+# fps >= 60, work p95 <= 16.67 ms, no over-budget frame and no focus steal;
+# this script refuses to exit 0 unless every asserted row passed.
 $runs = @(
-  @{ Name = 'gdi'; Arg = @() },
-  @{ Name = 'd3d'; Arg = @('--d3d') }
+  @{ Mode = 'gdi'; Label = 'gdi';             Vsync = 'n/a'; Arg = @();                     Assert = $true },
+  @{ Mode = 'd3d'; Label = 'd3d (--no-vsync)'; Vsync = 'off'; Arg = @('--d3d', '--no-vsync'); Assert = $true },
+  @{ Mode = 'd3d'; Label = 'd3d (vsync on)';   Vsync = 'on';  Arg = @('--d3d');              Assert = $false }
 )
 
 $summary = @()
 foreach ($run in $runs) {
   Write-Output ''
-  Write-Output ("== run: {0} ==" -f $run.Name)
+  Write-Output ("== run: {0}  args='{1}'  expect vsync={2}  assert={3} ==" -f $run.Label, ($run.Arg -join ' '), $run.Vsync, $run.Assert)
   $argv = @('--bench-scroll', $library, "--frames=$Frames", "--scroll-notches=$Notches") + $run.Arg
   if ($Edge) { $argv += '--bench-scroll-edge' }
   if ($NoPrefetch) { $argv += '--no-prefetch' }
@@ -200,6 +217,21 @@ foreach ($run in $runs) {
   $neverOurs = (($null -ne $ourHwnd) -and ([ScrollFocus]::SampleCount -gt 0) -and
     (-not [ScrollFocus]::SawForeground([long]$ourHwnd)))
   Write-Output ("== exit={0} foreground before=0x{1:x} after=0x{2:x} samples={3} distinct={4} seen=[{5}] our_hwnd={6} never_foreground={7} ==" -f $code, $fgBefore.ToInt64(), $fgAfter.ToInt64(), [ScrollFocus]::SampleCount, [ScrollFocus]::DistinctCount, [ScrollFocus]::SeenText(), $ourText, $neverOurs)
+
+  # What the window actually presented with (printed by the bench itself, so it
+  # is evidence the switch reached nanoui, not what this script believes).
+  $vsMatch = [regex]::Match(($output -join "`n"), 'self_check gdi=(\S+) vsync=(\S+)')
+  $vsyncSeen = if ($vsMatch.Success) { $vsMatch.Groups[2].Value } else { 'unknown' }
+  if ($vsMatch.Success -and $vsyncSeen -ne $run.Vsync) {
+    Write-Output ("WARNING: expected vsync={0}, bench reports vsync={1}" -f $run.Vsync, $vsyncSeen)
+  }
+
+  $present50 = $null; $present95 = $null
+  $p50 = [regex]::Match(($output -join "`n"), 'phases_p50 .*?present=([0-9.]+)')
+  $p95 = [regex]::Match(($output -join "`n"), 'phases_p95 .*?present=([0-9.]+)')
+  if ($p50.Success) { $present50 = [double]$p50.Groups[1].Value }
+  if ($p95.Success) { $present95 = [double]$p95.Groups[1].Value }
+
   $line = $output | Where-Object { $_ -match '^scroll-bench: summary ' } | Select-Object -Last 1
   # Prefetch acceptance: rows that became visible during the measured section and
   # how many of them ALREADY had their icon on that first frame.
@@ -217,10 +249,12 @@ foreach ($run in $runs) {
       Mode = $Matches[1]; Fps = [double]$Matches[2]; P95 = [double]$Matches[3]; Max = [double]$Matches[4]
       Drops = [int]$Matches[5]; Intervals = [int]$Matches[6]; WorkP95 = [double]$Matches[7]
       WsMiB = [double]$Matches[8]; Verdict = $Matches[9]
+      Vsync = $vsyncSeen; Present50 = $present50; Present95 = $present95
+      Assert = $run.Assert; Label = $run.Label
       PfOn = $pfOn; PfVisited = $pfVisited; PfReady = $pfReady; PfPct = $pfPct; PfEnqueued = $pfEnqueued
     }
   } else {
-    $summary += [pscustomobject]@{ Mode = $run.Name; Fps = $null; P95 = $null; Max = $null; Drops = $null; Intervals = $null; WorkP95 = $null; WsMiB = $null; Verdict = 'no-summary'; PfOn = $pfOn; PfVisited = $pfVisited; PfReady = $pfReady; PfPct = $pfPct; PfEnqueued = $pfEnqueued }
+    $summary += [pscustomobject]@{ Mode = $run.Mode; Fps = $null; P95 = $null; Max = $null; Drops = $null; Intervals = $null; WorkP95 = $null; WsMiB = $null; Verdict = 'no-summary'; Vsync = $vsyncSeen; Present50 = $present50; Present95 = $present95; Assert = $run.Assert; Label = $run.Label; PfOn = $pfOn; PfVisited = $pfVisited; PfReady = $pfReady; PfPct = $pfPct; PfEnqueued = $pfEnqueued }
     Write-Output ("run did not print a summary line (exit {0})" -f $code)
   }
 }
@@ -230,9 +264,26 @@ Write-Output '== summary: real-window scroll (60 Hz target) =='
 $summary | ForEach-Object {
   $dropPct = if ($null -eq $_.Intervals -or $_.Intervals -eq 0) { 'n/a' } else { '{0:N1}%' -f (100.0 * $_.Drops / $_.Intervals) }
   $readyText = if ($null -eq $_.PfVisited) { 'ready=n/a' } else { 'ready={0}/{1} ({2:N1}%)' -f $_.PfReady, $_.PfVisited, $_.PfPct }
-  Write-Output ("  {0,-4} fps={1,6:N2}  p95={2,5:N2} ms  max={3,6:N2} ms  drops={4}/{5} {6,6}  work_p95={7,5:N2} ms  ws={8,6:N2} MiB  prefetch={9,-5} {10}  {11}" -f $_.Mode, $_.Fps, $_.P95, $_.Max, $_.Drops, $_.Intervals, $dropPct, $_.WorkP95, $_.WsMiB, $_.PfOn, $readyText, $_.Verdict)
+  $presentText = if ($null -eq $_.Present50) { 'present=n/a' } else { 'present={0:N2}/{1:N2} ms' -f $_.Present50, $_.Present95 }
+  # The vsync-on row measures the DISPLAY, not us: it is never asserted, so it
+  # ends with a note instead of PASS/FAIL (health.ps1's d3d regex looks for the
+  # first d3d row that ends in PASS/FAIL, which is the asserted one above).
+  $verdictText = if ($_.Assert) { $_.Verdict } else { '(display ceiling, not asserted)' }
+  Write-Output ("  {0,-4} fps={1,6:N2}  vsync={2,-3}  {3}  p95={4,5:N2} ms  max={5,6:N2} ms  drops={6}/{7} {8,6}  work_p95={9,5:N2} ms  ws={10,6:N2} MiB  prefetch={11,-5} {12}  {13}" -f $_.Mode, $_.Fps, $_.Vsync, $presentText, $_.P95, $_.Max, $_.Drops, $_.Intervals, $dropPct, $_.WorkP95, $_.WsMiB, $_.PfOn, $readyText, $verdictText)
 }
 Write-Output ''
+Write-Output '== note: vsync=off = how fast we draw (asserted); vsync=on = display ceiling (printed only); gdi has no swap chain =='
 Write-Output ("== A/B: run again with -NoPrefetch to compare (rows={0} frames={1} distinct={2}) ==" -f $Rows, $Frames, [bool]$DistinctFiles)
 
+# Assertion, unchanged in substance (fps >= 60 on every asserted row) plus the
+# bench's own verdict (work p95 / over-budget / focus). No threshold is relaxed.
+$asserted = @($summary | Where-Object { $_.Assert })
+$failed = @($summary | Where-Object {
+  $_.Assert -and ($_.Verdict -ne 'PASS' -or $null -eq $_.Fps -or $_.Fps -lt 60)
+})
+if ($failed.Count -gt 0) {
+  Write-Output ("== assertion FAILED: {0} ==" -f (($failed | ForEach-Object { $_.Label }) -join ', '))
+  exit 1
+}
+Write-Output ("== assertion PASSED: {0} ==" -f (($asserted | ForEach-Object { '{0} {1:N2} fps' -f $_.Label, $_.Fps }) -join '; '))
 exit 0

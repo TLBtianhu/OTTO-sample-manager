@@ -85,3 +85,21 @@ test "--no-prefetch：默认开（false）、是开关、不吞下一个参数�
     try testing.expect(after.no_prefetch);
     try testing.expectEqualStrings("lib.json", after.library_path.?);
 }
+
+test "--no-vsync：默认关、是开关、只跟基准一起有意义、不吞下一个参数" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expect(!plain.no_vsync);
+
+    // 基准的验收写法：--d3d 与 --no-vsync 同级、顺序无关，库路径和帧数都还在。
+    const bench = try parse(&[_][]const u8{ "otto-lite", "--bench-scroll", "lib.json", "--d3d", "--no-vsync", "--frames=30" });
+    try testing.expect(bench.no_vsync);
+    try testing.expect(bench.d3d);
+    try testing.expectEqualStrings("lib.json", bench.bench_scroll.?);
+    try testing.expectEqualStrings("lib.json", bench.library_path.?);
+    try testing.expectEqual(@as(u32, 30), bench.frames);
+
+    // 位置参数之后也认，且不吃掉库路径。
+    const after = try parse(&[_][]const u8{ "otto-lite", "lib.json", "--no-vsync" });
+    try testing.expect(after.no_vsync);
+    try testing.expectEqualStrings("lib.json", after.library_path.?);
+}

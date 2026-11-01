@@ -107,6 +107,10 @@ pub const Options = struct {
     /// `--d3d`：用 D3D11 翻转交换链上屏（旧行为：有 vsync，但设备 + 驱动 DLL 要
     /// ~29 MiB 常驻）。默认走 GDI 直接上屏，见 `mem_probe.zig` 的实测与 PERF.md。
     d3d: bool = false,
+    /// `--no-vsync`：**基准/探针**的实验开关（与 `--d3d` 同级，不是日常选项）：
+    /// 只关基准窗口 `Present(1,0)` 的垂直同步等待，让报表量"我们画得快不快"而不是
+    /// "显示器多快"；桌面窗口仍按默认的 vsync 呈现（字段是 nanoui 的 `ctx.vsync`）。
+    no_vsync: bool = false,
     /// `--check-update <url>`：无窗口检查一次 feed，打印结果并退出 0/1。
     check_update: ?[]const u8 = null,
     /// `--update-download <url>`：无窗口下载 + 验签一次，打印摘要并退出 0/1。
