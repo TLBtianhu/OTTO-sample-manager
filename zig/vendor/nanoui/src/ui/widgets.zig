@@ -195,6 +195,15 @@ pub fn texture(c: *Context, style: types.Style, source: @import("gpu.zig").Textu
     _ = c.leaf(style, .{ .texture = .{ .slot = slot, .uv = uv, .opacity = opacity } }, null);
 }
 
+/// A see-through box filling its parent, its corners rounded by `radius`:
+/// what's under the frame (a native view: `nanoui.map`) shows there, and
+/// takes the touches that land on it. Returns its id.
+pub fn hole(c: *Context, name: []const u8, radius: f32) u64 {
+    const i = c.leaf(.{ .width = .fill, .height = .fill }, .{ .hole = radius }, name);
+    c.node(i).interactive = true;
+    return c.node(i).id;
+}
+
 pub fn heading(c: *Context, str: []const u8) void {
     text(c, str, .{ .size = 22, .weight = .bold });
 }
@@ -327,6 +336,8 @@ pub const SliderOptions = struct {
     min: f32 = 0,
     max: f32 = 1,
     width: types.Length = .{ .px = 200 },
+    /// What VoiceOver calls it ("Volume"); the text left of it otherwise.
+    label: []const u8 = "",
 };
 
 /// A slider over `value`; returns true while it changes it.
@@ -336,8 +347,19 @@ pub fn slider(c: *Context, value: *f32, opts: SliderOptions) bool {
     const i = c.open(.{ .direction = .row, .width = opts.width, .height = .{ .px = 22 }, .align_items = .center, .control = true }, null);
     defer c.end();
     const it = c.interact(i, .{});
-    c.addA11y(i, .slider, "Slider", c.print("{d:.2}", .{value.*}), false, true);
+    // VoiceOver reads it, and swipes step it a tenth of its range.
+    const range = opts.max - opts.min;
+    const shown = if (opts.min == 0 and opts.max == 1) c.print("{d:.0}%", .{value.* * 100}) else c.print("{d:.1}", .{value.*});
+    c.adjustable(i, .{ .label = opts.label, .value = shown });
     var changed = false;
+    if (it.a11y_step != 0) {
+        const v = std.math.clamp(value.* + @as(f32, @floatFromInt(it.a11y_step)) * range / 10, opts.min, opts.max);
+        if (v != value.*) {
+            value.* = v;
+            changed = true;
+            c.changed = true;
+        }
+    }
     if (it.pressed) if (it.rect) |r| {
         const t = std.math.clamp((c.input.mouse.x - r.x - knob / 2) / @max(1, r.w - knob), 0, 1);
         const v = opts.min + t * (opts.max - opts.min);

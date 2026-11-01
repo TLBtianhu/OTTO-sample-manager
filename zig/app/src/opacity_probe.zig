@@ -5,7 +5,7 @@
 //! （见 `settings_ui.setOpacityPercent`）。本文件只做产品路径之外的三件事：
 //! 校验参数、打印一行机器可读的 Windows 状态、退出进程。
 //!
-//! 窗口仍由 `main.zig` 用 hidden / no_activate 建出来：验收要的是真 HWND
+//! 窗口仍由 `main.zig` 用 hidden / non_activating 建出来：验收要的是真 HWND
 //! （`WS_EX_LAYERED` / `GetLayeredWindowAttributes` 是系统事实），但绝不弹窗、
 //! 不抢焦点、不进任务栏。
 

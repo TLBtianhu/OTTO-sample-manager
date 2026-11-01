@@ -69,6 +69,35 @@ pub fn Options(comptime Window: type) type {
         min_height: f64 = 150,
         resizable: bool = true,
         title_bar: TitleBar = .default,
+        /// Whether the window has a title bar and a resizable frame at all.
+        /// `false` is a borderless window: no title bar, no border and no
+        /// drag-to-resize — the application draws or moves it,
+        /// `ui.Context.window_drag` moves one. On Windows that is `WS_POPUP`
+        /// (no system shadow either); on macOS a borderless NSWindow that
+        /// still takes keys; on GTK an undecorated window.
+        ///
+        /// Independent of `title_bar`, which is about what the title bar looks
+        /// like when there is one.
+        decorations: bool = true,
+        /// Window opacity, 0 to 1. 1 is opaque and the normal path. macOS
+        /// and GTK set the window's alpha; on Windows, below 1 the window is
+        /// translucent, and that costs the GPU renderer there:
+        /// `SetLayeredWindowAttributes` has no effect on a DXGI flip-model
+        /// swap chain, so the frame is drawn by GDI while the
+        /// window is translucent and the GPU is picked up again at 1. One CPU
+        /// copy per frame while translucent is the price; see
+        /// `src/windows/surface_gpu.zig`.
+        ///
+        /// At 0 the window is invisible, which is a way to fade one out
+        /// (`setOpacity`) but not a way to hide it — use `show`/`hide`.
+        opacity: f64 = 1,
+        /// Keeps the window out of the taskbar and out of Alt-Tab
+        /// (`WS_EX_TOOLWINDOW` on Windows; the skip-taskbar and skip-pager
+        /// hints on GTK 3, which GTK 4 no longer has). The Mac lists apps,
+        /// not windows, so there the window leaves Command-` and the Window
+        /// menu. For a sidebar or a utility window that belongs to another
+        /// application.
+        skip_taskbar: bool = false,
         /// Native UI's colors, fixed; the system's light or dark when null.
         theme: ?ui.Theme = null,
         /// Where the window opens, in screen points from the primary screen's
@@ -99,16 +128,14 @@ pub fn Options(comptime Window: type) type {
         floating: bool = false,
         /// On every Space, and beside full-screen windows.
         all_spaces: bool = false,
-        /// A panel that takes clicks without making its app active.
+        /// A panel that takes clicks without making its app active. On
+        /// Windows that is `WS_EX_NOACTIVATE` and `SW_SHOWNOACTIVATE`: the
+        /// window is shown, takes clicks, and never takes the foreground,
+        /// the keyboard or a taskbar button — a probe or a heads-up panel
+        /// that must not interrupt what the user is doing.
         non_activating: bool = false,
         /// Never merged into another window's tabs.
         tabbing_disallowed: bool = true,
-        /// Shown without taking the foreground or the keyboard, and kept out
-        /// of the taskbar (Windows: `WS_EX_NOACTIVATE` and
-        /// `SW_SHOWNOACTIVATE`). A probe or a heads-up panel that must not
-        /// interrupt what the user is doing. Ignored where a platform has no
-        /// equivalent.
-        no_activate: bool = false,
         // Where a platform has none of these (Linux, Windows), they are ignored.
         content: Content,
     };

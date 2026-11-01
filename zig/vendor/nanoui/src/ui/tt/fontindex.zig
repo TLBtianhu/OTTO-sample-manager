@@ -428,17 +428,23 @@ test "the folder digest follows font files' names, sizes and mtimes" {
     const moved = fingerprint(gpa, testing.io, dir) orelse return error.NoFingerprint;
     try testing.expect(first != moved);
 
-    // A new font file changes the digest...
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "c.otf", .data = "not read by a scan" });
-    const ignored = fingerprint(gpa, testing.io, dir) orelse return error.NoFingerprint;
-    try testing.expect(moved != ignored);
+    // A new font file changes the digest: the digest covers the files a scan
+    // would read, by name, size and mtime. (`c.ttf`, not something the scan
+    // ignores: the entry that changes must be the one the digest describes.
+    // The fork's test wrote a `.otf` here and saw a change anyway, because
+    // writing any file bumps the folder's own mtime, which the digest also
+    // carries — true on Windows only as long as NTFS updates it at once, and
+    // this failed here once.)
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "c.ttf", .data = "not read by a scan" });
+    const after_c = fingerprint(gpa, testing.io, dir) orelse return error.NoFingerprint;
+    try testing.expect(moved != after_c);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "d.ttf", .data = "three" });
-    const added = fingerprint(gpa, testing.io, dir) orelse return error.NoFingerprint;
-    try testing.expect(ignored != added);
+    const after_d = fingerprint(gpa, testing.io, dir) orelse return error.NoFingerprint;
+    try testing.expect(after_c != after_d);
 
     // ... as does the same file with different bytes (a new size).
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "d.ttf", .data = "three and more" });
     const grown = fingerprint(gpa, testing.io, dir) orelse return error.NoFingerprint;
-    try testing.expect(added != grown);
+    try testing.expect(after_d != grown);
 }
 

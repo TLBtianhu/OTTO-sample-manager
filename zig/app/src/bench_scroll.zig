@@ -173,7 +173,7 @@ pub fn runCli(
         .height = 700,
         .content = .{ .view = view },
         .visible = false,
-        .no_activate = true,
+        .non_activating = true,
         .x = -4000,
         .y = 0,
     });
@@ -241,7 +241,7 @@ pub fn run(
     std.debug.print(
         "scroll-bench: ==== real-window scroll: {s} ====\n" ++
             "scroll-bench: library={s} frames={d} notches={d} size={d:.0}x{d:.0} scale={d:.2} pixels={d}x{d}\n" ++
-            "scroll-bench: window hwnd=0x{x} visible={} ex_style=0x{x} no_activate_bit={} rect=({d},{d})-({d},{d}) monitor_attached={} cloaked={d}\n" ++
+            "scroll-bench: window hwnd=0x{x} visible={} ex_style=0x{x} non_activating_bit={} rect=({d},{d})-({d},{d}) monitor_attached={} cloaked={d}\n" ++
             "scroll-bench: self_check gdi={}\n",
         .{
             if (surface.no_d3d) "GDI" else "D3D11",
