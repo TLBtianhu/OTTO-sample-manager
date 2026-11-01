@@ -25,7 +25,8 @@ $allowedGroups = @(
   'TLB天狐の资源群②',
   'TLB天狐の哈基群①',
   'Cutrans/MediaForge测试群③',
-  'OTTO_Sample_Manager用户群'
+  'OTTO_Sample_Manager用户群',
+  '蓝振兴 S2【Bilibili同人only激励计划】'
 )
 
 function Read-BridgeConfig {
