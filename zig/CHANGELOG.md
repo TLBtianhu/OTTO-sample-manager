@@ -6,6 +6,13 @@
 
 
 
+
+## 0.40.0
+
+- **helper 缺失契约统一**：默认隔离，helper 缺失/启动失败都是具名失败（`none.failed`），只有显式 `--no-isolation` 才回进程内；超时与崩溃**永不回主进程**。
+- 每次 Shell 取图记录 `execution_domain=helper|in_process`，`--preview` 同时打印声明域与实际执行域。
+- 新增 `zig\helper-contract.ps1`：6 种故障注入 + 6 组反向对照；**旧的 0.39.0 二进制跑同一脚本 6/6 失败**，证明闸门抓得住静默兜底。
+
 ## 0.39.0
 
 - **按需 Tab 补全**：只在按 Tab 时对当前父目录枚举一次，连续 Tab 循环（`enumerations=1`）；只补目录，不逐键枚举、不后台搜索。
