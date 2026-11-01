@@ -556,8 +556,11 @@ audit above, the provider matrix, the six-row bench plus the real-window scroll
 and memory probes, the opacity probe, the four `--demo*` self-checks, and minisign
 verification of the newest `zig/dist` artifacts. No window is shown and no focus
 is taken. A failure in one step is recorded and the rest still run; the exit code
-is decided at the end (any failed row -> 1). The charter's known unmet first-frame
-<= 100 ms row is labeled `KNOWN-FAIL` and does not fail the run. `-Quick` is the
+is decided at the end (any failed row -> 1). The charter's first-frame row is judged
+on the p50 of nine child runs (`<= 100 ms`) plus a p95 noise ceiling (`<= 120 ms`);
+when it misses, it is labeled `KNOWN-FAIL` and does not fail the run. The empty-window
+floor behind that split (p50 ~82 / p95 ~100-109 ms on this machine) is measured by
+`zig/tools/floor-probe.zig` and written up in `zig/PERF.md` section 12. `-Quick` is the
 pre-commit subset (builds + tests + audit + provider matrix + signatures),
 `-Release` skips the debug build. The test suites and the opacity probe are
 retried once because their real-window foreground checks are sensitive to an

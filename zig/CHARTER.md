@@ -174,7 +174,7 @@ Cache: key → { payload: []u8, cost_bytes, last_used, hits, protected }
 
 | 指标 | 目标 | 怎么量 |
 | --- | --- | --- |
-| 冷启动（2000 素材库） | ≤ 100 ms | `--bench`：CreateProcess → 首帧报告行；**便携/安装形态**（有字体索引缓存），dev 首次无缓存约 130 ms（dev 缓存现在也落在 `%LOCALAPPDATA%\OTTO\dev`） |
+| 冷启动（2000 素材库） | **p50 ≤ 100 ms；p95 ≤ 120 ms** | `--bench`：CreateProcess → 首帧报告行，**9 次**取 p50/p95。**为什么是这两个数**：本机"只 create window + present 一帧"的空程序就是 p50 82 / p95 100–109 ms（`PERF.md` §12.3，`zig/tools/floor-probe.zig`），100 ms 落在系统自己的抖动带里——所以 p50 是目标、p95 120 是噪声闸，单次 100±5 ms 不算退步。便携/安装形态（有字体索引缓存）与 dev 现在是同一条路径 |
 | 常驻内存（不含 L2） | ≤ 50 MiB | `mem.ps1`：**真实窗口**空闲 10 s 的 WorkingSet，减 L2 图像账 |
 | 列表滚动 380×700 | 60 fps | `--bench-scroll`：真实窗口、屏外、`WS_EX_NOACTIVATE`，每 16 ms 注入滚轮 300 帧 |
 | 音频首次试听（冷） | p95 ≤ 50 ms | `--bench` 的 `play()` → `position>0` ×20 |
@@ -187,8 +187,10 @@ Cache: key → { payload: []u8, cost_bytes, last_used, hits, protected }
 "怎么量"这一列不是装饰：**同一个目标换个口径能差一倍**（headless 首帧比真实窗口低，L2 算不算内存差 3.5 MiB）。
 数字必须和口径一起引用，否则它只是宣传。
 
-当前实测（0.2.x，见 `PERF.md` 与 `MEMORY.md`）：首帧 117–126 ms（便携热 100）、内存 42.6 MiB、滚动 62.5 fps、
-音频 p95 19 ms、缩略图冷 p95 20 ms、安装包 1.58 MiB。**只有前两项需要按上面的口径解读。**
+当前实测（0.33.0，见 `PERF.md` §12 与 `MEMORY.md`）：首帧 **p50 92.94–97.59 / p95 98.5–105.1 ms**（安静窗口，4 次独立测量；
+其中 ~82 ms 是 Windows 空窗口下限；**负载窗口**同一二进制读到 p50 102.05 / p95 118.18，那是机器忙）、
+内存 43.3 MiB、滚动 62.5 fps、音频 p95 0.84 ms、缩略图冷 p95 4.27–5.33 ms、安装包 1.64/1.81 MiB。
+**前两项仍要按上面的口径解读**：首帧是 p50（不是单次），内存是真实窗口（不是 headless 的 25.8）。
 
 ---
 
