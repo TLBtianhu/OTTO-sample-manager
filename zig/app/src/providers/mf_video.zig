@@ -60,6 +60,8 @@ const preview = @import("../preview.zig");
 pub const provider: preview.Provider = .{
     .name = "mf-video",
     .kind = .image,
+    // 取图行为版本（进缓存键）：首帧时间点 / 缩放 / 颜色转换变了就 +1。
+    .provider_version = 1,
     .supports = supports,
     .open = open,
     // 视频首帧本来就是一张图，行内 64px 小图与预览条用同一条抽帧链。

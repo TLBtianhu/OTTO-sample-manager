@@ -134,6 +134,34 @@ const no_shell_registry: preview.Registry = .{ .providers = &without_shell };
 const icon_registry: preview.Registry = .{ .providers = &icon_ordered };
 const icon_no_shell_registry: preview.Registry = .{ .providers = &icon_without_shell };
 
+/// 每个 provider 的取图行为版本，按表内位置加权混合成一个数字。
+///
+/// 为什么是**聚合值**而不是"赢家 provider 的版本"：缓存键在 `open` 之前就要算出来
+/// （见 `thumbs_codec.zig` 文件头），那时还不知道谁会接手。聚合值保证任何一家的
+/// 常量 +1 都会让旧键失效；位置加权让"两项同时 +1/-1"这种手滑也几乎不可能抵消。
+/// 纯函数，测试可以喂任意数组验证"任意一位 +1 一定改变结果"。
+pub fn mixProviderVersions(versions: []const u32) u32 {
+    var mixed: u32 = 0;
+    for (versions, 0..) |version, index| {
+        mixed +%= (version +% 1) *% (@as(u32, @intCast(index)) +% 1) *% 131;
+    }
+    return mixed;
+}
+
+const version_list: [ordered.len]u32 = blk: {
+    var list: [ordered.len]u32 = undefined;
+    for (ordered, 0..) |provider, index| list[index] = provider.provider_version;
+    break :blk list;
+};
+
+/// 进缓存键的 provider 版本（`thumbs_codec.keyFor` 的 `pv<…>`）。
+pub const provider_version: u32 = mixProviderVersions(&version_list);
+
+/// `provider_version` 的函数形式：`thumbs.zig` / `preview_worker.zig` 用同一个值算键。
+pub fn providerVersion() u32 {
+    return provider_version;
+}
+
 /// 给 `main.zig` / `preview_panel.Panel` / `--preview` 用的那份注册表。
 /// 它和 `registryFor(false)` 返回的是**同一个对象**，不是两份独立副本。
 pub const registry: preview.Registry = ordered_registry;
@@ -238,6 +266,10 @@ comptime {
     if (icon_without_shell.len != icon_ordered.len - 1) {
         @compileError("--no-shell-preview 的 icon 表只应少一项");
     }
+    // 版本常量只增不减；0 会让 `mixProviderVersions` 与"没有版本"混在一起。
+    for (ordered) |provider| {
+        if (provider.provider_version == 0) @compileError("provider_version 必须 >= 1");
+    }
     var icon_has_shell = false;
     for (icon_without_shell) |provider| {
         if (provider == &thumb.provider) @compileError("--no-shell-preview 的 icon 表里不能有 Shell");
@@ -332,4 +364,19 @@ test "图标级音频：WAV 参与（粗采样），FLAC / MP3 / MF 音频因超
     for (registryForIcon(true).providers) |provider| {
         try testing.expect(provider != &native_audio.provider);
     }
+}
+
+test "provider 版本：每项 >= 1，任一 provider +1 都会改变聚合值（缓存键随之失效）" {
+    for (ordered) |provider| try testing.expect(provider.provider_version >= 1);
+
+    const base = [_]u32{ 1, 1, 1, 1, 1, 1 };
+    const mixed = mixProviderVersions(&base);
+    for (0..base.len) |index| {
+        var bumped = base;
+        bumped[index] += 1;
+        try testing.expect(mixProviderVersions(&bumped) != mixed);
+    }
+
+    // 生产值来自同一张顺序表：改任何一项的常量，`providerVersion()` 就变。
+    try testing.expectEqual(mixProviderVersions(&version_list), providerVersion());
 }

@@ -56,6 +56,8 @@ const preview = @import("../preview.zig");
 pub const provider: preview.Provider = .{
     .name = "mf-audio",
     .kind = .audio,
+    // 取图行为版本（进缓存键）：MF 读取顺序 / 下混 / 会话装配变了就 +1。
+    .provider_version = 1,
     .supports = supports,
     .open = open,
     // **不参与行内图标**（实测决定，见报告）：打开 MP3 容器 + 32 次 seek 的粗采样

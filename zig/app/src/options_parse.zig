@@ -92,6 +92,14 @@ pub fn demo(options: *options_mod.Options, args: anytype, index: *usize, arg: []
         options.thumb_bench_dir = arg["--thumb-bench=".len..];
         return true;
     }
+    if (std.mem.eql(u8, arg, "--thumb-dedup")) {
+        options.thumb_dedup_dir = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--thumb-dedup=")) {
+        options.thumb_dedup_dir = arg["--thumb-dedup=".len..];
+        return true;
+    }
     return false;
 }
 

@@ -124,6 +124,10 @@ pub const Options = struct {
     drop_probe: ?[]const u8 = null,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,
+    /// `--thumb-dedup <dir>`：同一个目录 20 行的重复取图探针（三种场景，不开窗）。
+    /// 输出 `provider_calls / derived / cache_hits / bytes_fetched`，见
+    /// `thumbs_dedup_probe.zig`。
+    thumb_dedup_dir: ?[]const u8 = null,
     /// `--bench <library>`：宪章六项性能基准，打印一张表后退出（不开窗）。
     bench: ?[]const u8 = null,
     /// `--bench-scroll <library>`：真实窗口（屏外、不抢焦点）的滚动帧率基准；
@@ -179,6 +183,7 @@ pub const Options = struct {
             self.copy_now != null or
             self.demo_thumbs_dir != null or
             self.thumb_bench_dir != null or
+            self.thumb_dedup_dir != null or
             self.demo_dir != null or
             self.demo_rescan_dir != null or
             self.preview_path != null or

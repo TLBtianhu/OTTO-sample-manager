@@ -162,6 +162,9 @@ pub fn boot(
     // `--no-shell-preview` / `--no-isolation` 同时作用于预览条与行内小图。
     const preview = try preview_panel.Panel.init(init.gpa, init.io, preview_providers.registryFor(options.no_shell_preview), .{
         .allow_isolation = !options.no_isolation,
+        // 预览条与行内小图共享 256px 缓存：先预览再滚动时 64px 由派生满足；
+        // 先滚动再预览时仍然重新取一次大图（不拿 64px 放大冒充预览）。
+        .share = thumbs.previewShare(),
     });
     errdefer preview.deinit();
 
