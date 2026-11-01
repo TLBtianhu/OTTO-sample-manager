@@ -51,11 +51,15 @@ pub fn mapFile(path: []const u8) ?Bytes {
     return .{ .data = bytes[0..@intCast(size)], .mapped = true };
 }
 
-/// Releases a face's bytes: an unmap for a mapping, a free for a copy.
+/// Releases a face's bytes: an unmap for a mapping, a free for a copy. The
+/// unmap is inside a compile-time platform test, so a Linux or Android build
+/// never references kernel32 (the fork this came from was Windows-only).
 pub fn freeBytes(gpa: std.mem.Allocator, bytes: Bytes) void {
-    if (bytes.mapped) {
-        _ = UnmapViewOfFile(bytes.data.ptr);
-        return;
+    if (builtin.os.tag == .windows) {
+        if (bytes.mapped) {
+            _ = UnmapViewOfFile(bytes.data.ptr);
+            return;
+        }
     }
     gpa.free(bytes.data);
 }

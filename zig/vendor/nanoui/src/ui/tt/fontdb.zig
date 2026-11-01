@@ -1,4 +1,4 @@
-//! The fonts installed: found in the system's font folders once, each
+﻿//! The fonts installed: found in the system's font folders once, each
 //! face known by its family, weight, italics and width, and loaded when
 //! first used. Matching a style picks the family's nearest face; a
 //! character a font lacks is found in the fallback families, then in any

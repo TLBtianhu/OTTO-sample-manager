@@ -62,7 +62,7 @@ GUI 子系统进程无效，所以 CLI 入口（`commands.run` 之前、只在�
 ## 4. 应用自己：`--nanoui-snapshot` 与探针一律隐藏
 
 所有验收走 `--nanoui-snapshot` / `--settings-probe` / `--drop-probe` 这类入口，
-它们建真 HWND 但 `hidden` + `no_activate`；脚本要断言 `visible=false`，并采样
+它们建真 HWND 但 `hidden` + `non_activating`；脚本要断言 `visible=false`，并采样
 `GetForegroundWindow()` 证明"我们的窗口从不是前台"。
 
 ## 5. PowerShell 脚本的参数拼接

@@ -73,7 +73,10 @@ const max_pixels: u64 = 64 * 1024 * 1024;
 /// copy of the atlas is kept in memory (a window on Metal).
 pub const Sink = struct {
     ctx: *anyopaque,
-    upload: *const fn (ctx: *anyopaque, x: u32, y: u32, w: u32, h: u32, bgra: []const u8) void,
+    /// `side` is the atlas's own side now: it grows with the pictures, so a
+    /// sink that keeps a texture must make it this large (and again when the
+    /// number changes), not the `max_size` it used to assume.
+    upload: *const fn (ctx: *anyopaque, side: u32, x: u32, y: u32, w: u32, h: u32, bgra: []const u8) void,
 };
 
 pub const SizedKey = struct {
@@ -272,7 +275,7 @@ pub const Images = struct {
         const y = im.shelf_y;
         const side = im.side;
         if (im.sink) |sk| {
-            sk.upload(sk.ctx, x, y, d.w, d.h, d.bgra);
+            sk.upload(sk.ctx, side, x, y, d.w, d.h, d.bgra);
         } else for (0..d.h) |row| {
             const src = d.bgra[row * d.w * 4 ..][0 .. d.w * 4];
             @memcpy(im.pixels[((y + row) * side + x) * 4 ..][0 .. d.w * 4], src);

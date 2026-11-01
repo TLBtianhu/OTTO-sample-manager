@@ -380,9 +380,10 @@ D3D 70.98–71.12 MiB。
 * `vendor/nanoui/src/windows/surface.zig`：`Surface.recordFrames(gpa)` 打开内存
   日志（不传路径就不写文件）；`frame()` 记 QPC 与 build/layout/paint/wait/after，
   `WM_PAINT` 的 `paint()` 记 raster 与 present。默认路径只多一次 `null` 判断。
-* `vendor/nanoui/src/windows/window.zig` + `window_types.zig`：新增
-  `no_activate` 选项与 `showNoActivate()`（`WS_EX_NOACTIVATE` /
-  `SW_SHOWNOACTIVATE`），通用能力（不抢焦点、不进任务栏的探针/浮层）。
+* `vendor/nanoui/src/windows/window.zig` + `window_types.zig`：`non_activating`
+  选项（0.9.1 之前我们自己那条叫 `no_activate`）与 `showNoActivate()`
+  （`WS_EX_NOACTIVATE` / `SW_SHOWNOACTIVATE`），通用能力（不抢焦点、不进任务栏的
+  探针/浮层）。
 * `app/src/bench_scroll.zig` + `bench_scroll_stats.zig` + `options.zig`：命令行、
   注入节拍器（高分辨率可等待计时器 + 最后 3 ms 自旋）、消息泵、帧日志取数、报表。
 * `zig/scroll.ps1`：一条命令建库 + 跑 GDI/D3D 两份并汇总。

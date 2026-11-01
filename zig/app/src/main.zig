@@ -424,8 +424,8 @@ pub fn main(init: std.process.Init) !void {
         .title = title,
         .width = 380,
         .height = 700,
-        // 设置验收的脚本要真 HWND，但仍然绝不激活。
-        .no_activate = options.settings_probe or options.drop_probe != null or options.set_opacity != null,
+        // 设置验收的脚本要真 HWND，但仍然绝不激活（`WS_EX_NOACTIVATE` + `SW_SHOWNOACTIVATE`）。
+        .non_activating = options.settings_probe or options.drop_probe != null or options.set_opacity != null,
         .content = .{ .view = .init(&state, State.view) },
     });
     // 文件拖入：目录走「导入文件夹」同一条 `Import.start`；`--drop-probe` 时

@@ -99,6 +99,8 @@ pub const Tester = struct {
 
     pub fn frame(t: *Tester) void {
         _ = frame_mod.run(&t.ctx, t.view, &t.text, &t.instances, t.size, t.scale, t.theme, t.dt, t.time);
+        // The simulated clock is the real one here: a view reads its rate off it.
+        t.ctx.frame_time = t.dt;
         t.time += t.dt;
     }
 
@@ -260,7 +262,7 @@ pub const Tester = struct {
     pub fn findText(t: *Tester, s: []const u8) ?types.Rect {
         for (t.ctx.nodes.items) |n| switch (n.content) {
             .text => |tx| if (std.mem.eql(u8, tx.str, s)) return n.rect,
-            .icon, .image, .texture, .canvas, .none => {},
+            .icon, .image, .texture, .hole, .canvas, .none => {},
         };
         return null;
     }
@@ -273,7 +275,7 @@ pub const Tester = struct {
     pub fn containsText(t: *Tester, s: []const u8) bool {
         for (t.ctx.nodes.items) |n| switch (n.content) {
             .text => |tx| if (std.mem.indexOf(u8, tx.str, s) != null) return true,
-            .icon, .image, .texture, .canvas, .none => {},
+            .icon, .image, .texture, .hole, .canvas, .none => {},
         };
         return false;
     }
