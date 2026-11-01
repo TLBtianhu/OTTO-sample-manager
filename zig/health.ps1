@@ -20,10 +20,11 @@
 #   8. verify-minisign.js on the newest portable.zip + setup.exe in zig\dist
 #   9. fresh-user.ps1 (**only with -Fresh**): a brand-new user's whole trip --
 #      download -> verify -> silent install into a temp dir -> first start ->
-#      import -> silent uninstall -> older version -> zig-out purity. It really
-#      installs (into %TEMP%), takes ~4 s, and writes nothing outside its temp
-#      tree. Off by default so the pre-commit gate stays fast; the row reads
-#      SKIP（-Fresh）and SKIP never fails the run.
+#      import -> silent uninstall -> older version -> overwrite upgrade on the
+#      same program dir (data byte-identical, portable copy untouched) ->
+#      zig-out purity. It really installs (into %TEMP%), takes ~25 s, and writes
+#      nothing outside its temp tree. Off by default so the pre-commit gate stays
+#      fast; the row reads SKIP（-Fresh）and SKIP never fails the run.
 #
 # -Quick keeps the pre-commit subset: builds + tests + distribution audit +
 # build-output purity + provider matrix + opacity + signatures (bench / scroll /
