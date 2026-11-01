@@ -19,6 +19,7 @@ const demo_rescan = @import("demo_rescan.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_watch = @import("demo_watch.zig");
+const browse_watch_probe = @import("browse_watch_probe.zig");
 const import_cli = @import("import_cli.zig");
 const library_cli = @import("library_cli.zig");
 const mode_mod = @import("mode.zig");
@@ -62,7 +63,7 @@ pub fn run(
     // 放在其它自检之前：它们与库无关，也不该被 `--filter` / `--import` 抢走。
     if (options.browse_probe) |dir| return try browse_probe.runProbe(init, allocator, dir, options);
     if (options.browse_watch_probe) |dir| {
-        return try browse_probe.runWatchProbe(init, allocator, dir, options);
+        return try browse_watch_probe.run(init, allocator, dir, options);
     }
 
     // 更新检查（M5）：无窗口取一次 feed、打印结论、退出 0/1。默认不联网——

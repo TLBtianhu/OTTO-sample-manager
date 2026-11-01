@@ -98,6 +98,8 @@ pub const State = struct {
     reporter: thumbs_report.Reporter = .{},
     /// 按下时的行与位置（只记一次；松手/离开后清掉）。
     press_row: ?usize = null,
+    /// 上一帧窗口是不是前台：用来把"获得焦点"也算成一次用户交互（路径不可用时重试）。
+    window_focused: bool = false,
     press_origin: ui.Point = .{},
     /// 已经越过阈值、定时器已挂上：同一次按压里不许再排第二次。
     drag_armed: bool = false,
@@ -119,6 +121,14 @@ pub const State = struct {
             row_ui.resyncInput(s, c);
             // Ctrl+C：在构建树之前处理，`c.changed` 会让这一帧重建出表头提示。
             if (c.shortcut(.{ .key = 'c', .ctrl = true })) row_ui.copySelection(s, c);
+            // 浏览模式："路径不可用"只在**用户下一次交互**时重试一次（点击 / 滚轮 /
+            // 键盘 / 获得焦点），没有定时轮询。`retryUnavailable` 在可用时是空操作。
+            if (s.browse) |session| {
+                const focused = if (s.window) |window| window.isFocused() else false;
+                const gained_focus = focused and !s.window_focused;
+                s.window_focused = focused;
+                if (gained_focus or hasInteraction(c.input)) session.retryUnavailable();
+            }
         }
 
         ui.column(c, .{ .width = .fill, .height = .fill });
@@ -166,9 +176,18 @@ pub const State = struct {
             if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
             if (header_action.settings_clicked) s.settings.openPanel(c);
         }
-        // 浏览模式的状态条：目录名、文件数、已截断 / 路径不可用 / 跳过 N 项。
+        // 浏览模式的状态条：目录名、文件数、已加载/还有更多 / 内存上限 / 路径不可用。
         // 它必须**看得见**——这些状态只写日志等于没说。
-        if (s.browse) |session| browse_ui.drawBanner(c, session.info());
+        var load_more_clicked = false;
+        if (s.browse) |session| {
+            load_more_clicked = browse_ui.drawBanner(c, session.info()).load_more_clicked;
+        }
+        if (!busy and load_more_clicked) {
+            if (s.browse) |session| {
+                _ = session.loadMore() catch {};
+                c.changed = true;
+            }
+        }
         // 列表容器：空白处按下再松开 = 清空选择（行是它的后代，点行时容器不会 clicked）。
         const body = ui.div(c).sizeFull();
         const body_it = body.interaction();
@@ -398,6 +417,16 @@ pub const State = struct {
         if (s.window) |window| window.redraw();
     }
 };
+
+/// 这一帧有没有"人真的动了一下"：点击/松手/滚轮/键盘/文本/拖入/触控缩放都算。
+/// 只用于浏览模式的"路径不可用 → 下一次交互时重试"，不是定时器。
+fn hasInteraction(input: anytype) bool {
+    return input.pressed or input.released or input.secondary or
+        input.scroll.x != 0 or input.scroll.y != 0 or
+        input.key != null or input.chars.len != 0 or
+        input.drop != null or input.a11y_press != 0 or
+        input.zoom != 1 or input.pan.x != 0 or input.pan.y != 0;
+}
 
 pub fn main(init: std.process.Init) !void {
     // `--bench` 的子进程用这个时间戳量"main 入口 → 第一帧建完"；普通启动只多一次

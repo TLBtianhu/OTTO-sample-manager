@@ -1,4 +1,4 @@
-﻿# 目录浏览 Stage 0 的验收闸门：九条判据各出一行数字。
+﻿# 目录浏览的验收闸门：Stage 0 的九条判据 + Stage 1 的五条补口（共 18 行数字）。
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1 -Recreate -SkipScroll
@@ -15,6 +15,14 @@
 #   8. 权限拒绝                  打不开的文件仍在列表里（unreadable 计数），打不开的目录不崩
 #   9. 库模式未受影响            --filter 仍然读得到 fixtures 的 2000 条
 #                                （完整闸门是 zig\health.ps1 -Quick：10 PASS + 三套测试）
+#  10. 分页（10 万）             --pages=3：能拿到 >5 万条且 truncated=false；或按 90 MiB
+#                                内存上限拒绝、剩余条数具名。峰值必须 ≤ 90 MiB
+#  11. 每行开销                 报告里的实测 bytes_per_row（预算判断用的就是它）
+#  12. 页大小（--browse-limit）  1 万目录、1000/页：首批 1000，点两次 = 3000，还有更多
+#  13. 重扫期间不丢              --force-rescan 暂停窗口里拷 50 个文件：最终行数 = 磁盘 250
+#  14. 目录消失再回来            --vanish-then-return：unavailable 翻转；交互后行数 = 磁盘
+#  15. 内存预算拒绝              页大小 20 万时第二次「加载更多」被 90 MiB 预算拒绝，
+#                                拒绝后仍数清剩余（不悄悄停）
 #
 # 约定（zig/CONVENTIONS.md）：不弹窗、不抢焦点；子进程一律 CreateNoWindow + 重定向
 # 两个流；拼接好命令行**先回显再执行**；形参一律不用 `$args` 之类的自动变量。
@@ -36,6 +44,8 @@ $ProgressPreference = 'SilentlyContinue'
 
 $script:rows = New-Object System.Collections.ArrayList
 $script:clock = [System.Diagnostics.Stopwatch]::StartNew()
+# 10 万目录的分页探针只跑一次：分页 / 每行开销两行共用这份输出。
+$script:hundredKPage = $null
 
 # ---------------------------------------------------------------------------
 # 输出
@@ -570,6 +580,169 @@ function Invoke-LibraryMode {
 }
 
 # ---------------------------------------------------------------------------
+# 10. 分页 / 每行开销 / 页大小（Stage 1）
+# ---------------------------------------------------------------------------
+
+function Get-HundredKPageProbe {
+  if ($null -ne $script:hundredKPage) { return $script:hundredKPage }
+  $dir = Join-Path $Root '100k'
+  # `--pages=3`：首批之后最多再点 3 次「加载更多」。默认页 50000，10 万目录两次就到底。
+  $script:hundredKPage = Invoke-Exe $Exe @('--browse-probe', ('"{0}"' -f $dir), '--pages=3')
+  return $script:hundredKPage
+}
+
+function Invoke-Paging {
+  Write-Step '10. 分页（10 万目录，--pages=3）'
+  $r = Get-HundredKPageProbe
+  $em = [regex]::Match($r.Text, 'entries=(\d+) truncated=(\w+)')
+  $pm = [regex]::Match($r.Text, 'pages=(\d+) load_more_calls=(\d+) has_more=(\w+) mem_refused=(\w+) remaining=(\d+)')
+  $peakMatch = [regex]::Match($r.Text, 'peak_mib=([0-9.]+)')
+  if (-not $em.Success -or -not $pm.Success -or -not $peakMatch.Success) {
+    Add-Row '分页' 'FAIL' '—' ('没有 probe 汇总行；exit {0}' -f $r.Code)
+    return
+  }
+  $entries = [int]$em.Groups[1].Value
+  $truncated = $em.Groups[2].Value -eq 'true'
+  $pages = [int]$pm.Groups[1].Value
+  $loadMore = [int]$pm.Groups[2].Value
+  $hasMore = $pm.Groups[3].Value -eq 'true'
+  $memRefused = $pm.Groups[4].Value -eq 'true'
+  $remaining = [int]$pm.Groups[5].Value
+  $peak = [double]$peakMatch.Groups[1].Value
+  # 两条合法出路：① 真的加载了 >5 万条且 truncated=false；② 按 90 MiB 预算拒绝，
+  # 并且把"还剩多少条"数出来（拒绝必须有具名理由，不许悄悄停）。
+  $loadedAll = ($entries -gt 50000) -and (-not $truncated) -and (-not $hasMore)
+  $refusedNamed = $memRefused -and $remaining -gt 0
+  $ok = ($r.Code -eq 0 -and $peak -le 90 -and (($loadedAll -and $pages -ge 2) -or $refusedNamed))
+  $stat = 'entries={0} truncated={1} pages={2}（点 {3} 次）peak={4:N2} MiB' -f $entries, $em.Groups[2].Value, $pages, $loadMore, $peak
+  $note = '判据：>5 万且 truncated=false，或内存拒绝 + 剩余条数具名；峰值 ≤ 90 MiB'
+  if ($ok) { Add-Row '分页' 'PASS' $stat $note } else { Add-Row '分页' 'FAIL' $stat $note }
+}
+
+function Invoke-RowCost {
+  Write-Step '11. 每行实际开销（预算判断用的数）'
+  $r = Get-HundredKPageProbe
+  $rowMatch = [regex]::Match($r.Text, 'row_bytes=(\d+) bytes_per_row=([0-9.]+)')
+  $peakMatch = [regex]::Match($r.Text, 'peak_mib=([0-9.]+)')
+  if (-not $rowMatch.Success) {
+    Add-Row '每行开销' 'FAIL' '—' '没有 row_bytes / bytes_per_row'
+    return
+  }
+  $rowBytes = [int]$rowMatch.Groups[1].Value
+  $perRow = [double]$rowMatch.Groups[2].Value
+  $peak = if ($peakMatch.Success) { [double]$peakMatch.Groups[1].Value } else { -1 }
+  # 实测值必须落在人话范围：小于 100 B/行说明没算到行存储；大于 4 KiB 说明把
+  # 进程底噪算进去了。判据同时要求峰值 ≤ 90 MiB。
+  $ok = ($rowBytes -gt 0 -and $perRow -gt 100 -and $perRow -lt 4096 -and $peak -le 90)
+  $stat = '实测 {0:N1} B/行（当前行存储 {1:N2} MiB）；峰值 {2:N2} MiB' -f $perRow, ($rowBytes / 1MB), $peak
+  $note = '判据：报告给出实测字节/行（不是猜的 1 KiB），预算判断用这个数'
+  if ($ok) { Add-Row '每行开销' 'PASS' $stat $note } else { Add-Row '每行开销' 'FAIL' $stat $note }
+}
+
+function Invoke-PageSize {
+  Write-Step '12. 页大小（--browse-limit=1000，1 万目录）'
+  $dir = Join-Path $Root '10k'
+  $r = Invoke-Exe $Exe @('--browse-probe', ('"{0}"' -f $dir), '--browse-limit=1000', '--pages=2')
+  $em = [regex]::Match($r.Text, 'entries=(\d+) truncated=(\w+)')
+  $pm = [regex]::Match($r.Text, 'limit=(\d+) pages=(\d+) load_more_calls=(\d+) has_more=(\w+)')
+  if (-not $em.Success -or -not $pm.Success) {
+    Add-Row '页大小' 'FAIL' '—' ('没有 probe 汇总行；exit {0}' -f $r.Code)
+    return
+  }
+  $entries = [int]$em.Groups[1].Value
+  $limit = [int]$pm.Groups[1].Value
+  $pages = [int]$pm.Groups[2].Value
+  $clicks = [int]$pm.Groups[3].Value
+  $hasMore = $pm.Groups[4].Value -eq 'true'
+  # 首批 1000 + 两次「加载更多」= 3000；1 万目录还有更多（不静默少显示）。
+  $ok = ($r.Code -eq 0 -and $limit -eq 1000 -and $entries -eq 3000 -and $pages -eq 3 -and $clicks -eq 2 -and $hasMore)
+  $stat = 'limit={0} entries={1} pages={2} clicks={3} has_more={4}' -f $limit, $entries, $pages, $clicks, $pm.Groups[4].Value
+  $note = '判据：一页 1000 条，加载更多续读两页 = 3000，且仍然声明还有更多'
+  if ($ok) { Add-Row '页大小' 'PASS' $stat $note } else { Add-Row '页大小' 'FAIL' $stat $note }
+}
+
+# ---------------------------------------------------------------------------
+# 13. 重扫期间拷文件：最终行数不丢
+# ---------------------------------------------------------------------------
+
+function Invoke-RescanKeep {
+  Write-Step '13. 重扫期间拷 50 个文件（reconcile-after-rescan）'
+  $dir = Join-Path $Root 'rescan1'
+  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+  New-FileSet $dir 200 'w'
+  # 探针自己触发重扫；重扫枚举到一半时暂停 1500ms，在这段窗口里拷 50 个 `a-` 文件
+  # （名字序在游标之前，枚举器不会列它们——只有 reconcile 能把它们补进来）。
+  $r = Invoke-Exe $Exe @('--browse-watch-probe', ('"{0}"' -f $dir), '--force-rescan',
+    '--rescan-pause-ms=1500', '--copy-during-rescan=50', '--watch-seconds=2')
+  $m = [regex]::Match($r.Text, 'browse-watch-probe: rescan paused=(\w+) copied=(\d+) rows_before=(\d+) rows_after=(\d+) disk_rows=(\d+) expected=(\d+)')
+  if (-not $m.Success) {
+    Add-Row '重扫不丢' 'FAIL' '—' ('没有 rescan 汇总行；exit {0}' -f $r.Code)
+    return
+  }
+  $paused = $m.Groups[1].Value -eq 'true'
+  $copied = [int]$m.Groups[2].Value
+  $before = [int]$m.Groups[3].Value
+  $after = [int]$m.Groups[4].Value
+  $disk = [int]$m.Groups[5].Value
+  $expected = [int]$m.Groups[6].Value
+  $ok = ($r.Code -eq 0 -and $paused -and $copied -eq 50 -and $before -eq 200 -and
+    $after -eq 250 -and $disk -eq 250 -and $expected -eq 250)
+  $stat = 'paused={0} copied={1} 行数 {2}→{3}（磁盘 {4}）' -f $m.Groups[1].Value, $copied, $before, $after, $disk
+  $note = '判据：重扫窗口里拷入 50 个，最终行数与磁盘一致（不丢）'
+  if ($ok) { Add-Row '重扫不丢' 'PASS' $stat $note } else { Add-Row '重扫不丢' 'FAIL' $stat $note }
+}
+
+# ---------------------------------------------------------------------------
+# 14. 目录消失再回来：unavailable 翻转 + 交互恢复
+# ---------------------------------------------------------------------------
+
+function Invoke-VanishReturn {
+  Write-Step '14. 目录消失再回来（--vanish-then-return）'
+  $dir = Join-Path $Root 'returning'
+  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+  New-FileSet $dir 10 'r'
+  $r = Invoke-Exe $Exe @('--browse-watch-probe', ('"{0}"' -f $dir), '--vanish-then-return=1', '--watch-seconds=1')
+  $m = [regex]::Match($r.Text, 'browse-watch-probe: vanish unavailable_before=(\w+) unavailable_after=(\w+) rows_after=(\d+) disk_rows=(\d+) recovered=(\w+)')
+  if (-not $m.Success) {
+    Add-Row '消失回来' 'FAIL' '—' ('没有 vanish 汇总行；exit {0}' -f $r.Code)
+    return
+  }
+  $before = $m.Groups[1].Value -eq 'true'
+  $after = $m.Groups[2].Value -eq 'true'
+  $rows = [int]$m.Groups[3].Value
+  $disk = [int]$m.Groups[4].Value
+  $recovered = $m.Groups[5].Value -eq 'true'
+  $ok = ($r.Code -eq 0 -and $before -and (-not $after) -and $rows -eq 10 -and $disk -eq 10 -and $recovered)
+  $stat = 'unavailable {0}→{1}；行数 {2}（磁盘 {3}）' -f $m.Groups[1].Value, $m.Groups[2].Value, $rows, $disk
+  $note = '判据：删除后显示不可用；目录回来 + 下一次交互后恢复（epoch+1），行数与磁盘一致'
+  if ($ok) { Add-Row '消失回来' 'PASS' $stat $note } else { Add-Row '消失回来' 'FAIL' $stat $note }
+}
+
+function Invoke-MemoryRefusal {
+  Write-Step '15. 内存预算拒绝（--browse-limit=200000，10 万目录）'
+  $dir = Join-Path $Root '100k'
+  # 页大小 20 万：第二次「加载更多」要再加 20 万行，按实测每行字节预测必然越过
+  # 90 MiB。此时必须**拒绝并数清剩余**，而不是加载一半悄悄停。
+  $r = Invoke-Exe $Exe @('--browse-probe', ('"{0}"' -f $dir), '--browse-limit=200000', '--pages=1')
+  $em = [regex]::Match($r.Text, 'entries=(\d+) truncated=(\w+)')
+  $pm = [regex]::Match($r.Text, 'pages=(\d+) load_more_calls=(\d+) has_more=(\w+) mem_refused=(\w+) remaining=(\d+)')
+  $peakMatch = [regex]::Match($r.Text, 'peak_mib=([0-9.]+)')
+  if (-not $em.Success -or -not $pm.Success -or -not $peakMatch.Success) {
+    Add-Row '内存拒绝' 'FAIL' '—' ('没有 probe 汇总行；exit {0}' -f $r.Code)
+    return
+  }
+  $entries = [int]$em.Groups[1].Value
+  $memRefused = $pm.Groups[4].Value -eq 'true'
+  $remaining = [int]$pm.Groups[5].Value
+  $hasMore = $pm.Groups[3].Value -eq 'true'
+  $peak = [double]$peakMatch.Groups[1].Value
+  $ok = ($r.Code -eq 0 -and $entries -eq 50000 -and $memRefused -and $remaining -gt 0 -and (-not $hasMore) -and $peak -le 90)
+  $stat = 'entries={0} mem_refused={1} remaining={2} peak={3:N2} MiB' -f $entries, $pm.Groups[4].Value, $remaining, $peak
+  $note = '判据：按实测每行字节预测越线 → 拒绝加载并数清剩余（状态条写「已到内存上限，剩余 N 条未加载」）'
+  if ($ok) { Add-Row '内存拒绝' 'PASS' $stat $note } else { Add-Row '内存拒绝' 'FAIL' $stat $note }
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -593,6 +766,12 @@ Invoke-DeleteSelected
 Invoke-Denied
 Invoke-Vanish
 Invoke-LibraryMode
+Invoke-Paging
+Invoke-RowCost
+Invoke-PageSize
+Invoke-RescanKeep
+Invoke-VanishReturn
+Invoke-MemoryRefusal
 
 # 清理 ACL 残留（deny 目录已删过；deny-root 恢复在上面做了）。
 $null = $previewOk

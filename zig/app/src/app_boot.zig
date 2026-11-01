@@ -105,7 +105,9 @@ pub fn boot(
             // 浏览模式：**没有库文件**。内存里一个空库只为 `Import` 的类型；
             // `Import` 在这条路上永远不会被调用（按钮隐藏、拖入不安装）。
             library.* = try core.store.empty(init.gpa);
-            const session = browse_mod.Session.init(init.gpa, init.io, dir, .{}) catch |err| {
+            const session = browse_mod.Session.init(init.gpa, init.io, dir, .{
+                .limit = options.browse_limit,
+            }) catch |err| {
                 std.debug.print(
                     "otto-lite: 浏览入口无效 reason={s} path={s}\n",
                     .{ @errorName(err), dir },

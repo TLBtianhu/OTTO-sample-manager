@@ -55,6 +55,8 @@ test {
     // 目录浏览（Stage 0）：入口解析、懒枚举，以及"删掉选中行 → 墓碑 + 相邻行"的真实链路。
     _ = @import("browse.zig");
     _ = @import("browse_test.zig");
+    // Stage 1：分页 / 内存拒绝 / 重扫 reconcile / 目录消失再回来（真 RDCW）。
+    _ = @import("browse_page_test.zig");
     _ = @import("library_io.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");

@@ -12,6 +12,7 @@
 const std = @import("std");
 const usage = @import("usage.zig");
 const options_parse = @import("options_parse.zig");
+const browse_types = @import("browse_types.zig");
 
 /// `--convert <in.json> <out.otto>` 的两个位置值。用 struct 而不是两个可选字段，
 /// 避免"有输入没输出"这种只可能来自解析 bug 的中间状态。
@@ -70,6 +71,20 @@ pub const Options = struct {
     browse_select: ?[]const u8 = null,
     /// `--preview-first=<文件名>`：`--browse-probe` 用它量"选中 → 首次预览可用"。
     preview_first: ?[]const u8 = null,
+    /// `--browse-limit=<N>`：页大小 / 首批上限（默认 50000，硬上限 200000）。
+    browse_limit: usize = browse_types.default_limit,
+    /// `--pages=<N>`：`--browse-probe` 在首批之后最多再点几次「加载更多」。
+    browse_pages: u32 = 0,
+    /// `--force-rescan`：`--browse-watch-probe` 在跑完首批后强制一次全量重扫。
+    browse_force_rescan: bool = false,
+    /// `--rescan-pause-ms=<N>`：配合 `--force-rescan`——重扫枚举到一半时暂停 N ms，
+    /// 让探针在窗口里往目录里拷文件（验证 reconcile 不丢事件）。只给探针用。
+    browse_rescan_pause_ms: u64 = 0,
+    /// `--copy-during-rescan=<N>`：暂停窗口里探针自己拷几个文件进去。
+    browse_copy_count: u32 = 0,
+    /// `--vanish-then-return=<秒>`：`--browse-watch-probe` 删掉目录、等 N 秒、
+    /// 再建回来，然后在"下一次交互"时恢复（验证路径不可用的翻转）。
+    browse_vanish_seconds: ?f64 = null,
     /// `--watch-seconds=<秒>`：`--browse-watch-probe` 的观察窗口（默认 2 秒）。
     watch_seconds: f64 = 2,
     /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
@@ -486,4 +501,37 @@ test "浏览：--browse / 两个探针 / 探针参数各自两种写法，都不
     // 观察窗口为 0/负数没有意义：解析层直接拒，不让探针跑一个空窗口。
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--watch-seconds=0" }));
     try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--watch-seconds=abc" }));
+}
+
+test "分页/重扫/消失参数：默认值与两种写法；越界的页大小被拒" {
+    const plain = try parse(&[_][]const u8{"otto-lite"});
+    try testing.expectEqual(@as(usize, 50_000), plain.browse_limit);
+    try testing.expectEqual(@as(u32, 0), plain.browse_pages);
+    try testing.expect(!plain.browse_force_rescan);
+    try testing.expect(plain.browse_vanish_seconds == null);
+
+    const spaced = try parse(&[_][]const u8{
+        "otto-lite", "--browse-limit", "1000", "--pages", "3", "--force-rescan",
+        "--rescan-pause-ms", "1500", "--copy-during-rescan", "50",
+        "--vanish-then-return", "1.5",
+    });
+    try testing.expectEqual(@as(usize, 1000), spaced.browse_limit);
+    try testing.expectEqual(@as(u32, 3), spaced.browse_pages);
+    try testing.expect(spaced.browse_force_rescan);
+    try testing.expectEqual(@as(u64, 1500), spaced.browse_rescan_pause_ms);
+    try testing.expectEqual(@as(u32, 50), spaced.browse_copy_count);
+    try testing.expectEqual(@as(?f64, 1.5), spaced.browse_vanish_seconds);
+
+    const joined = try parse(&[_][]const u8{
+        "otto-lite", "--browse-limit=200000", "--pages=1", "--rescan-pause-ms=0",
+        "--copy-during-rescan=1", "--vanish-then-return=0",
+    });
+    try testing.expectEqual(@as(usize, 200_000), joined.browse_limit);
+    try testing.expectEqual(@as(?f64, 0), joined.browse_vanish_seconds);
+
+    // 0 / 超过 200000 都不悄悄截断：解析层直接拒。
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--browse-limit=0" }));
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--browse-limit=200001" }));
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--pages=0" }));
+    try testing.expectError(error.InvalidValue, parse(&[_][]const u8{ "otto-lite", "--vanish-then-return=-1" }));
 }

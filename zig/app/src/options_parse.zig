@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const options_mod = @import("options.zig");
+const browse_types = @import("browse_types.zig");
 
 /// 解析可能失败的三件事：标志缺值、值非法、`--set-opacity` 的百分数越界。
 pub const Error = error{ MissingValue, InvalidValue, InvalidOpacity };
@@ -378,6 +379,51 @@ pub fn browsing(options: *options_mod.Options, args: anytype, index: *usize, arg
         options.preview_first = arg["--preview-first=".len..];
         return true;
     }
+    // 分页与内存预算：`--browse-limit` 是页大小（默认 50000，硬上限 200000）。
+    if (std.mem.eql(u8, arg, "--browse-limit")) {
+        options.browse_limit = try parseBrowseLimit(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-limit=")) {
+        options.browse_limit = try parseBrowseLimit(arg["--browse-limit=".len..]);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--pages")) {
+        options.browse_pages = try parseCount(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--pages=")) {
+        options.browse_pages = try parseCount(arg["--pages=".len..]);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--force-rescan")) {
+        options.browse_force_rescan = true;
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--rescan-pause-ms")) {
+        options.browse_rescan_pause_ms = try parseMillis(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--rescan-pause-ms=")) {
+        options.browse_rescan_pause_ms = try parseMillis(arg["--rescan-pause-ms=".len..]);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--copy-during-rescan")) {
+        options.browse_copy_count = try parseCount(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--copy-during-rescan=")) {
+        options.browse_copy_count = try parseCount(arg["--copy-during-rescan=".len..]);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--vanish-then-return")) {
+        options.browse_vanish_seconds = try parseVanishSeconds(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--vanish-then-return=")) {
+        options.browse_vanish_seconds = try parseVanishSeconds(arg["--vanish-then-return=".len..]);
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--watch-seconds")) {
         options.watch_seconds = try parseSeconds(try value(args, index));
         return true;
@@ -489,5 +535,20 @@ fn parseMillis(text: []const u8) error{InvalidValue}!u64 {
 fn parseSeconds(text: []const u8) error{InvalidValue}!f64 {
     const seconds = std.fmt.parseFloat(f64, text) catch return error.InvalidValue;
     if (!(seconds > 0)) return error.InvalidValue;
+    return seconds;
+}
+
+/// `--browse-limit`：1..200000。越界是 `InvalidValue`（不悄悄截到上限——那会让
+/// "我明明给了 30 万"变成一句没人看见的谎）。
+fn parseBrowseLimit(text: []const u8) error{InvalidValue}!usize {
+    const limit = std.fmt.parseInt(usize, text, 10) catch return error.InvalidValue;
+    if (limit == 0 or limit > browse_types.hard_limit) return error.InvalidValue;
+    return limit;
+}
+
+/// `--vanish-then-return`：非负秒数（0 = 删掉后立刻建回来，也是有效场景）。
+fn parseVanishSeconds(text: []const u8) error{InvalidValue}!f64 {
+    const seconds = std.fmt.parseFloat(f64, text) catch return error.InvalidValue;
+    if (!(seconds >= 0)) return error.InvalidValue;
     return seconds;
 }
