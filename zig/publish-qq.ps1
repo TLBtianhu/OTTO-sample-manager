@@ -1,4 +1,4 @@
-# 把 OTTO 的安装包发到**指定 QQ 群**。
+﻿# 把 OTTO 的安装包发到**指定 QQ 群**。
 #
 #   & '.\zig\publish-qq.ps1' -Version 0.39.0              # 预演：只打印，不发
 #   & '.\zig\publish-qq.ps1' -Version 0.39.0 -Send       # 真的发
@@ -14,6 +14,8 @@ param(
   [switch]$Send,
   [switch]$PortableOnly,
   [string]$Notes = '',
+  # 只发给名字里含这个片段的群（用于补发单个群，例如被禁言后恢复）。
+  [string]$Only = '',
   [string]$BridgeDir = 'C:\qq机器人\qq-bridge'
 )
 
@@ -94,6 +96,7 @@ Write-Output ("  网关里共 {0} 个群" -f $list.Count)
 
 $targets = @()
 foreach ($name in $allowedGroups) {
+  if ($Only -and ($name -notlike "*$Only*")) { continue }
   $hit = $list | Where-Object { $_.group_name -eq $name } | Select-Object -First 1
   if ($hit) {
     $targets += $hit
