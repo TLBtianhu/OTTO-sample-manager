@@ -1,8 +1,8 @@
-//! 下载 + 验签 + 落盘的端到端测试：真安装包、真 `.sig`、真临时目录。
+//! 下载 + 验签 + 落盘的端到端测试：自造夹具、自造签名、真临时目录。
 //!
-//! 依赖 `C:\src\otto-zig-lite\zig\dist\otto-lite-0.3.0-setup.exe` 与 `.sig`
-//! （本仓库不发安装包，dist/ 也不进版本库）：文件不存在时整条用例 `SkipZigTest`，
-//! 和 `update_check.zig` 里 0.1.1 的真实签名向量同一条约定。
+//! 夹具是 `update_fixture.zig` 里的一小段固定字节与一对**丢掉了私钥**的
+//! minisign 公钥/签名。**不读 `zig\dist`**：那些产物只在这台机器上存在，
+//! 换台机器会让这几条测试全部 Skip（而 `health` 把 Skip 算失败）。
 //!
 //! 覆盖：
 //!   1. 成功：`.part` → 最终文件，字节数 / SHA-256 / 版本 / 无 `.part` 残留；
@@ -11,23 +11,13 @@
 //!   4. feed 声明超过 64 MiB：下载前 `TooLarge`。
 
 const std = @import("std");
+const fixture = @import("update_fixture.zig");
 const update_check = @import("update_check.zig");
 const update_download = @import("update_download.zig");
 
 const testing = std.testing;
 const allocator = testing.allocator;
 const io = testing.io;
-
-const fixture_exe = "C:\\src\\otto-zig-lite\\zig\\dist\\otto-lite-0.3.0-setup.exe";
-
-fn fixtureExists() bool {
-    std.Io.Dir.cwd().access(io, fixture_exe, .{}) catch return false;
-    return true;
-}
-
-fn readFixture(allocator_: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator_, .limited(16 * 1024 * 1024));
-}
 
 /// `C:\a\b` → `file:///C:/a/b`（feed 的 url 字段用这一种最不含糊）。
 fn fileUrl(allocator_: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -67,6 +57,12 @@ fn expectMissing(path: []const u8) void {
     @panic("文件不应该存在");
 }
 
+/// 把夹具字节写进临时目录，返回它的绝对路径（调用方释放）。
+fn writeSource(tmp: *std.testing.TmpDir) ![]u8 {
+    try tmp.dir.writeFile(io, .{ .sub_path = "source.exe", .data = fixture.content });
+    return tmpPath(tmp, "source.exe");
+}
+
 test "文件名：otto-lite-<version>-setup.exe，落在 <updates> 下" {
     const name = try update_download.packageName(allocator, "0.3.0");
     defer allocator.free(name);
@@ -78,70 +74,66 @@ test "文件名：otto-lite-<version>-setup.exe，落在 <updates> 下" {
 }
 
 test "成功：file:// feed → .part → 验签 → 改名；SHA-256 与内容一致" {
-    if (!fixtureExists()) return error.SkipZigTest;
-    const sig_path = fixture_exe ++ ".sig";
-
-    const exe_bytes = try readFixture(allocator, fixture_exe);
-    defer allocator.free(exe_bytes);
-    const signature_text = try readFixture(allocator, sig_path);
-    defer allocator.free(signature_text);
-    const signature = std.mem.trim(u8, signature_text, " \t\r\n");
-
-    const url = try fileUrl(allocator, fixture_exe);
-    defer allocator.free(url);
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try writeFeed(&tmp, "feed.json", "0.3.0", url, exe_bytes.len, signature);
+
+    const source_path = try writeSource(&tmp);
+    defer allocator.free(source_path);
+    const url = try fileUrl(allocator, source_path);
+    defer allocator.free(url);
+    try writeFeed(&tmp, "feed.json", fixture.version, url, fixture.content.len, fixture.signature_b64);
 
     const feed_path = try tmpPath(&tmp, "feed.json");
     defer allocator.free(feed_path);
     const updates_dir = try tmpPath(&tmp, "updates");
     defer allocator.free(updates_dir);
 
-    var result = try update_download.downloadAndVerify(allocator, io, feed_path, updates_dir, null);
+    var result = try update_download.downloadAndVerifyWithKey(
+        allocator,
+        io,
+        feed_path,
+        updates_dir,
+        null,
+        fixture.public_key_b64,
+    );
     defer result.deinit(allocator);
 
-    try testing.expectEqualStrings("0.3.0", result.versionText());
-    try testing.expectEqual(@as(u64, @intCast(exe_bytes.len)), result.bytes);
-    try testing.expect(std.mem.endsWith(u8, result.path, "otto-lite-0.3.0-setup.exe"));
+    const expected_name = try update_download.packageName(allocator, fixture.version);
+    defer allocator.free(expected_name);
+    try testing.expectEqualStrings(fixture.version, result.versionText());
+    try testing.expectEqual(@as(u64, fixture.content.len), result.bytes);
+    try testing.expect(std.mem.endsWith(u8, result.path, expected_name));
 
     // 最终文件存在且字节数对；`.part` 已经改名，不该残留。
     const stat = try std.Io.Dir.cwd().statFile(io, result.path, .{});
-    try testing.expectEqual(@as(u64, @intCast(exe_bytes.len)), stat.size);
+    try testing.expectEqual(@as(u64, fixture.content.len), stat.size);
     var part_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const part_path = try std.fmt.bufPrint(&part_buffer, "{s}.part", .{result.path});
     expectMissing(part_path);
 
-    // SHA-256 是流式算的；这里整段算一遍对照（测试里 1.6 MB 没有内存压力）。
+    // SHA-256 是流式算的；这里整段算一遍对照。
     var expected_sha: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(exe_bytes, &expected_sha, .{});
+    std.crypto.hash.sha2.Sha256.hash(fixture.content, &expected_sha, .{});
     try testing.expectEqualSlices(u8, &expected_sha, &result.sha256);
 }
 
 test "篡改签名：信封仍合法但 Ed25519 不符 → SignatureMismatch，两处文件都不留" {
-    if (!fixtureExists()) return error.SkipZigTest;
-    const sig_path = fixture_exe ++ ".sig";
-
-    const exe_bytes = try readFixture(allocator, fixture_exe);
-    defer allocator.free(exe_bytes);
-    const signature_text = try readFixture(allocator, sig_path);
-    defer allocator.free(signature_text);
-
-    const tampered = try tamperSignature(allocator, signature_text);
+    const tampered = try tamperSignature(allocator, fixture.signature_b64);
     defer allocator.free(tampered);
     // 前提：篡改后的信封仍然通过（算法 / key id 没动），否则测不到"整包验签"。
     try testing.expectEqual(
         update_check.SignatureCheck.ok,
-        update_check.inspectSignature(update_check.public_key_b64, tampered),
+        update_check.inspectSignature(fixture.public_key_b64, tampered),
     );
-
-    const url = try fileUrl(allocator, fixture_exe);
-    defer allocator.free(url);
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try writeFeed(&tmp, "feed.json", "0.3.0", url, exe_bytes.len, tampered);
+
+    const source_path = try writeSource(&tmp);
+    defer allocator.free(source_path);
+    const url = try fileUrl(allocator, source_path);
+    defer allocator.free(url);
+    try writeFeed(&tmp, "feed.json", fixture.version, url, fixture.content.len, tampered);
 
     const feed_path = try tmpPath(&tmp, "feed.json");
     defer allocator.free(feed_path);
@@ -150,10 +142,17 @@ test "篡改签名：信封仍合法但 Ed25519 不符 → SignatureMismatch，�
 
     try testing.expectError(
         error.SignatureMismatch,
-        update_download.downloadAndVerify(allocator, io, feed_path, updates_dir, null),
+        update_download.downloadAndVerifyWithKey(
+            allocator,
+            io,
+            feed_path,
+            updates_dir,
+            null,
+            fixture.public_key_b64,
+        ),
     );
 
-    const final_path = try update_download.packagePath(allocator, updates_dir, "0.3.0");
+    const final_path = try update_download.packagePath(allocator, updates_dir, fixture.version);
     defer allocator.free(final_path);
     expectMissing(final_path);
     var part_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -162,26 +161,18 @@ test "篡改签名：信封仍合法但 Ed25519 不符 → SignatureMismatch，�
 }
 
 test "源文件截断：feed 的 size 对不上 → SizeMismatch，不落盘" {
-    if (!fixtureExists()) return error.SkipZigTest;
-
-    const exe_bytes = try readFixture(allocator, fixture_exe);
-    defer allocator.free(exe_bytes);
-    const signature_text = try readFixture(allocator, fixture_exe ++ ".sig");
-    defer allocator.free(signature_text);
-    const signature = std.mem.trim(u8, signature_text, " \t\r\n");
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // 截断的源文件：少了最后 1000 字节，但 feed 仍声明原始大小。
-    const truncated = exe_bytes[0 .. exe_bytes.len - 1000];
+    // 截断的源文件：少最后 1 字节，但 feed 仍声明原始大小。
+    const truncated = fixture.content[0 .. fixture.content.len - 1];
     try tmp.dir.writeFile(io, .{ .sub_path = "truncated.exe", .data = truncated });
     const truncated_path = try tmpPath(&tmp, "truncated.exe");
     defer allocator.free(truncated_path);
     const url = try fileUrl(allocator, truncated_path);
     defer allocator.free(url);
 
-    try writeFeed(&tmp, "feed.json", "0.3.0", url, exe_bytes.len, signature);
+    try writeFeed(&tmp, "feed.json", fixture.version, url, fixture.content.len, fixture.signature_b64);
     const feed_path = try tmpPath(&tmp, "feed.json");
     defer allocator.free(feed_path);
     const updates_dir = try tmpPath(&tmp, "updates");
@@ -189,10 +180,17 @@ test "源文件截断：feed 的 size 对不上 → SizeMismatch，不落盘" {
 
     try testing.expectError(
         error.SizeMismatch,
-        update_download.downloadAndVerify(allocator, io, feed_path, updates_dir, null),
+        update_download.downloadAndVerifyWithKey(
+            allocator,
+            io,
+            feed_path,
+            updates_dir,
+            null,
+            fixture.public_key_b64,
+        ),
     );
 
-    const final_path = try update_download.packagePath(allocator, updates_dir, "0.3.0");
+    const final_path = try update_download.packagePath(allocator, updates_dir, fixture.version);
     defer allocator.free(final_path);
     expectMissing(final_path);
     var part_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -201,14 +199,12 @@ test "源文件截断：feed 的 size 对不上 → SizeMismatch，不落盘" {
 }
 
 test "feed 的 size 超过 64 MiB：下载前就 TooLarge" {
-    if (!fixtureExists()) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeFeed(
         &tmp,
         "feed.json",
-        "0.3.0",
+        fixture.version,
         "https://example.com/otto-lite-0.3.0-setup.exe",
         update_download.max_download_bytes + 1,
         "c2lnbmF0dXJl",
@@ -220,7 +216,14 @@ test "feed 的 size 超过 64 MiB：下载前就 TooLarge" {
 
     try testing.expectError(
         error.TooLarge,
-        update_download.downloadAndVerify(allocator, io, feed_path, updates_dir, null),
+        update_download.downloadAndVerifyWithKey(
+            allocator,
+            io,
+            feed_path,
+            updates_dir,
+            null,
+            fixture.public_key_b64,
+        ),
     );
 }
 

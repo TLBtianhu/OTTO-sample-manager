@@ -4,7 +4,8 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\fresh-user.ps1 -KeepTemp
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\fresh-user.ps1 -Version 0.31.0
 #
-# 它模拟的不是"开发者顺手点一下"，而是一台从没见过这个项目的机器上的九步：
+# 它模拟的不是"开发者顺手点一下"，而是一台从没见过这个项目的机器上的九步，
+# 外加第 10 步收尾核对（进程 / 环境变量 / 临时目录 / 真实用户目录，全部具名断言）：
 #
 #   1. 造全新目录        downloads / program / appdata / localappdata（都在 %TEMP%\otto-fresh-*）
 #   2. "下载"并验签      从 zig\dist 拷 setup.exe 到 downloads，用 zig\keys 的公钥验 minisign
@@ -31,7 +32,8 @@
 #     父进程的环境变量一次都不改；
 #   * 不弹窗：所有子进程 UseShellExecute=$false + CreateNoWindow=$true + 重定向两个流
 #     （CONVENTIONS 第 2 条）；会建窗口的那一步走 --nanoui-snapshot（隐藏 HWND）；
-#   * 退出前不留进程、不留临时目录（finally 里做，失败也做）；
+#   * 退出前不留进程、不留临时目录（finally 里做，失败也做）；收尾的每一条
+#     也是具名断言（第 10 步，带超时轮询），失败会指名，而不是只剩一个 exit 1；
 #   * 失败即 exit 1：任何一条断言红了，整个脚本红。
 #
 # 安装为什么要 __COMPAT_LAYER：
@@ -157,7 +159,7 @@ function Start-Step([int]$Number, [string]$Title) {
   if ($Number -eq 0) {
     Write-Head ('── 前置条件：不满足就没法开始 ──')
   } else {
-    Write-Head ('── 步骤 {0}/9：{1} ──' -f $Number, $Title)
+    Write-Head ('── 步骤 {0}/10：{1} ──' -f $Number, $Title)
   }
 }
 
@@ -210,9 +212,9 @@ function Complete-Step {
   $suffix = ''
   if ($skipped -gt 0) { $suffix = '，{0} 项 SKIP' -f $skipped }
   if ($failed -eq 0) {
-    Write-Host ('  → 步骤 {0} PASS（{1} 项断言{2}）' -f $step, ($total - $skipped), $suffix) -ForegroundColor Green
+    Write-Host ('  → 步骤 {0}/10 PASS（{1} 项断言{2}）' -f $step, ($total - $skipped), $suffix) -ForegroundColor Green
   } else {
-    Write-Host ('  → 步骤 {0} FAIL（{1}/{2} 项失败{3}）' -f $step, $failed, $total, $suffix) -ForegroundColor Red
+    Write-Host ('  → 步骤 {0}/10 FAIL（{1}/{2} 项失败{3}）' -f $step, $failed, $total, $suffix) -ForegroundColor Red
   }
 }
 
@@ -597,16 +599,17 @@ function Invoke-Preconditions {
 # 放在 finally 里：杀残留进程 → 恢复环境变量 → 删临时树 → 核对 %TEMP% 没有多出东西。
 function Invoke-Cleanup {
   try {
-    $left = @(Get-ProcessUnder -Root $script:tempRoot)
-    if ($left.Count -gt 0) {
-      $idle = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 5
-      if (-not $idle.Clear) {
-        foreach ($proc in @($idle.Left)) {
-          try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { }
-        }
-        $script:cleanup.LeftoverProcesses = @($idle.Left)
-        $idle = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 10
+    # 可能有延迟：NSIS 卸载器的自删除副本在父进程退出后还要跑一会儿。
+    # 先等 10 s（每 100 ms 看一次）；到点还活着就是红——先记账再强杀，
+    # 强杀只是为了不给系统留进程，不洗白这条失败。
+    $idle = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 10
+    $script:cleanup.LeftoverProcesses = @()
+    if (-not $idle.Clear) {
+      $script:cleanup.LeftoverProcesses = @($idle.Left)
+      foreach ($proc in @($idle.Left)) {
+        try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { }
       }
+      $null = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 5
     }
 
     foreach ($name in @('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) {
@@ -628,15 +631,16 @@ function Invoke-Cleanup {
         $script:cleanup.TempRemoved = $false
       } else {
         $script:cleanup.FreedBytes = Get-TreeSize $script:tempRoot
-        for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        # 带超时的轮询：卸载器/索引器/杀毒软件可能还握着句柄。轮询只容忍延迟，
+        # 10 s 后还在就是红——严格性没有降低。
+        $script:cleanup.TempRemoved = $false
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($watch.Elapsed.TotalSeconds -lt 10) {
           Remove-Item -LiteralPath $script:tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-          if (-not (Test-Path -LiteralPath $script:tempRoot)) { break }
-          Start-Sleep -Milliseconds 300
+          if (-not (Test-Path -LiteralPath $script:tempRoot)) { $script:cleanup.TempRemoved = $true; break }
+          Start-Sleep -Milliseconds 100
         }
-        $script:cleanup.TempRemoved = -not (Test-Path -LiteralPath $script:tempRoot)
-        if (-not $script:cleanup.TempRemoved) {
-          $script:cleanup.Error = ('临时目录删不掉：{0}' -f $script:tempRoot)
-        }
+        $script:cleanup.TempRemoved = $script:cleanup.TempRemoved -or (-not (Test-Path -LiteralPath $script:tempRoot))
       }
     } else {
       $script:cleanup.TempRemoved = $true
@@ -646,47 +650,65 @@ function Invoke-Cleanup {
   }
 }
 
+# 收尾核对：与正文同一套断言（有名字、计入总数、失败时指名）。
+# 可能有延迟的三条（进程 / 临时目录 / 真实 %TEMP%）已经在 Invoke-Cleanup 里
+# 轮询到 10 s；这里只把结论变成具名断言，超时后照样红。
 function Write-CleanupReport {
-  Write-Head '── 收尾 ──'
-
   $leftCount = @($script:cleanup.LeftoverProcesses).Count
-  if ($leftCount -eq 0) {
-    Write-Host '  [PASS] 没有残留进程'
-  } else {
-    Write-Host ('  [FAIL] 残留进程 {0} 个（已强杀）' -f $leftCount) -ForegroundColor Red
-    foreach ($proc in @($script:cleanup.LeftoverProcesses)) {
-      Write-Host ('         pid={0} {1} {2}' -f $proc.Id, $proc.Name, $proc.Path)
-    }
+  $leftDetail = '10 s 内没有残留进程'
+  if ($leftCount -gt 0) {
+    $leftDetail = '10 s 后仍活着：' + ((@($script:cleanup.LeftoverProcesses) | ForEach-Object {
+      '{0}(pid={1})' -f $_.Name, $_.Id }) -join '、')
   }
+  Add-Check '收尾：没有残留进程（NSIS 的自删除副本也算）' ($leftCount -eq 0) $leftDetail
 
-  if ($script:cleanup.EnvRestored) {
-    Write-Host '  [PASS] 环境变量已恢复（APPDATA / LOCALAPPDATA / TEMP / TMP 与启动时一致）'
-  } else {
-    Write-Host '  [FAIL] 环境变量没恢复（见上）' -ForegroundColor Red
+  $envDetail = '与启动时一致'
+  if (-not $script:cleanup.EnvRestored) {
+    $envDetail = (@('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP') | ForEach-Object {
+      '{0}={1}' -f $_, [Environment]::GetEnvironmentVariable($_, 'Process') }) -join '；'
   }
+  Add-Check '收尾：环境变量已恢复（APPDATA / LOCALAPPDATA / TEMP / TMP）' $script:cleanup.EnvRestored $envDetail
 
   if ($KeepTemp) {
-    Write-Host ('  [KEEP] 临时目录保留：{0}' -f $script:tempRoot)
-  } elseif ($script:cleanup.TempRemoved) {
-    Write-Host ('  [PASS] 临时目录已删除，释放 {0:N1} MB' -f ($script:cleanup.FreedBytes / 1MB))
+    Add-Skip '收尾：临时目录已删除' ('-KeepTemp：故意保留 {0}' -f $script:tempRoot)
   } else {
-    Write-Host ('  [FAIL] 临时目录没删掉：{0}' -f $script:tempRoot) -ForegroundColor Red
+    Add-Check '收尾：临时目录已删除' $script:cleanup.TempRemoved ('释放 {0:N1} MB' -f ($script:cleanup.FreedBytes / 1MB))
   }
-  if ($script:cleanup.Error) { Write-Host ('         ' + $script:cleanup.Error) }
+
+  # 真实 %TEMP% 也带超时轮询：NSIS 的自删除副本就落在 %TEMP% 里，消失得比卸载器晚。
+  # 只核对**我们要负责的**名字（otto-fresh-* / NSIS 的 ns*.tmp、~ns*.tmp）：
+  # %TEMP% 是公共目录，别的程序随时往里写（这台机器上出现过 VS 的 18 MB catalog
+  # 临时副本），把它们算成我们的红只会制造"断言全过、exit 1"的假红。
+  $newEntries = @()
+  if ($script:realTemp) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+      $afterTemp = @(Get-ChildItem -LiteralPath $script:realTemp -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+      $newEntries = @($afterTemp | Where-Object {
+        if ($script:tempBefore -contains $_) { return $false }
+        return ($_ -like 'otto-fresh-*') -or ($_ -like 'ns*.tmp') -or ($_ -like '~ns*.tmp')
+      })
+      if (($newEntries.Count -eq 0) -or ($watch.Elapsed.TotalSeconds -ge 10)) { break }
+      Start-Sleep -Milliseconds 100
+    }
+  }
+  $script:cleanup.TempNewEntries = $newEntries
+  $tempDetail = [string]$script:realTemp
+  if ($newEntries.Count -gt 0) { $tempDetail = '多出：' + ($newEntries -join '、') }
+  Add-Check '收尾：真实 %TEMP% 没有多出东西' ($newEntries.Count -eq 0) $tempDetail
 
   # 硬约束的最后一道：真实的 %APPDATA%\OTTO 一个文件都不该变。
   $realAfter = @(Get-TreeLightSnapshot $script:realOtto)
   $realSame = (@(Compare-Object -ReferenceObject @($script:realOttoBefore) -DifferenceObject @($realAfter)).Count -eq 0)
   $script:cleanup.RealOttoUnchanged = $realSame
-  if ($realSame) {
-    Write-Host ('  [PASS] 真实 %APPDATA%\OTTO 未被触碰（{0} 个文件，名字与大小一致）' -f $realAfter.Count)
-  } else {
-    Write-Host '  [FAIL] 真实 %APPDATA%\OTTO 变了（名字或大小不一致）' -ForegroundColor Red
+  Add-Check '收尾：真实 %APPDATA%\OTTO 未被触碰' $realSame ('{0} 个文件，名字与大小一致' -f $realAfter.Count)
+  if (-not $realSame) {
     $delta = @(Compare-Object -ReferenceObject @($script:realOttoBefore) -DifferenceObject @($realAfter))
-    foreach ($row in $delta) {
-      Write-Host ('         {0} {1}' -f $row.SideIndicator, $row.InputObject)
-    }
+    foreach ($row in $delta) { Write-Host ('         {0} {1}' -f $row.SideIndicator, $row.InputObject) }
   }
+
+  Add-Check '收尾：清理过程没有抛异常' ([string]::IsNullOrEmpty($script:cleanup.Error)) (
+    $(if ($script:cleanup.Error) { $script:cleanup.Error } else { '没有异常' }))
 }
 
 # ---------------------------------------------------------------------------
@@ -1073,13 +1095,11 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# 收尾核对：真实 %TEMP% 有没有多出我们要负责的东西
+# 10. 收尾核对（与正文同一套断言：有名字、计入总数、失败时指名）
 # ---------------------------------------------------------------------------
-if ($script:realTemp) {
-  $afterTemp = @(Get-ChildItem -LiteralPath $script:realTemp -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-  $newEntries = @($afterTemp | Where-Object { $script:tempBefore -notcontains $_ })
-  $script:cleanup.TempNewEntries = $newEntries
-}
+Start-Step 10 '收尾核对（进程 / 环境变量 / 临时目录 / 真实用户目录）'
+Write-CleanupReport
+Complete-Step
 
 # ---------------------------------------------------------------------------
 # 汇总
@@ -1095,7 +1115,7 @@ $tableRows = @()
 $header = @('步骤', '内容', '结果', '断言')
 $widths = @(0, 0, 0, 0)
 for ($i = 0; $i -lt $header.Count; $i++) { $widths[$i] = Get-DisplayWidth $header[$i] }
-foreach ($number in @(0..9)) {
+foreach ($number in @(0..10)) {
   if (-not $script:stepTitles.ContainsKey($number)) { continue }
   $total = $script:stepTotal[$number]
   $bad = $script:stepFailed[$number]
@@ -1119,41 +1139,39 @@ Write-Host ('  ' + (Format-Cells $header $widths))
 foreach ($cells in $tableRows) { Write-Host ('  ' + (Format-Cells $cells $widths)) }
 Write-Host ('  {0}' -f ('─' * 60))
 Write-Host ('  断言：{0} PASS / {1} FAIL / {2} SKIP' -f $passed.Count, $failed.Count, $skipped.Count)
+if ($failed.Count -gt 0) {
+  Write-Host ('  红在：{0}' -f ((@($failed | Select-Object -First 6) | ForEach-Object { $_.Name }) -join ' / ')) -ForegroundColor Red
+}
 Write-Host ('  总耗时：{0:N1} s' -f $script:clock.Elapsed.TotalSeconds)
 
-$stepsDesigned = 9
-$stepsRun = 0
+$stepsDesigned = 10
 $stepsPassed = 0
-foreach ($number in @(1..9)) {
+foreach ($number in @(1..10)) {
   if (-not $script:stepTitles.ContainsKey($number)) { continue }
-  $stepsRun++
   if ($script:stepFailed[$number] -eq 0) { $stepsPassed++ }
 }
 
-Write-CleanupReport
-
-$cleanupOk = ($script:cleanup.LeftoverProcesses.Count -eq 0) -and $script:cleanup.EnvRestored -and
-  ($KeepTemp -or $script:cleanup.TempRemoved) -and ($script:cleanup.TempNewEntries.Count -eq 0) -and
-  $script:cleanup.RealOttoUnchanged -and (-not $script:cleanup.Error)
-
-if ($script:cleanup.TempNewEntries.Count -gt 0) {
-  Write-Host ('  [FAIL] 真实 %TEMP% 里多出了东西：{0}' -f ($script:cleanup.TempNewEntries -join '、')) -ForegroundColor Red
+$failedLabel = 'none'
+if ($failed.Count -gt 0) {
+  $failedLabel = (@($failed | Select-Object -First 3 | ForEach-Object { $_.Name }) -join '|')
+  if ($failed.Count -gt 3) { $failedLabel += ('|+{0}' -f ($failed.Count - 3)) }
 }
 
-$ok = ($failed.Count -eq 0) -and $cleanupOk
+$ok = ($failed.Count -eq 0)
 Write-Host ''
 $oldLabel = ''
 if ($script:oldVersion) { $oldLabel = $script:oldVersion } else { $oldLabel = 'none' }
 if ($ok) {
   Write-Host ('全新用户测试通过：{0} 步 / {1} 项断言' -f $stepsPassed, $passed.Count) -ForegroundColor Green
-  # 机器可读的一行（纯 ASCII）：health.ps1 的 -Fresh 只认这一行。
+  # 机器可读的一行：health.ps1 的 -Fresh 只认这一行。前缀与字段名是 ASCII；
+  # 只有 FAIL 行的 names= 里可能出现中文断言名。
   Write-Host ('fresh-user: PASS steps={0}/{1} checks={2}/{3} skip={4} version={5} old={6} sec={7:N1}' -f
     $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $skipped.Count, $script:version, $oldLabel, $script:clock.Elapsed.TotalSeconds)
   Write-Host ('被测版本 {0}{1}' -f $script:version, $(if ($script:oldVersion) { '；另一个版本 ' + $script:oldVersion } else { '' }))
   exit 0
 } else {
   Write-Host ('全新用户测试失败：{0} 项断言红了' -f $failed.Count) -ForegroundColor Red
-  Write-Host ('fresh-user: FAIL steps={0}/{1} checks={2}/{3} failed={4} version={5} old={6} sec={7:N1}' -f
-    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $failed.Count, $script:version, $oldLabel, $script:clock.Elapsed.TotalSeconds)
+  Write-Host ('fresh-user: FAIL steps={0}/{1} checks={2}/{3} failed={4} names={5} version={6} old={7} sec={8:N1}' -f
+    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $failed.Count, $failedLabel, $script:version, $oldLabel, $script:clock.Elapsed.TotalSeconds)
   exit 1
 }

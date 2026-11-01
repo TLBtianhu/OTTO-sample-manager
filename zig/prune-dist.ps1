@@ -16,10 +16,10 @@
 #      fresh-user.ps1 每次跑完会把用过的版本打在自己的报告里，抄进来即可。
 #   4. -KeepVersion 显式点名——临时要保某一版时用它，不必改脚本；
 #   5. **测试硬编码引用的版本**——zig\app\src 里写着 zig\dist\otto-lite-<x.y.z>-setup.exe
-#      的地方（现在是 update_download_test.zig 的 0.3.0 与 update_check.zig 的 0.1.1），
-#      那个版本不能删：删了那 5 条用例会返回 SkipZigTest，app 套件从 320 掉到 315，
-#      而 health.ps1 把 skip 当失败。**"测试变少"比"测试变红"更难查**，所以这条是自动的：
-#      扫源码，不靠人记得。（这是 0.31.0 那次清理实测出来的：删完 app 315/320。）
+#      的地方，那个版本不能删：删了对应用例会返回 SkipZigTest，而 health.ps1 把 skip
+#      当失败。**"测试变少"比"测试变红"更难查**，所以这条是自动的：扫源码，不靠人记得。
+#      （0.31.0 那次清理实测过：删完 app 315/320；0.32.0 起更新检查/下载的测试改用自造
+#      夹具（app\src\update_fixture.zig），这里现在扫不到东西。扫描保留，防复发。）
 
 #
 # 删除的对象只有这四种文件：otto-lite-<x.y.z>-portable.zip / -setup.exe / 及各自的 .sig。
@@ -119,8 +119,8 @@ if ($UsedFile -and (Test-Path -LiteralPath $UsedFile -PathType Leaf)) {
 # ---------------------------------------------------------------------------
 # 3b. 测试硬编码引用的版本（扫 zig\app\src）
 #
-# 这两个版本是 update_download_test.zig / update_check.zig 的夹具：删掉它们不会让测试
-# 变红，而是让测试**变少**（SkipZigTest）。跳过比失败更难查，所以这条不能靠人记得。
+# 删掉被硬编码引用的版本不会让测试变红，而是让测试**变少**（SkipZigTest）；跳过比失败
+# 更难查，所以这条不能靠人记得。0.32.0 起 update_* 的测试改成了自造夹具，这里应变空。
 # ---------------------------------------------------------------------------
 
 $fixtureVersions = @()
@@ -164,7 +164,7 @@ foreach ($version in $usedVersions) {
 }
 foreach ($version in $fixtureVersions) {
   if (-not $versions.ContainsKey($version)) {
-    Write-Warning ('测试夹具引用了 {0}，但 dist 里没有这一版：那 5 条用例会变成 SKIP' -f $version)
+    Write-Warning ('测试夹具引用了 {0}，但 dist 里没有这一版：引用它的用例会变成 SKIP' -f $version)
     continue
   }
   if ($keepReason.ContainsKey($version)) {
@@ -211,7 +211,7 @@ if ($UsedFile -and (Test-Path -LiteralPath $UsedFile -PathType Leaf)) {
   Write-Host ('verify 标记：没有 {0}（verify-distribution 目前不读 dist 产物，默认没有额外要保的版本）' -f $UsedFile)
 }
 if ($fixtureVersions.Count -gt 0) {
-  Write-Host ('测试夹具：{0}（被 {1} 硬编码引用；删了会让 5 条用例变成 SKIP）' -f
+  Write-Host ('测试夹具：{0}（被 {1} 硬编码引用；删了会让引用它的用例变成 SKIP）' -f
     ($fixtureVersions -join '、'), ($fixtureFiles -join '、'))
 } else {
   Write-Host '测试夹具：zig\app\src 里没有引用 dist 的版本'

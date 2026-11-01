@@ -37,9 +37,9 @@
 //!   * **key id 是否与内置公钥（`zig/keys/otto-lite.key.pub`）一致**——不一致
 //!     说明这份 feed 不是我们签的，检查直接失败。
 //!
-//! `verifySignatureFile` 是真正的整包验证（Ed25519 + BLAKE2b-512），已经用真实的
-//! `otto-lite-0.1.1-setup.exe` 与 `.sig` 钉住。下载链路（`update_download.zig`）
-//! 不把 64 MiB 的安装包读进内存，而是分块喂 BLAKE2b-512，最后用
+//! `verifySignatureFile` 是真正的整包验证（Ed25519 + BLAKE2b-512），已经用
+//! `update_fixture.zig` 里自造的公钥/签名对钉住（不读 `zig\dist`）。下载链路
+//! （`update_download.zig`）不把 64 MiB 的安装包读进内存，而是分块喂 BLAKE2b-512，最后用
 //! `verifyPrehashedSignature` 对摘要验 Ed25519；两个函数共用同一套信封/公钥
 //! 解码，`verifySignatureFile` 只是"先整段哈希，再走摘要入口"的薄封装。
 //!
@@ -369,7 +369,7 @@ fn verifyMessage(pubkey_b64: []const u8, sig_b64: []const u8, message: []const u
 }
 
 // ---------------------------------------------------------------------------
-// 测试：解析 / 判定 / 信封（真实安装包的整包验证在下面单列，缺文件时 Skip）
+// 测试：解析 / 判定 / 信封；整包验证用自造夹具（update_fixture.zig），不读 dist。
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -539,51 +539,55 @@ const real_signature_text =
     "YlNOWVNvRHVqN3RkeHFUbEI2TU9DeUtJVjViY01aNTNkYkoydWNtS21qVUJob3puc2lU" ++
     "NHNMeWlFSnFsLzM0M0J3PT0K";
 
-test "真安装包 + 真 .sig：内置公钥验过；改一个字节就不过（dist 不存在则 Skip）" {
-    const exe_path = "C:\\src\\otto-zig-lite\\zig\\dist\\otto-lite-0.1.1-setup.exe";
-    const io = std.testing.io;
+test "自造夹具：给定签名与公钥，整包验签的判定正确（不依赖 dist）" {
+    const fixture = @import("update_fixture.zig");
 
-    const signature = std.Io.Dir.cwd().readFileAlloc(io, exe_path ++ ".sig", testing.allocator, .limited(64 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer testing.allocator.free(signature);
-    // 上面那份内联常量必须与真实 `.sig` 逐字节一致（它同时是信封测试的输入）。
-    try testing.expectEqualStrings(real_signature_text, std.mem.trim(u8, signature, " \t\r\n"));
+    // 信封：算法与 key id 都对——这一步是"检查阶段"能验的全部。
+    try testing.expectEqual(
+        SignatureCheck.ok,
+        inspectSignature(fixture.public_key_b64, fixture.signature_b64),
+    );
 
-    const exe_bytes = std.Io.Dir.cwd().readFileAlloc(io, exe_path, testing.allocator, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer testing.allocator.free(exe_bytes);
-    try testing.expectEqual(@as(usize, 1465543), exe_bytes.len);
-
-    // 预哈希变体：先 BLAKE2b-512 再验 Ed25519——与 tools/verify-minisign.js 一致。
-    try testing.expectEqual(SignatureCheck.ok, inspectSignature(public_key_b64, signature));
-    try testing.expect(verifySignatureFile(public_key_b64, signature, exe_bytes));
+    // 内容对：整包验签通过。
+    try testing.expect(verifySignatureFile(
+        fixture.public_key_b64,
+        fixture.signature_b64,
+        fixture.content,
+    ));
 
     // 流式路径：分块 update，最后拿摘要验签——和整段哈希必须得到同一个结论。
     // 下载链路用的就是这条路径（64 MiB 安装包不整读进内存）。
     var hasher = std.crypto.hash.blake2.Blake2b512.init(.{});
     var offset: usize = 0;
-    while (offset < exe_bytes.len) {
-        const end = @min(offset + 64 * 1024, exe_bytes.len);
-        hasher.update(exe_bytes[offset..end]);
+    while (offset < fixture.content.len) {
+        const end = @min(offset + 64, fixture.content.len);
+        hasher.update(fixture.content[offset..end]);
         offset = end;
     }
     const digest = hasher.finalResult();
-    try testing.expect(verifyPrehashedSignature(public_key_b64, signature, &digest));
+    try testing.expect(verifyPrehashedSignature(fixture.public_key_b64, fixture.signature_b64, &digest));
 
     // 摘要错一个字节也不行。
     var wrong_digest = digest;
     wrong_digest[0] ^= 0x01;
-    try testing.expect(!verifyPrehashedSignature(public_key_b64, signature, &wrong_digest));
+    try testing.expect(!verifyPrehashedSignature(fixture.public_key_b64, fixture.signature_b64, &wrong_digest));
 
     // 篡改一个字节：验的是内容，不是"文件存在"。
-    const tampered = try testing.allocator.dupe(u8, exe_bytes);
+    const tampered = try testing.allocator.dupe(u8, fixture.content);
     defer testing.allocator.free(tampered);
     tampered[tampered.len / 2] ^= 0xFF;
-    try testing.expect(!verifySignatureFile(public_key_b64, signature, tampered));
+    try testing.expect(!verifySignatureFile(fixture.public_key_b64, fixture.signature_b64, tampered));
     // 截断也不行。
-    try testing.expect(!verifySignatureFile(public_key_b64, signature, exe_bytes[0 .. exe_bytes.len - 1]));
+    try testing.expect(!verifySignatureFile(
+        fixture.public_key_b64,
+        fixture.signature_b64,
+        fixture.content[0 .. fixture.content.len - 1],
+    ));
+
+    // 信任根没被测试带歪：内置发行公钥不认这把测试钥匙。
+    try testing.expectEqual(
+        SignatureCheck.key_mismatch,
+        inspectSignature(public_key_b64, fixture.signature_b64),
+    );
+    try testing.expect(!verifySignatureFile(public_key_b64, fixture.signature_b64, fixture.content));
 }

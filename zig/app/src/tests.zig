@@ -114,7 +114,7 @@ test {
     _ = @import("update_ui_test.zig");
     // `--check-update` 的一行格式。
     _ = @import("update_cli.zig");
-    // 下载 → 流式哈希 → 验签 → 落盘（真安装包 + 真 .sig；缺失时 Skip）。
+    // 下载 → 流式哈希 → 验签 → 落盘（自造夹具 + 自造公钥/签名对，不读 dist）。
     _ = @import("update_download.zig");
     _ = @import("update_download_test.zig");
     // 启动安装包的判断（>32 才算成功）；真的 ShellExecute 只由 --no-exec 之外的

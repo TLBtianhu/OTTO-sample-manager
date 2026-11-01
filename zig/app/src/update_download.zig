@@ -110,6 +110,20 @@ pub fn downloadAndVerify(
     updates_dir: []const u8,
     progress: ?*feed.Progress,
 ) !Result {
+    return downloadAndVerifyWithKey(allocator, io, feed_url, updates_dir, progress, update_check.public_key_b64);
+}
+
+/// 同一条路径，但信任根由调用方给：测试拿它把"验签成功"从"必须有真安装包"
+/// 解耦成"给定签名与公钥时判定正确"（自造公钥/签名对，见 `update_fixture.zig`）。
+/// 生产代码不直接调用它，永远走上面那个内置公钥的入口。
+pub fn downloadAndVerifyWithKey(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    feed_url: []const u8,
+    updates_dir: []const u8,
+    progress: ?*feed.Progress,
+    pubkey_b64: []const u8,
+) !Result {
     if (updates_dir.len == 0) return error.UpdatesDirUnavailable;
 
     // 1) 取 feed。上限是 feed 自己的 256 KiB，不是安装包的 64 MiB。
@@ -124,7 +138,7 @@ pub fn downloadAndVerify(
 
     // 3) 信封检查：key id / 算法 / 结构不对，连下载都不开始。
     //    （真正的整包验证在文件下载完之后，见第 6 步。）
-    if (update_check.inspectSignature(update_check.public_key_b64, parsed.platform.signature) != .ok) {
+    if (update_check.inspectSignature(pubkey_b64, parsed.platform.signature) != .ok) {
         std.debug.print("otto-lite: update 签名信封不合法，未开始下载\n", .{});
         return error.SignatureMismatch;
     }
@@ -191,7 +205,7 @@ pub fn downloadAndVerify(
     const hashes = try hashFile(io, part_path);
 
     if (!update_check.verifyPrehashedSignature(
-        update_check.public_key_b64,
+        pubkey_b64,
         parsed.platform.signature,
         &hashes.blake,
     )) {
