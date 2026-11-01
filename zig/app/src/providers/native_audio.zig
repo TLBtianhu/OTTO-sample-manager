@@ -86,6 +86,8 @@ const preview = @import("../preview.zig");
 pub const provider: preview.Provider = .{
     .name = "native-audio",
     .kind = .audio,
+    // 取图行为版本（进缓存键）：流式读取 / 下混 / 会话装配变了就 +1。
+    .provider_version = 1,
     .supports = supports,
     .open = open,
     // 见文件头「图标」：没有便宜的粗采样路径，绝不整段解码换 32px。

@@ -21,6 +21,10 @@ pub const default_queue_capacity: usize = 32;
 /// 远多于一屏的可见行数。
 pub const default_budget_bytes: usize = 32 * 1024 * 1024;
 
+/// 预览一档（256px）的 L2 预算。一张 256×256 BGRA 是 256 KiB（顶十六张行内图），
+/// 所以**单独一份缓存**：16 MiB ≈ 64 张预览，与行内图互不挤占。
+pub const default_preview_budget_bytes: usize = 16 * 1024 * 1024;
+
 /// 失败记忆的条数上限；满了丢最旧的。
 pub const default_failure_memory: usize = 64;
 
@@ -29,6 +33,9 @@ pub const Options = struct {
     size_px: u32 = default_size_px,
     queue_capacity: usize = default_queue_capacity,
     budget_bytes: usize = default_budget_bytes,
+    /// 预览一档（256px）的 L2 预算。**与 `budget_bytes` 分开计量**：256×256 是
+    /// 256 KiB，一张顶十六张行内图；混用一个 LRU 会把整屏的行内图挤出去。
+    preview_budget_bytes: usize = default_preview_budget_bytes,
     failure_memory: usize = default_failure_memory,
     /// 是否把"碰 Shell"交给 `otto-thumb-host.exe`（M4 第一块）。
     /// 默认 `true`：第三方 handler 只在 helper 执行；缺失/启动失败、超时或崩溃
@@ -56,6 +63,9 @@ pub const View = struct {
     width: u32,
     height: u32,
     stride: usize,
+    /// 派生来源：0 = provider 直接取图，256 = 由预览档（256px）降采样而来。
+    /// 只是诊断标注（`derived_from`），像素与直接取图等价。
+    source_px: u32 = 0,
 };
 
 /// `acquire` 的四种答案。UI 对后三种都画占位，只是图标不同：
@@ -102,6 +112,21 @@ pub const Stats = struct {
     l3_bytes: u64 = 0,
     /// 读到的 L3 损坏条目数（已计入 l3_miss；这些文件当场删除）。
     l3_corrupt: u64 = 0,
+    /// 真正调 provider 的次数（行内取图 + 预览取图；**失败也算一次调用**）。
+    provider_calls: u64 = 0,
+    /// 其中由预览条（256px）那条路径发起的 provider 调用。冷启动只滚动时必须为 0。
+    preview_calls: u32 = 0,
+    /// 从预览缓存的大图派生出来的行内小图数（没有再问 provider）。
+    derived: u32 = 0,
+    /// 预览一档（256px）的 L2 命中次数。行内图的命中数仍记在 `cached`。
+    preview_hits: u32 = 0,
+    /// provider 返回的像素字节总数（行内 + 预览；命中缓存不计）。
+    bytes_fetched: u64 = 0,
+    /// provider 收到过的最大请求边长：64 = 只取过行内图，256 = 取过预览大图。
+    max_request_px: u32 = 0,
+    /// 预览一档的缓存占用（与行内图的 `entries` / `bytes` 分开计量）。
+    preview_entries: usize = 0,
+    preview_bytes: usize = 0,
 };
 
 /// 队列优先级：可见行 > 预取。队列满时的淘汰规则只认它（见 `thumbs_queue.zig`）：

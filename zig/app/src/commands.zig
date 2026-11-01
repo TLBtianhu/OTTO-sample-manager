@@ -19,6 +19,7 @@ const demo_rescan = @import("demo_rescan.zig");
 const demo_thumbs = @import("demo_thumbs.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_watch = @import("demo_watch.zig");
+const thumbs_dedup_probe = @import("thumbs_dedup_probe.zig");
 const browse_watch_probe = @import("browse_watch_probe.zig");
 const browse_nav_probe = @import("browse_nav_probe.zig");
 const browse_address_probe = @import("browse_address_probe.zig");
@@ -98,6 +99,12 @@ pub fn run(
 
     // 进程内 vs 隔离 helper 的对照（字节一致 + 200 张耗时），同样不开窗。
     if (options.thumb_bench_dir) |dir_path| return try thumb_bench.run(init, init.gpa, dir_path);
+
+    // 重复取图探针：预览（256px）与行内小图（64px）合流之后的三种场景账目。
+    // 走产品同一条 Thumbs + preview_worker 路径，只是不开窗。
+    if (options.thumb_dedup_dir) |dir_path| {
+        return try thumbs_dedup_probe.run(init, init.gpa, dir_path, !options.no_isolation, options.no_shell_preview);
+    }
 
     if (options.demo_dir) |dir_path| {
         try demo_watch.run(init, allocator, dir_path);

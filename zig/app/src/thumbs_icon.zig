@@ -124,8 +124,8 @@ pub fn fetch(
         .image => |bitmap| {
             const name = providerName(answered.provider);
             std.debug.print(
-                "otto-lite: row-thumb provider={s} file={s} {d}x{d}\n",
-                .{ name, sample.file_path, bitmap.width, bitmap.height },
+                "otto-lite: row-thumb provider={s} file={s} {d}x{d} request_px={d}\n",
+                .{ name, sample.file_path, bitmap.width, bitmap.height, max_px },
             );
             return .{ .image = .{ .provider = name, .bitmap = bitmap } };
         },
@@ -143,12 +143,12 @@ pub fn fetch(
     const name: ?[]const u8 = if (answered.provider) |provider| provider.name else null;
     switch (reason) {
         .no_handler, .unsupported => std.debug.print(
-            "otto-lite: row-thumb provider={s} file={s} none={s}\n",
-            .{ name orelse "none", sample.file_path, @tagName(reason) },
+            "otto-lite: row-thumb provider={s} file={s} none={s} request_px={d}\n",
+            .{ name orelse "none", sample.file_path, @tagName(reason), max_px },
         ),
         .failed, .file_missing => std.debug.print(
-            "otto-lite: row-thumb provider={s} file={s} failed={s}\n",
-            .{ name orelse "none", sample.file_path, @tagName(reason) },
+            "otto-lite: row-thumb provider={s} file={s} failed={s} request_px={d}\n",
+            .{ name orelse "none", sample.file_path, @tagName(reason), max_px },
         ),
     }
     return .{ .none = .{ .provider = name, .reason = reason } };

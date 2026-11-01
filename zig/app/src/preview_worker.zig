@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const preview = @import("preview.zig");
+const thumbs_preview = @import("thumbs_preview.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
 
 /// 自旋锁：临界区只有换 `?Snapshot` / `?Result` 指针，没有 IO、没有分配。
@@ -66,6 +67,14 @@ pub const Worker = struct {
     max_px: u32,
     /// 允许 Shell provider 把取图交给隔离 helper（`--no-isolation` 时为 false）。
     allow_isolation: bool,
+    /// 与行内小图共享的 256px 缓存（`thumbs_preview.Share`）。`null` = 不共享
+    /// （无头探针的独立预览面板）；有它时：命中不再问 provider，取到的大图按 256
+    /// 的键回填，之后滚动到这一行时 64px 由派生满足。
+    share: ?*thumbs_preview.Share = null,
+    /// 是否真的读写 `share`。`false` 只用于 `--thumb-dedup` 的**对照实验**：
+    /// 仍然把 provider 调用 / 字节数记进 `share`，但不回填、不命中——就是 0.40.0
+    /// 的行为。产品路径永远是 `true`。
+    share_enabled: bool = true,
 
     // ---- 工作线程共享（过 lock）----
     lock: SpinLock = .{},
@@ -87,6 +96,8 @@ pub const Worker = struct {
         registry: *const preview.Registry,
         max_px: u32,
         allow_isolation: bool,
+        share: ?*thumbs_preview.Share,
+        share_enabled: bool,
     ) InitError!*Worker {
         const self = try allocator.create(Worker);
         errdefer allocator.destroy(self);
@@ -97,6 +108,8 @@ pub const Worker = struct {
             .registry = registry,
             .max_px = max_px,
             .allow_isolation = allow_isolation,
+            .share = share,
+            .share_enabled = share_enabled,
         };
         // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：这个线程只做解码与文本布局，
         // 少掉的 15 MiB 是**提交**，`--mem-probe` 的 private 列能看到。
@@ -166,9 +179,28 @@ pub const Worker = struct {
     }
 
     /// 真正调 `registry.open` 的地方：锁外执行，第三方 handler 卡住也只卡这条线程。
+    ///
+    /// 有共享缓存（`share != null`）时顺序是：**缓存命中 → provider → 回填**。
+    /// 命中把 256px 像素复制一份交出去（`Outcome` 拥有自己的内存），不碰注册表；
+    /// 未命中的 provider 调用在**调用前**记账，失败也算一次——否则"重复取图"的
+    /// 统计会漏掉失败重试。
     fn run(self: *Worker, snapshot: Snapshot) void {
         defer snapshot.deinit(self.allocator);
 
+        if (self.share_enabled) {
+            if (self.share) |share| {
+                if (share.acquire(self.allocator, snapshot.sample) catch null) |bitmap| {
+                    std.debug.print(
+                        "otto-lite: preview provider=cache request_px={d} file={s} hit=1\n",
+                        .{ self.max_px, snapshot.sample.file_path },
+                    );
+                    self.publish(snapshot.generation, "cache", .{ .image = bitmap });
+                    return;
+                }
+            }
+        }
+
+        if (self.share) |share| share.noteProviderCall(self.max_px);
         const answered = self.registry.openAnswered(
             self.allocator,
             .{
@@ -181,7 +213,29 @@ pub const Worker = struct {
             self.publish(snapshot.generation, null, .{ .none = .failed });
             return;
         };
-        self.publish(snapshot.generation, if (answered.provider) |provider| provider.name else null, answered.outcome);
+        const name: ?[]const u8 = if (answered.provider) |provider| provider.name else null;
+
+        const outcome = answered.outcome;
+        switch (outcome) {
+            .image => |bitmap| {
+                std.debug.print(
+                    "otto-lite: preview provider={s} request_px={d} file={s} {d}x{d}\n",
+                    .{ name orelse "none", self.max_px, snapshot.sample.file_path, bitmap.width, bitmap.height },
+                );
+                // 回填共享缓存：之后行内 64px 请求可以由它派生，不再问 provider。
+                // 流量账与回填分开：对照实验（`share_enabled = false`）也要能数清
+                // "改前取了多少字节"。
+                if (self.share) |share| {
+                    share.noteFetched(bitmap.byteLen());
+                    if (self.share_enabled) share.publish(snapshot.sample, bitmap);
+                }
+            },
+            else => std.debug.print(
+                "otto-lite: preview provider={s} request_px={d} file={s} outcome={s}\n",
+                .{ name orelse "none", self.max_px, snapshot.sample.file_path, @tagName(std.meta.activeTag(outcome)) },
+            ),
+        }
+        self.publish(snapshot.generation, name, outcome);
     }
 
     /// 把答案放进唯一一格。过期结果直接释放（不能交给 UI，UI 已经显示新的选中行）。

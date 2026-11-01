@@ -36,6 +36,7 @@ const preview_audio = @import("preview_audio.zig");
 const preview_view = @import("preview_view.zig");
 const preview_worker = @import("preview_worker.zig");
 const sample_facts = @import("sample_facts.zig");
+const thumbs_preview = @import("thumbs_preview.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
 const trace = @import("trace.zig");
 const ui = nanoui.ui;
@@ -50,6 +51,9 @@ pub const Options = struct {
     /// 允许 Shell provider 把取图交给隔离 helper。`--no-isolation` 时为 false，
     /// 和 `thumbs.zig` 的开关保持同一条语义。
     allow_isolation: bool = true,
+    /// 与行内小图共享的 256px 缓存（`Thumbs.previewShare()`）。`null` = 独立预览
+    /// （只出现在无头探针里）；产品路径必须给，否则同一个文件会被取两次图。
+    share: ?*thumbs_preview.Share = null,
 };
 
 pub const InitError = preview_worker.InitError;
@@ -91,12 +95,17 @@ pub const Panel = struct {
     ) InitError!*Panel {
         const self = try allocator.create(Panel);
         errdefer allocator.destroy(self);
+        // 共享缓存的键里带请求边长：预览档的 max_px 必须与它一致，否则永远不命中。
+        std.debug.assert(options.share == null or @max(1, options.max_px) == options.share.?.size_px);
         const worker = try preview_worker.Worker.init(
             allocator,
             io,
             registry,
             @max(1, options.max_px),
             options.allow_isolation,
+            options.share,
+            // 产品路径永远真的共享；`false` 只给 `--thumb-dedup` 的对照实验用。
+            true,
         );
         errdefer worker.deinit();
 

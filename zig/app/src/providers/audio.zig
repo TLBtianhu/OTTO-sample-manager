@@ -51,6 +51,8 @@ const preview = @import("../preview.zig");
 pub const provider: preview.Provider = .{
     .name = "wasapi-pcm",
     .kind = .audio,
+    // 取图行为版本（进缓存键）：粗采样的窗口数 / 下混 / 波形渲染变了就 +1。
+    .provider_version = 1,
     .supports = supports,
     .open = open,
     // 行内图标用 32 个等距窗口各读两帧（`audio/coarse.zig`），不整段解码。

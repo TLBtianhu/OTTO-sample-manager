@@ -38,6 +38,9 @@ test {
     _ = @import("rescan_ui.zig");
     _ = @import("rescan_test.zig");
     _ = @import("thumbs_test.zig");
+    // 盒式降采样（纯像素运算）与预览/行内共享的那份 256px 缓存（键、命中、派生）。
+    _ = @import("thumbs_derive.zig");
+    _ = @import("thumbs_preview.zig");
     // 取图队列的优先级规则（预取不能饿死可见请求）与空闲预取的窗口/节流。
     _ = @import("thumbs_queue.zig");
     _ = @import("thumbs_prefetch.zig");

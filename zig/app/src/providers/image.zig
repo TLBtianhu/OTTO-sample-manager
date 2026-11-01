@@ -38,6 +38,8 @@ const preview = @import("../preview.zig");
 pub const provider: preview.Provider = .{
     .name = "image-wic",
     .kind = .image,
+    // 取图行为版本（进缓存键）：缩放算法 / 方向处理 / 解码器选择变了就 +1。
+    .provider_version = 1,
     .supports = supports,
     .open = open,
     // 列表行内的 32pt 小图也归这里：PNG/BMP 的行内图与预览图走同一条 WIC 解码链，

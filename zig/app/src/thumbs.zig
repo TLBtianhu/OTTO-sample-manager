@@ -26,10 +26,20 @@
 //! 预取不写 `requested`（那是可见请求的账），单独记 `prefetched`；失败照样进失败表，
 //! 否则每次滚动都会重试同一个坏文件。
 //!
-//! 缓存键（`thumbs_codec.zig`）：有文件身份时 `id|<卷>|<索引>|<mtime>|<边长>`（改名、
-//! 同卷移动不换键），没有身份时 `fb|<大小>|<mtime>|<路径>|<mtime>|<边长>`，超长路径
-//! 退化成定长哈希键。L3 的键由 L2 键串派生（Wyhash → 32 字节），跨进程稳定。缓存层
-//! **不知道 provider 是谁**：键只含样本身份 + mtime + 边长，换 provider 实现不用迁移。
+//! 缓存键（`thumbs_codec.zig`）：有文件身份时
+//! `id|<卷>|<索引>|<mtime>|<边长>|k2|pv<provider_version>|bgra`，没有身份时
+//! `fb|<大小>|<mtime>|<路径>|<mtime>|<边长>|k2|pv<…>|bgra`，超长路径退化成定长
+//! 哈希键。边长与 provider 版本、像素格式都在键里：换 provider 实现、换 helper
+//! 行为、换像素格式都必须 bump 版本（见 `thumbs_codec.zig` 文件头）；
+//! "改键格式就 +1" 有测试兜底（`thumbs_test.zig`）。L3 的键由 L2 键串派生
+//! （Wyhash → 32 字节），跨进程稳定。
+//!
+//! **与预览条共享大图**（`thumbs_preview.zig`）：预览条（256px）有自己的一份 L2
+//! 缓存与预算（`preview_budget_bytes`），取到的大图按 256 的键回填。行内 64px 请求
+//! 在 L3 之后、provider 之前会看一眼那份缓存：命中就用**盒式降采样**派生，不再问
+//! provider（`thumbs_worker.zig` 的 `deriveFromPreview`）。反方向不允许——为行内
+//! 小图去请求 256 会把"小图预算"变成"大图预算"；只有小图、来了预览请求时仍然
+//! 重新取一次大图（不放大冒充预览质量），计入 `provider_calls`。
 //!
 //! 所有权 / 线程模型：
 //!   * 像素内存归 `Cache` 所有；UI 拿到的 `View.pixels` 是借用，只在 pin 期间有效。
@@ -54,6 +64,8 @@ const icon = @import("thumbs_icon.zig");
 const keys_mod = @import("thumbs_keys.zig");
 const l3 = @import("thumbs_disk.zig");
 const queue_mod = @import("thumbs_queue.zig");
+const worker_mod = @import("thumbs_worker.zig");
+const share_mod = @import("thumbs_preview.zig");
 
 const types = @import("thumbs_types.zig");
 const trace = @import("trace.zig");
@@ -81,6 +93,7 @@ pub const header_bytes: usize = codec.header_bytes;
 
 pub const keyFor = codec.keyFor;
 pub const encodeHeader = codec.encodeHeader;
+pub const encodeHeaderFrom = codec.encodeHeaderFrom;
 pub const decodeHeader = codec.decodeHeader;
 pub const diskKeyFor = codec.diskKeyFor;
 
@@ -102,6 +115,11 @@ pub const Thumbs = struct {
     /// 指向静态数组的切片，复制很便宜，调用时也不需要再查开关。
     icon_registry: preview.Registry,
     cache: core.cache.Cache,
+    /// 预览条（256px）的共享缓存：预览工作线程写，行内图从它派生。**独立预算**
+    /// （`preview_budget_bytes`），不参与下面 `cache` 的 LRU，反之亦然。
+    preview_share: share_mod.Share,
+    /// 进缓存键的 provider 聚合版本（`providers.providerVersion()`）。
+    provider_version: u32,
     /// L3 磁盘缓存。只在工作线程上读写——包括启动裁剪（那条线程第一次空闲时做，
     /// 见 `workerMain`）；`init` 只建目录、不枚举条目。
     disk: ?l3.L3 = null,
@@ -135,6 +153,12 @@ pub const Thumbs = struct {
     cached: std.atomic.Value(u32) = .init(0),
     failed: std.atomic.Value(u32) = .init(0),
 
+    /// provider 调用次数 / 返回的像素字节 / 收到过的最大请求边长。工作线程在锁内
+    /// 累加，`stats()` 在锁内读；它们是"重复取图"验收的唯一数字来源。
+    provider_calls: u64 = 0,
+    bytes_fetched: u64 = 0,
+    max_request_px: u32 = 0,
+
     /// 建立缓存、起工作线程。`allocator` 必须线程安全（工作线程也用）。
     /// 返回的对象由 `deinit` 释放，中间不要移动。
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) InitError!*Thumbs {
@@ -153,6 +177,13 @@ pub const Thumbs = struct {
             .shell_enabled = !options.no_shell_preview,
             .icon_registry = providers.registryForIcon(options.no_shell_preview),
             .cache = core.cache.Cache.init(allocator, options.budget_bytes),
+            .preview_share = share_mod.Share.init(
+                allocator,
+                options.preview_budget_bytes,
+                preview.default_max_px,
+                providers.providerVersion(),
+            ),
+            .provider_version = providers.providerVersion(),
             .queue = queue,
             .prefetch_enabled = options.prefetch,
             .failure_memory = @max(1, options.failure_memory),
@@ -222,6 +253,7 @@ pub const Thumbs = struct {
         keys_mod.deinit(self.allocator, &self.failed_keys);
         keys_mod.deinit(self.allocator, &self.declined_keys);
         self.cache.deinit();
+        self.preview_share.deinit();
         if (self.disk) |*disk| disk.deinit();
         self.allocator.destroy(self);
     }
@@ -242,7 +274,7 @@ pub const Thumbs = struct {
     /// 不碰 provider**——`registryForIcon(...).open` 一律在工作线程上执行。
     pub fn acquire(self: *Thumbs, sample: core.model.Sample) Lookup {
         var buffer: [max_key_bytes]u8 = undefined;
-        const key = keyFor(sample, self.size_px, &buffer);
+        const key = keyFor(sample, self.size_px, self.provider_version, &buffer);
         // L3 摘要只依赖上面的键串：同一路径 + mtime + 边长跨进程稳定。
         const disk_key: ?l3.Key = if (self.disk != null) diskKeyFor(key) else null;
 
@@ -281,7 +313,7 @@ pub const Thumbs = struct {
             if (row >= samples.len) continue;
             var buffer: [max_key_bytes]u8 = undefined;
             const sample = samples[row];
-            const key = keyFor(sample, self.size_px, &buffer);
+            const key = keyFor(sample, self.size_px, self.provider_version, &buffer);
 
             self.lock.acquire();
             const wanted = self.wantedLocked(key);
@@ -297,7 +329,7 @@ pub const Thumbs = struct {
     /// 进入视口那一帧就已经有图"）与预取门禁用它；绘制路径仍走 `acquire`。
     pub fn has(self: *Thumbs, sample: core.model.Sample) bool {
         var buffer: [max_key_bytes]u8 = undefined;
-        const key = keyFor(sample, self.size_px, &buffer);
+        const key = keyFor(sample, self.size_px, self.provider_version, &buffer);
         self.lock.acquire();
         defer self.lock.release();
         return self.cache.contains(key);
@@ -314,6 +346,9 @@ pub const Thumbs = struct {
         defer self.lock.release();
         const cache_stats = self.cache.stats();
         const disk_stats: l3.Stats = if (self.disk) |*disk| disk.stats() else .{};
+        // 预览一档的账：它有自己的锁；这里只读一个快照（缩略图账在前、预览账在后，
+        // 全代码库没有反方向嵌套）。
+        const shared = self.preview_share.counters();
         return .{
             .requested = self.requested.load(.monotonic),
             .prefetched = self.prefetched.load(.monotonic),
@@ -331,7 +366,20 @@ pub const Thumbs = struct {
             .l3_evicted = disk_stats.evicted,
             .l3_bytes = disk_stats.bytes,
             .l3_corrupt = disk_stats.corrupt,
+            .provider_calls = self.provider_calls + shared.provider_calls,
+            .preview_calls = shared.provider_calls,
+            .derived = shared.derived,
+            .preview_hits = shared.hits,
+            .bytes_fetched = self.bytes_fetched + shared.bytes_fetched,
+            .max_request_px = @max(self.max_request_px, shared.max_request_px),
+            .preview_entries = shared.entries,
+            .preview_bytes = shared.bytes,
         };
+    }
+
+    /// 预览条共享的那份缓存（`preview_worker.Worker.init` 要一个指针）。
+    pub fn previewShare(self: *Thumbs) *share_mod.Share {
+        return &self.preview_share;
     }
 
     /// 磁盘有变化（新增 / 改写 / 改名）时清空失败与谢绝记忆：刚出现的文件值得再试。
@@ -348,11 +396,15 @@ pub const Thumbs = struct {
         self.lock.acquire();
         self.cache.setBudget(l2_bytes);
         self.lock.release();
+        // 预览一档按 L2 的 1/4 分（下限 4 MiB、不超过 L2）：一张 256×256 的像素
+        // 重量是行内图的十六倍，单独一份预算才不会把整屏行内图挤出去。
+        const preview_budget = @max(4 * 1024 * 1024, @min(l2_bytes, l2_bytes / 4));
+        self.preview_share.setBudget(preview_budget);
 
         const mib: u64 = 1024 * 1024;
         std.debug.print(
-            "otto-lite: cache budget l2={d}MiB l3={d}MiB\n",
-            .{ @as(u64, l2_bytes) / mib, l3_bytes / mib },
+            "otto-lite: cache budget l2={d}MiB l3={d}MiB preview={d}MiB\n",
+            .{ @as(u64, l2_bytes) / mib, l3_bytes / mib, @as(u64, preview_budget) / mib },
         );
 
         if (self.disk) |*disk| {
@@ -396,6 +448,7 @@ pub const Thumbs = struct {
             .width = dims.width,
             .height = dims.height,
             .stride = dims.stride,
+            .source_px = dims.source_px,
         };
     }
 
@@ -464,7 +517,9 @@ pub const Thumbs = struct {
         while (true) {
             self.wake.waitUncancelable(self.io);
             if (self.stop.load(.acquire)) break;
-            while (self.takeJob()) |job| self.fetch(job);
+            // 取图顺序（L3 → 大图派生 → provider）在 `thumbs_worker.zig`；本文件只
+            // 负责队列、线程与生命周期。
+            while (self.takeJob()) |job| worker_mod.fetch(self, job);
             if (!pruned) {
                 pruned = true;
                 if (self.disk) |*disk| disk.pruneOnStart();
@@ -478,122 +533,5 @@ pub const Thumbs = struct {
         const job = self.queue.pop() orelse return null;
         self.inflight = job;
         return job;
-    }
-
-    /// 真正取图的地方：锁外执行。**provider 决定**去哪取（image-wic / mf-video /
-    /// Shell 的 helper 或进程内），本层只负责缓存、去重与失败/谢绝记忆。
-    fn fetch(self: *Thumbs, job: Job) void {
-        // L3 先于 provider：第二次打开库时 8 张图全部从这里返回，一个 helper 都不起。
-        if (self.loadFromDisk(job)) return;
-
-        const fetched = icon.fetch(
-            self.allocator,
-            self.icon_registry,
-            &job.sample.sample,
-            job.size_px,
-            self.isolation,
-        ) catch {
-            // 只有 OOM / 连 outcome 都构造不出来才会到这里。
-            self.recordFailure(job);
-            return;
-        };
-
-        switch (fetched) {
-            .image => |image| {
-                var bitmap = image.bitmap;
-                defer bitmap.deinit(self.allocator);
-                self.storeImage(job, bitmap);
-            },
-            // 谢绝不是错误：no_handler/unsupported 进负缓存（UI 显示文档占位），
-            // failed/file_missing 进失败表（UI 显示警告三角）。
-            .none => |declined| switch (declined.reason) {
-                .no_handler, .unsupported => self.recordDeclined(job),
-                .failed, .file_missing => self.recordFailure(job),
-            },
-        }
-    }
-
-    /// 把一张位图按 L2 载荷格式入缓存，再补一笔 L3；失败只影响这一张。
-    fn storeImage(self: *Thumbs, job: Job, bitmap: preview.Bitmap) void {
-        const pixel_bytes = bitmap.stride * @as(usize, bitmap.height);
-        const payload = self.allocator.alloc(u8, header_bytes + pixel_bytes) catch {
-            self.recordFailure(job);
-            return;
-        };
-        defer self.allocator.free(payload);
-        encodeHeader(payload, bitmap.width, bitmap.height, bitmap.stride);
-        @memcpy(payload[header_bytes..], bitmap.pixels[0..pixel_bytes]);
-
-        self.lock.acquire();
-        self.inflight = null;
-        self.cache.put(job.key, .thumbnail, payload) catch {
-            self.lock.release();
-            _ = self.failed.fetchAdd(1, .monotonic);
-            // 缓存写不进去（OOM）不算「这个文件没有预览」：不记失败表，下次还会重试。
-            self.freeJob(job);
-            return;
-        };
-        // put 成功：缓存复制了键与像素，job 自己的内存可以还了。
-        _ = self.ready.fetchAdd(1, .release);
-        self.lock.release();
-
-        // L3 写在锁外：L2 已经可画，UI 不必等这一笔磁盘 IO。
-        // 缓存写失败只意味着下次重新取图，绝不影响本次结果。
-        if (job.disk_key) |disk_key| {
-            if (self.disk) |*disk| disk.put(disk_key, payload) catch {};
-        }
-
-        self.freeJob(job);
-    }
-
-    /// L3 命中：把磁盘像素按 L2 载荷格式回填内存缓存，结束这个请求。
-    /// 命中（含回填失败）返回 true；miss / IO 错误返回 false，调用方继续走 provider。
-    fn loadFromDisk(self: *Thumbs, job: Job) bool {
-        const disk = if (self.disk) |*value| value else return false;
-        const disk_key = job.disk_key orelse return false;
-        const payload = (disk.get(self.allocator, disk_key) catch return false) orelse return false;
-
-        self.lock.acquire();
-        self.inflight = null;
-        self.cache.put(job.key, .thumbnail, payload) catch {
-            self.lock.release();
-            self.allocator.free(payload);
-            _ = self.failed.fetchAdd(1, .monotonic);
-            self.freeJob(job);
-            return true;
-        };
-        _ = self.ready.fetchAdd(1, .release);
-        self.lock.release();
-
-        self.allocator.free(payload);
-        self.freeJob(job);
-        return true;
-    }
-
-    /// 失败：清 inflight、记进失败表（键的所有权转移给表），样本还回去。
-    fn recordFailure(self: *Thumbs, job: Job) void {
-        self.lock.acquire();
-        self.inflight = null;
-        keys_mod.remember(self.allocator, &self.failed_keys, self.failure_memory, job.key);
-        _ = self.failed.fetchAdd(1, .monotonic);
-        self.lock.release();
-
-        job.sample.deinit(self.allocator);
-    }
-
-    /// 全部 provider 谢绝：清 inflight、记进负缓存（键的所有权转移给表）。
-    fn recordDeclined(self: *Thumbs, job: Job) void {
-        self.lock.acquire();
-        self.inflight = null;
-        keys_mod.remember(self.allocator, &self.declined_keys, self.failure_memory, job.key);
-        _ = self.no_handler.fetchAdd(1, .monotonic);
-        self.lock.release();
-
-        job.sample.deinit(self.allocator);
-    }
-
-    fn freeJob(self: *Thumbs, job: Job) void {
-        self.allocator.free(job.key);
-        job.sample.deinit(self.allocator);
     }
 };

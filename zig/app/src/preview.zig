@@ -312,6 +312,14 @@ pub const Provider = struct {
     name: []const u8,
     /// 这个 provider 产出哪一种载荷。
     kind: Kind,
+    /// 这条实现的**取图行为版本**，进缓存键（`thumbs_codec.keyFor` 里的 `pv<…>`）。
+    ///
+    /// 每个 provider 一个常量（定义在各自的文件里）。任何"同样的输入、同样的尺寸，
+    /// 产出的像素却会变"的改动都要 +1：换了缩放算法、改了首帧时间点、Shell 的 helper
+    /// 协议变了、修了某个格式的解码偏移。**不改则旧缓存继续命中**，这是刻意的：
+    /// 键里的版本是 `providers/root.zig` 的聚合值，不是"赢家"的名字，因为键在 `open`
+    /// 之前就要算出来（见 `thumbs_codec.zig` 文件头）。只增不减。
+    provider_version: u32 = 1,
     /// 愿不愿意接手这个样本。**不允许分配内存**（`caps.forPath` 走无状态
     /// allocator 的那点分配除外）。返回 true 只代表"让我试一次"；`open` 仍可谢绝。
     supports: *const fn (*const core.model.Sample) bool,

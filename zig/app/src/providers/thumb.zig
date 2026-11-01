@@ -40,8 +40,16 @@
 //! 扩展名时需要把路径转 UTF-16（之后按扩展名命中缓存）。smp allocator 无状态、
 //! 线程安全，正好满足 `supports` 没有 allocator 参数这个契约。
 //!
-//! 已知的重复劳动（写进报告）：列表行用 64px、预览条用 256px，同一个文件可能要
-//! 取两次图。L2 缓存分层是后续的事，M1 不在这里绕开 `thumbs.zig` 的缓存。
+//! ## 重复取图（0.41.0 起由缓存合流）
+//!
+//! 列表行用 64px、预览条用 256px。以前同一个文件会被本 provider 取两次图；现在
+//! `thumbs_preview.zig` 让两条链共享一份 256px 缓存：64px 请求可以从 256px 条目
+//! 盒式降采样派生，反过来（只有 64px 条目、来了 256px 请求）仍然重新取一张大图，
+//! 但会被计成一次 provider 调用——**不放大冒充预览质量**。
+//!
+//! `provider_version` 是这条实现的取图行为版本：helper 协议、超时语义、尺寸夹取
+//! 任何一项变了就 +1（旧缓存键随之失效）。Shell handler 自己升级（系统组件换了）
+//! 不 bump：那不是我们的取图行为，而且同一 mtime 的系统缓存本来就会变。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -54,6 +62,8 @@ const preview = @import("../preview.zig");
 pub const provider: preview.Provider = .{
     .name = "shell-thumbnail",
     .kind = .image,
+    // 取图行为版本（进缓存键）：helper 协议 / 尺寸夹取 / 失败语义变了就 +1。
+    .provider_version = 1,
     .supports = supports,
     .open = open,
     // 默认把第三方 handler 交给 helper；`--no-isolation` 是唯一的进程内显式选择。
