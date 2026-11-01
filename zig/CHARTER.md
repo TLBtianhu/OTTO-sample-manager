@@ -84,6 +84,8 @@ handler 没装就没有预览，装坏了就是我们的进程崩。
 | flac | `native-audio`（vendor 的 zig-audio，纯 Zig 解码） | 无 |
 | mp3 | `native-audio`（vendor 的 zig-audio，纯 Zig 解码）；`mf-audio` 兜底 | 无 |
 | aiff / aif | `native-audio`（vendor 的 zig-audio，纯 Zig 解码） | 无 |
+| ogg / oga（Vorbis） | `native-audio`（zig-audio 解码；ffmpegf32 比对 133 dB） | 无 |
+| ogg / oga / opus（Opus） | `native-audio` 解 **CELT**（音乐）；**SILK/Hybrid（语音）谢绝** | 无 |
 | aac/m4a/wma | `mf-audio`（Media Foundation 解码） | 系统 codec |
 | png/jpg/bmp/gif/tif | `image-wic`（WIC 解码） | 系统 codec |
 | mp4/mov/wmv | `mf-video`（MF 抽首帧） | 系统 codec |
