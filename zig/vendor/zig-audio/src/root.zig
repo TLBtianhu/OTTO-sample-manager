@@ -7,11 +7,12 @@
 //! left/side, right/side and mid/side assignments; the MP3 side covers long and
 //! window-switched (start/short/stop) granules, mid/side and intensity stereo;
 //! the Ogg side covers the container, the three Vorbis headers, floor 1, residue
-//! formats 0/1/2, inverse coupling, the IMDCT and the lap, and Ogg Opus up to
-//! the CELT layer (configuration 16-31): `open` returns a real decoder and
-//! `read` produces PCM, while SILK/Hybrid packets are refused as `Unsupported`
-//! rather than approximated (see `opus.zig`). Floor 0 is not supported and is
-//! named as such. See README for the support matrix.
+//! formats 0/1/2, inverse coupling, the IMDCT and the lap, and Ogg Opus with
+//! both of its layers — CELT (configuration 16-31) and SILK (0-11): `open`
+//! returns a real decoder and `read` produces PCM. Hybrid (12-15) is refused as
+//! `Unsupported` rather than approximated, because it needs both layers on the
+//! same frame (see `opus.zig`). Floor 0 is not supported and is named as such.
+//! See README for the support matrix.
 //!
 //! The API deliberately has one output path: interleaved i16. Source PCM
 //! (8/16/24/32) and float32 are converted inside the decoder, so a player
@@ -33,8 +34,8 @@ pub const Error = types.Error;
 
 /// Ogg Opus: `inspect` reports the head fields, packet framing and length;
 /// `Decoder.open` returns a streaming decoder that produces PCM for CELT-only
-/// packets (configuration 16-31) and refuses SILK/Hybrid ones with
-/// `error.Unsupported`.
+/// (configuration 16-31) and SILK-only (0-11) packets, and refuses Hybrid
+/// (12-15) with `error.Unsupported`.
 pub const opus = @import("opus.zig");
 
 /// Reader buffer size used by `openFile` / `openFileWithIo`. One refill is one

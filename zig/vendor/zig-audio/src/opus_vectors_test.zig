@@ -156,9 +156,10 @@ test "opus vectors: header fields, length and packet structure match ffprobe" {
 
         // An `.opus` file is always named by probe, and a well-formed one always
         // opens: what a stream can decode is decided per packet, by `read`. The
-        // CELT-only single-frame files must produce samples; the SILK/Hybrid
-        // file and the three-frames-per-packet file must answer `Unsupported`
-        // on the first read rather than invent audio.
+        // CELT-only and SILK-only single-frame files must produce samples; the
+        // file whose first packet is Hybrid, and the three-frames-per-packet
+        // file, must answer `Unsupported` on the first read rather than invent
+        // audio.
         try testing.expectEqual(root.Format.ogg_opus, root.probe(bytes).?);
         var open_reader = std.Io.Reader.fixed(bytes);
         var opened = try root.open(testing.allocator, &open_reader);

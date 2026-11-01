@@ -63,30 +63,44 @@ test "opus: inspect reads the length from the last granule" {
     defer direct.deinit();
 }
 
-test "opus: a SILK packet is Unsupported, not silence" {
-    // Configuration 9 is SILK wideband 20 ms: the CELT layer of this library
-    // cannot decode it, and decoding only the CELT part of a Hybrid packet
-    // would drop the speech band, so both must refuse.
-    const frame = try frameBytes(testing.allocator, 40, 7);
-    defer testing.allocator.free(frame);
-
-    for ([_]u8{ 9, 15 }) |config| {
-        const packet_bytes = try opus_build.packet(testing.allocator, .{
-            .config = config,
-            .frames = &.{frame},
-        });
-        defer testing.allocator.free(packet_bytes);
-        const bytes = try opus_build.file(testing.allocator, .{ .packets = &.{packet_bytes} });
-        defer testing.allocator.free(bytes);
-
-        var reader = std.Io.Reader.fixed(bytes);
+test "opus: SILK-only packets decode, Hybrid packets are refused" {
+    // SILK (configuration 0-11) is implemented: a real wideband SILK stream has
+    // to come out whole, at the stream length the granule promises.
+    const silk_bytes = @embedFile("fixtures/opus-silk-wb-12k.opus");
+    {
+        var reader = std.Io.Reader.fixed(silk_bytes);
         var dec = try opus.Decoder.open(testing.allocator, &reader, "");
         defer dec.deinit();
-        var pcm: [64]i16 = undefined;
-        try testing.expectError(error.Unsupported, dec.read(&pcm));
+        var pcm: [4096]i16 = undefined;
+        var total: usize = 0;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            total += n;
+        }
+        try testing.expectEqual(@as(usize, 96_000), total);
+        try testing.expectEqual(@as(?u64, 96_000), dec.info.total_frames);
     }
-}
 
+    // Hybrid (configuration 12-15) needs SILK and CELT on the same frame and a
+    // mix of the two; decoding one layer would drop the speech or the music
+    // band, so the whole packet is refused by name.
+    const frame = try frameBytes(testing.allocator, 40, 7);
+    defer testing.allocator.free(frame);
+    const packet_bytes = try opus_build.packet(testing.allocator, .{
+        .config = 15, // Hybrid, fullband, 20 ms
+        .frames = &.{frame},
+    });
+    defer testing.allocator.free(packet_bytes);
+    const bytes = try opus_build.file(testing.allocator, .{ .packets = &.{packet_bytes} });
+    defer testing.allocator.free(bytes);
+
+    var reader = std.Io.Reader.fixed(bytes);
+    var dec = try opus.Decoder.open(testing.allocator, &reader, "");
+    defer dec.deinit();
+    var pcm: [64]i16 = undefined;
+    try testing.expectError(error.Unsupported, dec.read(&pcm));
+}
 test "opus: end trimming makes the granule shorter than the packet sum" {
     const frame = try frameBytes(testing.allocator, 20, 51);
     defer testing.allocator.free(frame);

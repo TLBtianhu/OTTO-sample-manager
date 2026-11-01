@@ -171,9 +171,9 @@ fn runLibopus(allocator: std.mem.Allocator, bytes: []const u8, sample_format: []
 
     const result = std.process.run(allocator, std.testing.io, .{
         .argv = &.{
-            compare.ffmpeg_path, "-v",          "error",
-            "-c:a",              "libopus",     "-i",
-            input_path,          "-f",          sample_format,
+            compare.ffmpeg_path, "-v",      "error",
+            "-c:a",              "libopus", "-i",
+            input_path,          "-f",      sample_format,
             "pipe:1",
         },
         .stdout_limit = .limited(64 << 20),
@@ -295,10 +295,10 @@ test "celta vectors: info reports the stream length after the last page" {
     try testing.expectEqual(@as(?u64, 96_000), dec.info.total_frames);
 }
 
-test "celta vectors: a SILK or hybrid packet is refused, not approximated" {
-    // The VOIP vector mixes SILK-only, Hybrid and CELT packets. The first packet
-    // decides, and it is SILK: the decoder must say so instead of emitting the
-    // CELT part of a speech frame.
+test "celta vectors: a hybrid packet is refused, not approximated" {
+    // The VOIP vector mixes SILK-only, Hybrid and CELT packets and *starts* with
+    // Hybrid: the decoder must say so instead of emitting only part of the
+    // frame. (SILK itself decodes now; see opus_silk_vectors_test.zig.)
     const name = "opus-48k-24-voip.opus";
     const bytes = readVector(testing.allocator, name) catch |err| switch (err) {
         error.SkipZigTest => return error.SkipZigTest,

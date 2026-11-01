@@ -70,6 +70,15 @@ const opus_fixture = @embedFile("fixtures/opus-stereo-48k-128.opus");
 const opus_seconds: f64 = 20.0;
 const opus_target_speedup: f64 = 100.0;
 const opus_total_frames: u64 = 48_000;
+
+/// 2 s of SILK-only wideband speech at 12 kbps, mono, 20 ms frames
+/// (configuration 9): the whole SILK chain (range decoder, gains, LSF -> LPC,
+/// pitch/LTP, excitation assembly, LPC synthesis) plus the 16-to-48 kHz
+/// resampler. The fixture is the acceptance vector for the SILK layer.
+const opus_silk_fixture = @embedFile("fixtures/opus-silk-wb-12k.opus");
+const opus_silk_seconds: f64 = 20.0;
+const opus_silk_target_speedup: f64 = 100.0;
+const opus_silk_total_frames: u64 = 96_000;
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -80,6 +89,7 @@ pub fn main() !void {
     try benchMp3Stereo(allocator, io);
     try benchVorbis(allocator, io);
     try benchOpus(allocator, io);
+    try benchOpusSilk(allocator, io);
     try benchLegacy(allocator, io);
 }
 
@@ -230,7 +240,8 @@ fn benchVorbis(allocator: std.mem.Allocator, io: std.Io) !void {
     );
 }
 
-fn benchFlac(    allocator: std.mem.Allocator,
+fn benchFlac(
+    allocator: std.mem.Allocator,
     io: std.Io,
     label: []const u8,
     fixture: []const u8,
@@ -486,4 +497,33 @@ fn benchOpus(allocator: std.mem.Allocator, io: std.Io) !void {
     const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
     if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
     try report("Opus 128k stereo (CELT)", elapsed_ns, @floatFromInt(decoded_frames), 48_000, 2, opus_target_speedup, files);
+}
+
+/// SILK row: mono, so the sample accounting is per frame rather than per pair.
+fn benchOpusSilk(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 48_000 < opus_silk_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(opus_silk_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.channels != 1) return error.UnexpectedChannelCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            decoded_frames += n;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+        if (dec.info.total_frames != opus_silk_total_frames) return error.UnexpectedFrameCount;
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report("Opus 12k mono (SILK)", elapsed_ns, @floatFromInt(decoded_frames), 48_000, 1, opus_silk_target_speedup, files);
 }

@@ -176,6 +176,26 @@ pub const Decoder = struct {
         return @intCast(ret);
     }
 
+    /// A symbol from a cumulative distribution in the reference tables' layout:
+    /// `table[0]` is the total, `table[1..]` the cumulative upper bounds, and the
+    /// last entry equals the total. Returns the symbol index.
+    ///
+    /// This is the SILK layer's table form (`ec_dec_icdf`'s mirror image): SILK
+    /// stores bounds rather than remaining probabilities, so the search is over
+    /// `table[k + 1] <= symbol` instead of a running product.
+    pub fn decodeCdf(self: *Decoder, table: []const u16) u32 {
+        const total: u32 = table[0];
+        self.ext = self.rng / total;
+        var symbol: u32 = self.val / self.ext + 1;
+        symbol = total - @min(symbol, total);
+        var k: u32 = 0;
+        while (table[k + 1] <= symbol) k += 1;
+        const high: u32 = table[k + 1];
+        const low: u32 = if (k == 0) 0 else table[k];
+        self.update(low, high, total);
+        return k;
+    }
+
     /// A uniformly distributed integer in `[0, ft)`. Above 2^8 the high part is
     /// range coded and the low part comes from the raw-bit tail.
     pub fn decodeUint(self: *Decoder, ft_in: u32) u32 {

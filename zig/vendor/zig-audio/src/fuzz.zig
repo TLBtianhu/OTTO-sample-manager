@@ -332,8 +332,11 @@ fn buildAiffTemplate(allocator: std.mem.Allocator, bits: u16) ![]u8 {
     return testutil.buildAiff(allocator, 1, 44_100, bits, frames, payload);
 }
 
-/// A complete Ogg Opus file with two audio packets: one code 0 (20 ms CELT,
-/// stereo) and one code 3 (SILK 10 ms, two VBR frames, six bytes of padding).
+/// A complete Ogg Opus file with three audio packets: one code 0 (20 ms CELT,
+/// stereo), one code 3 (SILK 10 ms, two VBR frames, six bytes of padding) and
+/// one code 0 SILK narrowband 40 ms packet. The last one is what drives the
+/// SILK decoder deep: two 20 ms frames, the low sample rate, the narrower
+/// bandwidth tables.
 /// Mutations therefore land in `OpusHead`, `OpusTags`, the frame count byte,
 /// the length fields and the padding run.
 fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
@@ -343,9 +346,12 @@ fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(frame_b);
     const frame_c = try allocator.alloc(u8, 24);
     defer allocator.free(frame_c);
+    const frame_d = try allocator.alloc(u8, 30);
+    defer allocator.free(frame_d);
     for (frame_a, 0..) |*byte, i| byte.* = @truncate(i * 11 + 3);
     for (frame_b, 0..) |*byte, i| byte.* = @truncate(i * 5 + 1);
     for (frame_c, 0..) |*byte, i| byte.* = @truncate(i * 17 + 9);
+    for (frame_d, 0..) |*byte, i| byte.* = @truncate(i * 23 + 5);
 
     const plain = try opus_build.packet(allocator, .{ .stereo = true, .frames = &.{frame_a} });
     defer allocator.free(plain);
@@ -357,10 +363,15 @@ fn buildOpusTemplate(allocator: std.mem.Allocator) ![]u8 {
         .frames = &.{ frame_b, frame_c },
     });
     defer allocator.free(padded);
+    const silk40 = try opus_build.packet(allocator, .{
+        .config = 2, // SILK-only NB, 40 ms
+        .frames = &.{frame_d},
+    });
+    defer allocator.free(silk40);
 
     return opus_build.file(allocator, .{
         .comments = &.{"ENCODER=zig-audio-fuzz"},
-        .packets = &.{ plain, padded },
+        .packets = &.{ plain, padded, silk40 },
     });
 }
 
