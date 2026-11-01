@@ -35,7 +35,8 @@ const sample_facts = @import("sample_facts.zig");
 /// 打开路径、打印事实与预览摘要。`path` 原样交给口岸（相对路径按当前目录解析）。
 /// `no_shell` 为 true 时用去掉 Shell provider 的注册表（`--no-shell-preview`）：
 /// 音频/图片/视频 provider 自给自足，不靠系统缩略图兜底。`allow_isolation` 为
-/// false（`--no-isolation`）时 Shell provider 直接进程内取图，不尝试 helper。
+/// false（`--no-isolation`）时 Shell provider 直接进程内取图，不尝试 helper；
+/// 默认 helper 缺失/启动失败、超时或崩溃均为 `none.failed`，绝不自动回主进程。
 pub fn run(
     init: std.process.Init,
     allocator: std.mem.Allocator,
@@ -87,9 +88,16 @@ pub fn run(
     const open_ms = @as(f64, @floatFromInt(started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
 
     if (answered.provider) |provider| {
+        // 声明域与本次实际执行域分开：Shell 声明 worker_process，但显式
+        // `--no-isolation` 会把本次改成 in_process。provider 内部也在实际调用点
+        // 打印同一个 execution_domain；验收脚本会交叉核对两处与 helper 路径。
+        const execution_domain = if (provider.isolation == .worker_process and allow_isolation)
+            "helper"
+        else
+            "in_process";
         std.debug.print(
-            "preview: provider={s} kind={s} isolation={s}\n",
-            .{ provider.name, @tagName(provider.kind), @tagName(provider.isolation) },
+            "preview: provider={s} kind={s} declared_isolation={s} execution_domain={s}\n",
+            .{ provider.name, @tagName(provider.kind), @tagName(provider.isolation), execution_domain },
         );
     } else {
         std.debug.print("preview: provider=<none> kind=unknown\n", .{});

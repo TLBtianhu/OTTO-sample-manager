@@ -74,6 +74,10 @@ fn fakeHelperPath() ![]u8 {
     return envOwned("OTTO_THUMB_FAKE");
 }
 
+fn fakeCrashHelperPath() ![]u8 {
+    return envOwned("OTTO_THUMB_CRASH_FAKE");
+}
+
 fn optionsFor(helper: []const u8) thumb_host.Options {
     return .{ .helper_path = helper };
 }
@@ -311,6 +315,22 @@ test "helper 缺失：ensurePresent / get 都返回 HelperUnavailable" {
     ));
 }
 
+test "helper 启动失败：目录不是 exe，ensurePresent / get 都具名拒绝" {
+    defer thumb_host.deinit();
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const directory = fixture.root[0..fixture.root_len];
+
+    try std.testing.expectError(error.HelperUnavailable, thumb_host.ensurePresent(allocator, optionsFor(directory)));
+    try std.testing.expectError(error.HelperUnavailable, thumb_host.getWithOptions(
+        allocator,
+        "C:\\whatever.png",
+        64,
+        optionsFor(directory),
+    ));
+    try std.testing.expect(thumb_host.helperPid() == null);
+}
+
 // ---------------------------------------------------------------------------
 // 5. 崩溃恢复：外部 TerminateProcess 之后，下一次请求自动重启并成功
 // ---------------------------------------------------------------------------
@@ -352,6 +372,31 @@ test "崩溃恢复：TerminateProcess 掉 helper 后自动重启并成功" {
     std.debug.print(
         "[test] 自动恢复成功：pid {d} → {d}，crashes={d} restarts={d}，{d}×{d} {d}B\n",
         .{ pid_before, pid_after, after.crashes, after.restarts, recovered.width, recovered.height, recovered.pixels.len },
+    );
+}
+
+test "持续崩溃：隔离层只重启 helper 一次，第二次 ShellFailure，不回主进程" {
+    const fake = try fakeCrashHelperPath();
+    defer allocator.free(fake);
+    defer thumb_host.deinit();
+
+    const before = thumb_host.stats();
+    try std.testing.expectError(error.ShellFailure, thumb_host.getWithOptions(
+        allocator,
+        "C:\\whatever.png",
+        64,
+        optionsFor(fake),
+    ));
+    const after = thumb_host.stats();
+    try std.testing.expectEqual(before.crashes + 2, after.crashes);
+    try std.testing.expectEqual(before.restarts + 1, after.restarts);
+    try std.testing.expectEqual(before.spawns + 2, after.spawns);
+    try std.testing.expectEqual(before.requests + 1, after.requests);
+    try std.testing.expect(thumb_host.helperPid() == null);
+
+    std.debug.print(
+        "[test] 持续崩溃：spawns +2 / crashes +2 / restarts +1，最终 ShellFailure；没有第二次以上重试\n",
+        .{},
     );
 }
 

@@ -189,7 +189,7 @@ pub fn ensurePresent(allocator: std.mem.Allocator, options: host.Options) host.E
     if (attributes == win32.INVALID_FILE_ATTRIBUTES or
         (attributes & win32.FILE_ATTRIBUTE_DIRECTORY) != 0)
     {
-        log("找不到缩略图 helper：{s}（zig build 应同时产出 {s}；--no-isolation 可退回进程内）", .{
+        log("找不到缩略图 helper：{s}（zig build 应同时产出 {s}；只有显式 --no-isolation 才允许进程内）", .{
             path, helper_exe_name,
         });
         return error.HelperUnavailable;
@@ -319,7 +319,9 @@ fn startLocked(allocator: std.mem.Allocator, size_px: u32, options: host.Options
         return err;
     };
     state.spawns +%= 1;
-    log("helper 启动 pid={d} size={d}（累计 spawn={d}）", .{ state.pid, size_px, state.spawns });
+    log("helper 启动 pid={d} size={d} exe={s} spawn_total={d}", .{
+        state.pid, size_px, state.helper_path.?, state.spawns,
+    });
 }
 
 /// 杀掉并释放当前 helper。幂等。

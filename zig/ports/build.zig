@@ -82,6 +82,20 @@ pub fn build(b: *std.Build) void {
     const install_thumb_host_fake = b.addInstallArtifact(thumb_host_fake_exe, .{});
     b.getInstallStep().dependOn(&install_thumb_host_fake.step);
 
+    // 另一种对手方：能 CreateProcess，但每次都在回帧前以 0xC0000005 自杀。
+    // 与“路径是目录 / exe 损坏”的启动失败分开，验收崩溃不会回主进程重试。
+    const thumb_host_crash_fake_module = b.addModule("otto_thumb_host_crash_fake", .{
+        .root_source_file = b.path("src/thumb_host_crash_fake.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const thumb_host_crash_fake_exe = b.addExecutable(.{
+        .name = "otto-thumb-host-crash-fake",
+        .root_module = thumb_host_crash_fake_module,
+    });
+    const install_thumb_host_crash_fake = b.addInstallArtifact(thumb_host_crash_fake_exe, .{});
+    b.getInstallStep().dependOn(&install_thumb_host_crash_fake.step);
+
     // 缩略图能力表口岸：只读注册表判断扩展名有没有 IThumbnailProvider 登记，
     // 不加载任何第三方 DLL。advapi32 只有 Windows 后端（caps_win.zig）需要。
     const caps_module = b.addModule("otto_caps", .{
@@ -397,9 +411,11 @@ pub fn build(b: *std.Build) void {
     run_thumb_host_tests.setCwd(b.path("."));
     run_thumb_host_tests.setEnvironmentVariable("OTTO_THUMB_HOST", "zig-out/bin/otto-thumb-host.exe");
     run_thumb_host_tests.setEnvironmentVariable("OTTO_THUMB_FAKE", "zig-out/bin/otto-thumb-host-fake.exe");
-    // 先装好两个 helper 再跑：环境变量指向的是安装位置，不是缓存里的编译产物。
+    run_thumb_host_tests.setEnvironmentVariable("OTTO_THUMB_CRASH_FAKE", "zig-out/bin/otto-thumb-host-crash-fake.exe");
+    // 先装好三个 helper 再跑：环境变量指向的是安装位置，不是缓存里的编译产物。
     run_thumb_host_tests.step.dependOn(&install_thumb_host.step);
     run_thumb_host_tests.step.dependOn(&install_thumb_host_fake.step);
+    run_thumb_host_tests.step.dependOn(&install_thumb_host_crash_fake.step);
     run_thumb_host_tests.step.dependOn(&run_folder_picker_tests.step);
     test_step.dependOn(&run_thumb_host_tests.step);
 

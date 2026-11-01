@@ -99,7 +99,8 @@ pub const Options = struct {
     browse_vanish_seconds: ?f64 = null,
     /// `--watch-seconds=<秒>`：`--browse-watch-probe` 的观察窗口（默认 2 秒）。
     watch_seconds: f64 = 2,
-    /// `--no-isolation`：缩略图退回进程内 `thumb.get`（对照用；默认走 helper 进程）。
+    /// `--no-isolation`：唯一允许进程内 `thumb.get` 的显式开关；默认只走 helper，
+    /// helper 缺失/启动失败、超时或崩溃均为 `failed`，绝不自动回主进程。
     no_isolation: bool = false,
     /// `--no-prefetch`：关掉空闲预取（滚动停下后提前取视口上下几十行）。
     /// 只影响"提前取"，可见行的取图路径完全不变——对比实验只差这一项。

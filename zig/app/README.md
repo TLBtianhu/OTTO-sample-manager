@@ -153,9 +153,16 @@ worker thread calls `ports/thumb_host.zig` instead of `thumb.get` directly:
   helper dies, and a `KILL_ON_JOB_CLOSE` job so OTTO being killed leaves no
   orphan helper.
 
-`--no-isolation` is the only way back to in-process fetching; it exists for
-side-by-side comparison, not as a supported mode. A missing helper is a startup
-error with a named message, never a silent fallback.
+Isolation is the default. A missing or unstartable helper is a **named failure**:
+startup reports `HelperUnavailable`, and a request reports `none.failed`; neither
+case silently fetches in the main process. Only an explicit `--no-isolation`
+selects in-process fetching. A timeout or crash is also `none.failed` and is never
+retried in the main process (the isolation layer may restart the helper itself).
+
+Every Shell request logs its actual `execution_domain=helper` or
+`execution_domain=in_process`; `--preview` prints that same field next to
+`declared_isolation`, so the result, log, and helper path can be checked together.
+`--no-isolation` therefore always reports `execution_domain=in_process`.
 
 ```powershell
 # byte-for-byte parity + 200-image timing, in-process vs helper (no window)
