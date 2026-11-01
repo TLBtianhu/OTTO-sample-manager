@@ -19,6 +19,7 @@ const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const duration_text = @import("duration_text.zig");
 const filter = @import("filter.zig");
+const browse_action = @import("browse_action.zig");
 const row_thumb = @import("row_thumb.zig");
 const sample_facts = @import("sample_facts.zig");
 const transport_mod = @import("transport.zig");
@@ -52,7 +53,11 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     const it = ui.pressable(c, style, hover_color);
     defer ui.end(c);
 
-    const drew_image = row_thumb.draw(c, s.thumbs, sample);
+    const is_directory = State.isDirectory(s, index);
+    const drew_image = if (is_directory) blk: {
+        ui.icon(c, "folder", .{ .size = 28, .color = c.theme.accent });
+        break :blk false;
+    } else row_thumb.draw(c, s.thumbs, sample);
     if (drew_image) s.rows_with_image += 1;
     // 验收探针：这一帧这一行画的是真图还是占位。`--bench-scroll` 用它数
     // "滚动经过的行里，图标已就绪的比例"（见 `row_probe.zig`）。
@@ -67,6 +72,10 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     // 时长——那个文件已经不在了，读一次只会失败一次。选中项此时已经移到相邻行。
     if (State.isDeleted(s, index)) {
         ui.text(c, "已删除", .{ .size = 11, .color = c.theme.danger });
+        return it;
+    }
+    if (is_directory) {
+        ui.text(c, "目录", .{ .size = 10, .color = c.theme.accent });
         return it;
     }
     // 估算时长必须显示成 `≈40.9s`：这个数是从文件大小 / 比特率推出来的，不是
@@ -104,6 +113,11 @@ pub fn previewDuration(s: *State, sample: ?*const core.model.Sample) sample_fact
 /// 点击语义、拖拽阈值。Ctrl+点击在 nanoui 里不算 clicked（它被当成右键按下，
 /// 见 `interact` 的 `right_pressed`），所以这里单独认。
 pub fn rowInput(s: *State, c: *ui.Context, index: usize, it: ui.Interaction) void {
+    if (it.double_clicked and State.isDirectory(s, index)) {
+        browse_action.enterAt(s, index);
+        c.changed = true;
+        return;
+    }
     if (it.right_pressed and c.input.button == .left and c.input.ctrl) {
         s.selection.click(index, .{ .ctrl = true });
         cancelPress(s);
@@ -122,7 +136,7 @@ pub fn rowInput(s: *State, c: *ui.Context, index: usize, it: ui.Interaction) voi
         c.changed = true;
         return;
     }
-    if (s.drag_ended or s.drag_armed or !it.pressed) return;
+    if (s.drag_ended or s.drag_armed or !it.pressed or State.isDirectory(s, index)) return;
     if (s.press_row == null) {
         s.press_row = index;
         s.press_origin = c.input.mouse;
@@ -213,7 +227,7 @@ pub fn syncSelection(s: *State) void {
 /// 用 `cursor` 而不是"选中集合的第一个"，这样 Ctrl+点取消选中时预览条不闪。
 pub fn previewRow(s: *const State) ?*const core.model.Sample {
     const row = s.selection.cursor orelse return null;
-    if (row >= s.samples.len) return null;
+    if (row >= s.samples.len or State.isDirectory(s, row)) return null;
     return &s.samples[row];
 }
 
@@ -221,6 +235,10 @@ pub fn previewRow(s: *const State) ?*const core.model.Sample {
 pub fn activateCursor(s: *State, c: *ui.Context) void {
     const sample = s.selection.cursor orelse return;
     if (sample >= s.samples.len) return;
+    if (browse_action.activateCursor(s, sample)) {
+        c.changed = true;
+        return;
+    }
     const playing = s.preview.playCurrent();
     c.changed = true;
     std.debug.print(

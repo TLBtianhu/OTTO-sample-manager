@@ -35,6 +35,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win = @import("drag_win.zig");
+const clipboard_text = @import("clipboard_text.zig");
 
 /// 出口错误。取消不在其中——见文件头。
 pub const Error = error{
@@ -91,6 +92,12 @@ pub fn start(
 pub fn copyToClipboard(allocator: std.mem.Allocator, paths: []const []const u8) Error!void {
     if (builtin.os.tag != .windows) return error.Unsupported;
     return win.copyToClipboard(allocator, paths);
+}
+
+/// 地址栏复制路径：文本可以是目录，不做 CF_HDROP 的文件存在性校验。
+pub fn copyTextToClipboard(allocator: std.mem.Allocator, text: []const u8) Error!void {
+    if (builtin.os.tag != .windows) return error.Unsupported;
+    return clipboard_text.copy(allocator, text);
 }
 
 /// 不开窗的自检：构造 Shell 数据对象，像 OLE 放置目标那样查询它——

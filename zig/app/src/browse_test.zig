@@ -73,7 +73,7 @@ test "入口解析：位置参数是目录就浏览、是文件就是库；--bro
     );
 }
 
-test "懒枚举：不列子目录、不排序、行来自目录；没有监听也能用" {
+test "懒枚举：目录与文件都列出，目录优先且默认按名称排序" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "kick.wav", .data = "1234" });
@@ -91,11 +91,12 @@ test "懒枚举：不列子目录、不排序、行来自目录；没有监听�
 
     try waitEnumeration(session, &selection);
     const samples = session.samples();
-    try testing.expectEqual(@as(usize, 3), samples.len);
-    for (samples) |sample| {
+    try testing.expectEqual(@as(usize, 4), samples.len);
+    try testing.expect(session.isDirectory(0));
+    try testing.expectEqualStrings("sub", samples[0].file_name);
+    for (samples[1..]) |sample| {
         try testing.expect(sample.file_size > 0);
         try testing.expect(sample.mtime > 0);
-        try testing.expect(!std.mem.eql(u8, sample.file_name, "sub"));
     }
     // 首批行与整轮枚举的耗时都记下来了（`--browse-probe` 打的就是这两个数）。
     const info = session.info();

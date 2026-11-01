@@ -9,6 +9,7 @@
 //! 浏览模式的空状态**不能**复用 `empty_state.zig`：那个空状态的主按钮是「导入文件夹」，
 //! 而浏览模式不写库、不导入；点它会把"只是看一个目录"变成一次导入。
 
+const std = @import("std");
 const nanoui = @import("nanoui");
 const browse = @import("browse.zig");
 const ui = nanoui.ui;
@@ -20,7 +21,49 @@ pub const banner_height: f32 = 20;
 pub const Action = struct {
     /// 状态条上的「加载更多」被点了。
     load_more_clicked: bool = false,
+    back: bool = false,
+    forward: bool = false,
+    up: bool = false,
+    copy_path: bool = false,
+    sort: ?browse.SortKey = null,
 };
+
+/// 地址栏与排序栏：无弹窗，按钮只发动作，Session 在 main 一侧执行。
+pub fn drawToolbar(c: *ui.Context, info: browse.Info) Action {
+    var action: Action = .{};
+    const address = ui.div(c).row().wFull().h(22).itemsCenter().px(8).gap(4);
+    if (navButton(c, "←", info.can_back)) action.back = true;
+    if (navButton(c, "→", info.can_forward)) action.forward = true;
+    if (navButton(c, "↑", true)) action.up = true;
+    const path_button = smallPressable(c);
+    ui.text(c, info.root, .{ .size = 10, .color = c.theme.muted, .truncate = .ellipsis });
+    ui.end(c);
+    if (path_button.clicked) action.copy_path = true;
+    address.end();
+
+    const sorts = ui.div(c).row().wFull().h(20).itemsCenter().px(12).gap(5);
+    defer sorts.end();
+    ui.text(c, "排序", .{ .size = 10, .color = c.theme.muted });
+    const keys = [_]browse.SortKey{ .name, .size, .mtime, .type };
+    inline for (keys) |key| {
+        const button = smallPressable(c);
+        ui.text(c, key.label(), .{ .size = 10, .color = if (std.mem.eql(u8, info.sort, key.text())) c.theme.accent else c.theme.muted });
+        ui.end(c);
+        if (button.clicked) action.sort = key;
+    }
+    return action;
+}
+
+fn navButton(c: *ui.Context, label: []const u8, enabled: bool) bool {
+    if (!enabled) {
+        ui.text(c, label, .{ .size = 13, .color = c.theme.muted });
+        return false;
+    }
+    const button = smallPressable(c);
+    ui.text(c, label, .{ .size = 13, .color = c.theme.accent });
+    ui.end(c);
+    return button.clicked;
+}
 
 /// 表头下面那一行：`浏览 samples · 1234 个文件`，后面跟状态徽标与「加载更多」。
 pub fn drawBanner(c: *ui.Context, info: browse.Info) Action {
@@ -28,7 +71,7 @@ pub fn drawBanner(c: *ui.Context, info: browse.Info) Action {
     const row = ui.div(c).row().wFull().h(banner_height).itemsCenter().px(12).gap(6);
     defer row.end();
 
-    ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "浏览 {s} · {d} 个文件", .{ info.name, info.entries });
+    ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "浏览 {s} · {d} 个项目", .{ info.name, info.entries });
     if (info.unavailable) {
         // 保持"路径不可用"的显示；恢复只在用户下一次交互时发生（没有定时轮询）。
         ui.text(c, "· 路径不可用（点击或滚动时重试）", .{ .size = 11, .color = c.theme.danger });
@@ -95,8 +138,8 @@ pub fn drawEmpty(c: *ui.Context, info: browse.Info) void {
         ui.textf(c, .{ .size = 12, .color = c.theme.muted }, "剩余 {d} 条未加载（不静默丢弃）", .{info.remaining});
         return;
     }
-    ui.text(c, "此目录没有文件", .{ .size = 15, .weight = .semibold });
-    ui.text(c, "只列当前这一个目录（不含子目录）。", .{ .size = 12, .color = c.theme.muted });
+    ui.text(c, "此目录为空", .{ .size = 15, .weight = .semibold });
+    ui.text(c, "只列当前这一层；双击目录可进入。", .{ .size = 12, .color = c.theme.muted });
 }
 
 /// 小号可点区域：只有 hover 时的浅底，点击面比文字略大一圈（与 `list_header` 同款）。

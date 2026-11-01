@@ -20,6 +20,7 @@ const demo_thumbs = @import("demo_thumbs.zig");
 const demo_transport = @import("demo_transport.zig");
 const demo_watch = @import("demo_watch.zig");
 const browse_watch_probe = @import("browse_watch_probe.zig");
+const browse_nav_probe = @import("browse_nav_probe.zig");
 const import_cli = @import("import_cli.zig");
 const library_cli = @import("library_cli.zig");
 const mode_mod = @import("mode.zig");
@@ -62,6 +63,8 @@ pub fn run(
     // 目录浏览的两个无头探针（Stage 0）：都不建窗口、只看当前这一个目录。
     // 放在其它自检之前：它们与库无关，也不该被 `--filter` / `--import` 抢走。
     if (options.browse_probe) |dir| return try browse_probe.runProbe(init, allocator, dir, options);
+    if (options.browse_nav_probe) |dir| return try browse_nav_probe.run(init, allocator, dir, options, false);
+    if (options.browse_nav_watch_probe) |dir| return try browse_nav_probe.run(init, allocator, dir, options, true);
     if (options.browse_watch_probe) |dir| {
         return try browse_watch_probe.run(init, allocator, dir, options);
     }

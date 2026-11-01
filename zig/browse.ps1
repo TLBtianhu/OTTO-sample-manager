@@ -1,4 +1,4 @@
-﻿# 目录浏览的验收闸门：Stage 0 的九条判据 + Stage 1 的五条补口（共 18 行数字）。
+# 目录浏览验收闸门：原 Stage 0/分页 18 行 + Stage 1 导航 9 行（共 27 行数字）。
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1 -Recreate -SkipScroll
@@ -746,7 +746,9 @@ function Invoke-MemoryRefusal {
 # Main
 # ---------------------------------------------------------------------------
 
-Write-Output 'OTTO Lite 目录浏览 Stage 0 验收'
+. (Join-Path $PSScriptRoot 'browse_nav_accept.ps1')
+
+Write-Output 'OTTO Lite 目录浏览 Stage 0 + Stage 1 验收'
 Write-Output ('exe: {0}' -f $Exe)
 
 if (-not (Test-Path -LiteralPath $Exe)) {
@@ -755,6 +757,11 @@ if (-not (Test-Path -LiteralPath $Exe)) {
 }
 
 Initialize-Fixtures $Root ([bool]$Recreate)
+# 大目录导航夹具只在本轮末尾加入；下一轮先移除，原 18 项仍看到纯 10 万文件。
+$navChildren = @((Join-Path $Root '100k\nav-child'), (Join-Path $Root '100k\a-nav-child'))
+foreach ($navChild in $navChildren) {
+  if (Test-Path -LiteralPath $navChild) { Remove-Item -LiteralPath $navChild -Recurse -Force }
+}
 
 Invoke-FirstPage
 Invoke-HundredThousand
@@ -772,6 +779,7 @@ Invoke-PageSize
 Invoke-RescanKeep
 Invoke-VanishReturn
 Invoke-MemoryRefusal
+Invoke-NavAcceptance
 
 # 清理 ACL 残留（deny 目录已删过；deny-root 恢复在上面做了）。
 $null = $previewOk

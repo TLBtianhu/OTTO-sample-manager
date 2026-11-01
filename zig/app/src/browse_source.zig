@@ -46,8 +46,9 @@ const Pause = struct {
 pub const Source = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    /// 被枚举目录的绝对路径（末尾分隔符已去掉）。借用调用方的字符串。
-    root: []const u8,
+    /// 被枚举目录的绝对路径。生产线程拥有；导航时在 beginPage 原子换代。
+    root: []u8,
+    pending_root: ?[]u8 = null,
 
     thread: ?std.Thread = null,
     wake: std.Io.Semaphore = .{},
@@ -74,6 +75,7 @@ pub const Source = struct {
         path: []u8,
         size: u64,
         mtime: i64,
+        is_directory: bool,
     };
 
     /// 起线程并立刻排第一趟枚举。返回的对象在堆上（线程持有它的指针）。
@@ -83,10 +85,11 @@ pub const Source = struct {
         self.* = .{
             .allocator = allocator,
             .io = io,
-            .root = root,
+            .root = try allocator.dupe(u8, root),
             .page_limit = @max(1, @min(page_limit, types.hard_limit)),
             .total_cap = types.hard_limit,
         };
+        errdefer allocator.free(self.root);
         self.thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, enumThreadMain, .{self});
         errdefer {
             self.stop.store(true, .release);
@@ -107,6 +110,8 @@ pub const Source = struct {
 
         self.closeIterator();
         self.freePending();
+        if (self.pending_root) |root| self.allocator.free(root);
+        self.allocator.free(self.root);
 
         self.lock.acquire();
         var leftover = self.queue;
@@ -131,6 +136,16 @@ pub const Source = struct {
         _ = self.epoch.fetchAdd(1, .monotonic);
         self.job.store(job_rescan, .release);
         self.wake.post(self.io);
+    }
+
+    /// 导航：路径由生产线程在下一次重扫开头换掉，旧枚举绝不会读到已释放字符串。
+    pub fn requestNavigate(self: *Source, root: []const u8) error{OutOfMemory}!void {
+        const copy = try self.allocator.dupe(u8, root);
+        self.lock.acquire();
+        if (self.pending_root) |old| self.allocator.free(old);
+        self.pending_root = copy;
+        self.lock.release();
+        self.request();
     }
 
     /// 要求再读一页：**不**动代次，也不从头扫——生产线程接着用打开的枚举句柄。
@@ -205,6 +220,14 @@ pub const Source = struct {
             self.closeIterator();
             self.freePending();
             self.collected = 0;
+            self.lock.acquire();
+            const next_root = self.pending_root;
+            self.pending_root = null;
+            self.lock.release();
+            if (next_root) |root| {
+                self.allocator.free(self.root);
+                self.root = root;
+            }
         }
 
         if (self.iterator == null) {
@@ -251,6 +274,7 @@ pub const Source = struct {
                     .path = pending.path,
                     .size = pending.size,
                     .mtime = pending.mtime,
+                    .is_directory = pending.is_directory,
                 }) catch {
                     self.allocator.free(pending.path);
                     join_failures += 1;
@@ -271,7 +295,6 @@ pub const Source = struct {
                 exhausted = true;
                 break;
             };
-            if (entry.isDirectory()) continue; // 不列子目录（Stage 0）
             if (self.collected >= self.total_cap) {
                 cap_hit = true;
                 break;
@@ -285,6 +308,7 @@ pub const Source = struct {
                 .path = path,
                 .size = entry.size,
                 .mtime = entry.mtime,
+                .is_directory = entry.isDirectory(),
             }) catch {
                 self.allocator.free(path);
                 join_failures += 1;
@@ -333,12 +357,11 @@ pub const Source = struct {
                 return;
             };
             const entry = next orelse return;
-            if (entry.isDirectory()) continue;
             const path = types.joinPath(self.allocator, self.root, entry.name) catch {
                 skipped.* += 1;
                 continue;
             };
-            self.pending = .{ .path = path, .size = entry.size, .mtime = entry.mtime };
+            self.pending = .{ .path = path, .size = entry.size, .mtime = entry.mtime, .is_directory = entry.isDirectory() };
             return;
         }
     }
@@ -357,8 +380,7 @@ pub const Source = struct {
         var skipped: usize = 0;
         while (skipped < count) {
             const next = iterator.next() catch return;
-            const entry = next orelse return;
-            if (entry.isDirectory()) continue;
+            _ = next orelse return;
             skipped += 1;
         }
     }
@@ -378,8 +400,7 @@ pub const Source = struct {
                     skipped += 1;
                     break;
                 };
-                const entry = next orelse break;
-                if (entry.isDirectory()) continue;
+                _ = next orelse break;
                 remaining += 1;
             }
             skipped += iterator.skipped - skipped_before;

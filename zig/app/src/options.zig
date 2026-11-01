@@ -67,6 +67,10 @@ pub const Options = struct {
     browse_probe: ?[]const u8 = null,
     /// `--browse-watch-probe <dir>`：起监听、跑一段 60 Hz 帧循环，报告事件数与行变化数。
     browse_watch_probe: ?[]const u8 = null,
+    /// Stage 1 导航探针；`--steps=enter:sub,back,up,sort:size`。
+    browse_nav_probe: ?[]const u8 = null,
+    browse_nav_watch_probe: ?[]const u8 = null,
+    browse_steps: []const u8 = "",
     /// `--browse-select=<文件名>`：探针用，先选中这一行（模拟用户点它）。
     browse_select: ?[]const u8 = null,
     /// `--preview-first=<文件名>`：`--browse-probe` 用它量"选中 → 首次预览可用"。
@@ -177,7 +181,9 @@ pub const Options = struct {
             self.import_into != null or
             self.import_dir != null or
             self.browse_probe != null or
-            self.browse_watch_probe != null;
+            self.browse_watch_probe != null or
+            self.browse_nav_probe != null or
+            self.browse_nav_watch_probe != null;
     }
 };
 
@@ -467,9 +473,9 @@ test "浏览：--browse / 两个探针 / 探针参数各自两种写法，都不
     try testing.expect(!plain.isHeadlessCommand());
 
     const spaced = try parse(&[_][]const u8{
-        "otto-lite", "--browse", "C:\\samples", "--browse-probe", "D:\\packs",
-        "--browse-watch-probe", "E:\\watch", "--browse-select", "kick.wav",
-        "--preview-first", "kick.mp3", "--watch-seconds", "3.5",
+        "otto-lite",            "--browse",        "C:\\samples",     "--browse-probe", "D:\\packs",
+        "--browse-watch-probe", "E:\\watch",       "--browse-select", "kick.wav",       "--preview-first",
+        "kick.mp3",             "--watch-seconds", "3.5",
     });
     try testing.expectEqualStrings("C:\\samples", spaced.browse_dir.?);
     try testing.expectEqualStrings("D:\\packs", spaced.browse_probe.?);
@@ -481,9 +487,8 @@ test "浏览：--browse / 两个探针 / 探针参数各自两种写法，都不
     try testing.expect(spaced.library_path == null);
 
     const joined = try parse(&[_][]const u8{
-        "otto-lite", "lib.json", "--browse=C:\\samples", "--browse-probe=C:\\p",
-        "--browse-watch-probe=C:\\w", "--browse-select=kick.wav", "--preview-first=kick.mp3",
-        "--watch-seconds=0.5",
+        "otto-lite",                  "lib.json",                 "--browse=C:\\samples",     "--browse-probe=C:\\p",
+        "--browse-watch-probe=C:\\w", "--browse-select=kick.wav", "--preview-first=kick.mp3", "--watch-seconds=0.5",
     });
     try testing.expectEqualStrings("C:\\samples", joined.browse_dir.?);
     try testing.expectEqualStrings("C:\\p", joined.browse_probe.?);
@@ -511,9 +516,8 @@ test "分页/重扫/消失参数：默认值与两种写法；越界的页大小
     try testing.expect(plain.browse_vanish_seconds == null);
 
     const spaced = try parse(&[_][]const u8{
-        "otto-lite", "--browse-limit", "1000", "--pages", "3", "--force-rescan",
-        "--rescan-pause-ms", "1500", "--copy-during-rescan", "50",
-        "--vanish-then-return", "1.5",
+        "otto-lite",         "--browse-limit", "1000",                 "--pages", "3",                    "--force-rescan",
+        "--rescan-pause-ms", "1500",           "--copy-during-rescan", "50",      "--vanish-then-return", "1.5",
     });
     try testing.expectEqual(@as(usize, 1000), spaced.browse_limit);
     try testing.expectEqual(@as(u32, 3), spaced.browse_pages);
@@ -523,7 +527,7 @@ test "分页/重扫/消失参数：默认值与两种写法；越界的页大小
     try testing.expectEqual(@as(?f64, 1.5), spaced.browse_vanish_seconds);
 
     const joined = try parse(&[_][]const u8{
-        "otto-lite", "--browse-limit=200000", "--pages=1", "--rescan-pause-ms=0",
+        "otto-lite",              "--browse-limit=200000",  "--pages=1", "--rescan-pause-ms=0",
         "--copy-during-rescan=1", "--vanish-then-return=0",
     });
     try testing.expectEqual(@as(usize, 200_000), joined.browse_limit);

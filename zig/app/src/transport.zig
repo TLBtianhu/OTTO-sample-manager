@@ -140,6 +140,11 @@ pub fn lastFailureCode() i32 {
     return drag.lastFailure().code;
 }
 
+/// 浏览地址栏：复制当前目录的完整路径（CF_UNICODETEXT）。
+pub fn copyPath(allocator: std.mem.Allocator, path: []const u8) CopyError!void {
+    return drag.copyTextToClipboard(allocator, path);
+}
+
 /// `--copy-now <file>`：只有在用户显式点名时才真的写剪贴板。
 /// 返回进程退出码（0 = 成功），打印一行结果。
 pub fn copyNow(allocator: std.mem.Allocator, path: []const u8) u8 {

@@ -30,6 +30,7 @@ const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const browse_mod = @import("browse.zig");
 const browse_ui = @import("browse_ui.zig");
+const browse_action = @import("browse_action.zig");
 const commands = @import("commands.zig");
 const console_mod = @import("console.zig");
 const drop_ui = @import("drop_ui.zig");
@@ -134,6 +135,11 @@ pub const State = struct {
         ui.column(c, .{ .width = .fill, .height = .fill });
         defer ui.end(c);
 
+        if (s.browse) |session| {
+            const action = browse_ui.drawToolbar(c, session.info());
+            if (!busy) browse_action.handleToolbar(s, c, action);
+        }
+
         // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧就参与过滤；
         // 「导入文件夹」按钮和搜索框同一行、宽度固定（见 `search_ui.Trailing`）。
         // 浏览模式没有这个按钮：那条路不写库，点「导入」会把"看一眼目录"变成一次导入。
@@ -143,6 +149,7 @@ pub const State = struct {
             .disabled = s.import.busy(),
         };
         if (!busy) {
+            if (s.browse != null) browse_action.handleKeys(s, c);
             const action = s.search.frame(c, s.samples, &s.selection, import_button);
             if (action.filter_changed) row_ui.noteSelection(s);
             if (action.activate) row_ui.activateCursor(s, c);
@@ -380,6 +387,11 @@ pub const State = struct {
     pub fn isDeleted(s: *const State, index: usize) bool {
         const session = s.browse orelse return false;
         return session.isDeleted(index);
+    }
+
+    pub fn isDirectory(s: *const State, index: usize) bool {
+        const session = s.browse orelse return false;
+        return session.isDirectory(index);
     }
 
     /// 帧外（定时器）执行一次待拖拽。进入前把计划从 `Transport` 摘下来。

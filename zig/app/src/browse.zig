@@ -34,11 +34,17 @@ const budget_mod = @import("browse_budget.zig");
 const bench_win = @import("bench_win.zig");
 const browse_target = @import("browse_target.zig");
 const types = @import("browse_types.zig");
+const sort_mod = @import("browse_sort.zig");
+const history_mod = @import("browse_history.zig");
+const navigation = @import("browse_navigation.zig");
+const view = @import("browse_view.zig");
 
 const Entry = types.Entry;
 const Batch = types.Batch;
 pub const Report = types.Report;
 pub const Info = types.Info;
+pub const SortKey = sort_mod.Key;
+pub const NavigationError = navigation.Error;
 
 pub const max_entries = types.default_limit;
 pub const hard_limit = types.hard_limit;
@@ -140,6 +146,12 @@ pub const Session = struct {
     tracker: select_mod.Tracker,
     /// 全量重枚举之前记下的选中项：等新行到了再按身份找回。
     restore_pending: bool = false,
+    /// 导航历史 / 返回时的身份选中快照。
+    history: history_mod.History,
+    navigation_restore: bool = false,
+    /// 当前排序；一批行收尾后只排一次。
+    sort_key: sort_mod.Key = .name,
+    needs_sort: bool = false,
 
     // ---- 内存预算（`browse_budget.zig`） ----
     budget: budget_mod.Budget = .{},
@@ -169,8 +181,11 @@ pub const Session = struct {
             .source = undefined,
             .started_ns = types.nowNs(io),
             .tracker = select_mod.Tracker.init(allocator),
+            .history = undefined,
         };
         errdefer self.tracker.deinit();
+        self.history = try history_mod.History.init(allocator, absolute);
+        errdefer self.history.deinit();
 
         // 监听先于枚举：枚举期间的新文件也要能看到（RDCW 的读取窗口越小越好）。
         // 非递归是**要求**：浏览模式只列当前这一层。
@@ -200,6 +215,7 @@ pub const Session = struct {
         self.view_rows.deinit(self.allocator);
         self.ids.deinit(self.allocator);
         self.tracker.deinit();
+        self.history.deinit();
         if (self.event_buffer.len > 0) self.allocator.free(self.event_buffer);
         self.allocator.free(self.root);
         self.allocator.destroy(self);
@@ -213,6 +229,10 @@ pub const Session = struct {
     pub fn isDeleted(self: *const Session, index: usize) bool {
         if (index >= self.entries.items.len) return false;
         return self.entries.items[index].deleted;
+    }
+
+    pub fn isDirectory(self: *const Session, index: usize) bool {
+        return index < self.entries.items.len and self.entries.items[index].is_directory;
     }
 
     pub fn rootName(self: *const Session) []const u8 {
@@ -247,6 +267,10 @@ pub const Session = struct {
             .rescans = self.rescans,
             .reconciles = self.reconciles,
             .pages = self.pages,
+            .sort = self.sort_key.text(),
+            .epoch = self.source.currentEpoch(),
+            .can_back = self.history.canBack(),
+            .can_forward = self.history.canForward(),
         };
     }
 
@@ -337,7 +361,7 @@ pub const Session = struct {
         // 1. 改动之前记下选中项的身份：行号马上就会整体移动。
         //    重枚举窗口里不重记：旧身份要留到新行到了才用得上。
         if (selection) |sel| {
-            if (!self.swapping and !self.restore_pending) {
+            if (!self.swapping and !self.restore_pending and !self.navigation_restore) {
                 try self.tracker.capture(self.io, self.entries.items, sel, &self.unreadable);
             }
         }
@@ -348,11 +372,19 @@ pub const Session = struct {
         // 3. 监听事件（重扫期间不取，留给 reconcile）。
         try reconcile_mod.pump(self, &report);
 
+        // 一页或一批事件收尾才排序：O(n log n)，不是每 512 行重排一次。
+        if (report.changed and !self.enumerating and !self.swapping and self.needs_sort) {
+            sort_mod.entries(self.entries.items, self.sort_key);
+            self.needs_sort = false;
+        }
         // 4. 行变了：重建样本视图，再把选中项按身份放回去。
         if (report.changed) try self.rebuildSamples();
         if (selection) |sel| {
-            // 换行的窗口里不 restore：等新行到齐（swapping 结束）再按身份找回。
-            if (!self.swapping and (report.changed or self.restore_pending)) {
+            if (self.navigation_restore and !self.enumerating and !self.swapping) {
+                try self.history.restore(self.io, self.entries.items, sel, &self.unreadable);
+                self.navigation_restore = false;
+                self.tracker.reset();
+            } else if (!self.navigation_restore and !self.swapping and (report.changed or self.restore_pending)) {
                 try self.tracker.restore(self.entries.items, sel);
                 self.restore_pending = false;
                 self.tracker.reset();
@@ -442,8 +474,8 @@ pub const Session = struct {
             }
         }
         self.entries.appendAssumeCapacity(entry);
+        self.needs_sort = true;
     }
-
 
     /// 探针/测试用：强制一次重扫，并可让生产线程在枚举到 `pause_after` 条时暂停。
     pub fn forceRescan(self: *Session, pause_after: usize, pause_ms: u64) void {
@@ -455,6 +487,41 @@ pub const Session = struct {
         return self.source.pausedNow();
     }
 
+    pub fn enterDirectory(self: *Session, index: usize, selection: *selection_mod.Selection) NavigationError!void {
+        return navigation.enterIndex(self, index, selection);
+    }
+
+    pub fn goBack(self: *Session, selection: *selection_mod.Selection) NavigationError!void {
+        return navigation.back(self, selection);
+    }
+
+    pub fn goForward(self: *Session, selection: *selection_mod.Selection) NavigationError!void {
+        return navigation.forward(self, selection);
+    }
+
+    pub fn goUp(self: *Session, selection: *selection_mod.Selection) NavigationError!void {
+        return navigation.up(self, selection);
+    }
+
+    /// 用户切排序：先记身份，再一次原地排序 + O(n) 视图重建，选中项不丢。
+    pub fn setSort(self: *Session, key: SortKey, selection: *selection_mod.Selection) error{OutOfMemory}!void {
+        if (self.sort_key == key) return;
+        try self.tracker.capture(self.io, self.entries.items, selection, &self.unreadable);
+        self.sort_key = key;
+        sort_mod.entries(self.entries.items, key);
+        self.needs_sort = false;
+        try self.rebuildSamples();
+        try self.tracker.restore(self.entries.items, selection);
+        self.tracker.reset();
+    }
+
+    pub fn sortKey(self: *const Session) SortKey {
+        return self.sort_key;
+    }
+
+    pub fn historyLength(self: *const Session) usize {
+        return self.history.len();
+    }
 
     // -----------------------------------------------------------------------
     // 行维护
@@ -470,27 +537,8 @@ pub const Session = struct {
         self.tombstones = 0;
     }
 
-    /// 用户下一次交互（点击 / 滚动 / 键盘 / 获得焦点）时重试一次；成功就恢复监听并
-    /// 重枚举（epoch+1）。失败就继续显示"路径不可用"，**不轮询**。
     pub fn retryUnavailable(self: *Session) void {
-        if (!self.unavailable) return;
-        const stat = std.Io.Dir.cwd().statFile(self.io, self.root, .{}) catch return;
-        if (stat.kind != .directory) return;
-
-        // 旧的监听句柄指向的可能是已经被删掉的目录：先关掉再重开。
-        self.closeWatcher();
-        if (self.watch_enabled) {
-            self.watcher = openWatcher(self.allocator, self.root);
-            if (self.watcher == null) return; // 还是起不来：保持"路径不可用"
-        }
-        self.unavailable = false;
-        self.denied = false;
-        // 恢复后的重枚举同样走 reconcile：枚举期间到达的事件留给补应用，
-        // 否则它们会被第一批新行盖掉（和风暴重扫是同一条时序）。
-        self.reconciling = false;
-        self.replay_after_rescan = false;
-        self.reconcile_again = false;
-        reconcile_mod.startRescan(self, self.last_event_seq);
+        navigation.retryUnavailable(self);
     }
 
     pub fn closeWatcher(self: *Session) void {
@@ -501,32 +549,12 @@ pub const Session = struct {
         }
     }
 
-    /// 把 `entries` 投影成 `core.model.Sample`（UI / 选择 / 预览只认这个）。
-    ///
-    /// id 是合成的（`b<下标>`），不写任何地方；缩略图缓存键用的是 `stableKey()`
-    /// （身份或 路径+大小+mtime），与 id 无关。
-    fn rebuildSamples(self: *Session) error{OutOfMemory}!void {
-        const count = self.entries.items.len;
-        try self.view_rows.resize(self.allocator, count);
-        try self.ids.resize(self.allocator, count * types.id_stride);
+    pub fn reopenWatcher(self: *Session) void {
+        if (self.watch_enabled) self.watcher = openWatcher(self.allocator, self.root);
+    }
 
-        for (self.entries.items, 0..) |entry, index| {
-            const text = self.ids.items[index * types.id_stride ..][0..types.id_stride];
-            const id = std.fmt.bufPrint(text, "b{d}", .{index}) catch unreachable;
-            self.view_rows.items[index] = .{
-                .id = id,
-                .file_name = core.model.fileNameFromPath(entry.path),
-                .file_ext = core.model.fileExtFromPath(entry.path),
-                .file_path = entry.path,
-                .original_id = id,
-                .file_size = entry.size,
-                .mtime = entry.mtime,
-                .identity = entry.identity,
-                // 时长/采样率/声道等行被画到时由 `duration_trust` 现读文件头；
-                // 浏览模式不写库，所以没有"导入时补元数据"那一步。
-                .pending_metadata = true,
-            };
-        }
+    fn rebuildSamples(self: *Session) error{OutOfMemory}!void {
+        return view.rebuild(self);
     }
 };
 

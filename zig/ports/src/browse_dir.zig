@@ -35,6 +35,9 @@ const BOOL = i32;
 const DWORD = u32;
 
 const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
+const FILE_SHARE_READ_WRITE_DELETE: DWORD = 0x7;
+const OPEN_EXISTING: DWORD = 3;
+const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
 
 /// `FILE_ATTRIBUTE_DIRECTORY`：条目是目录（浏览模式只列文件，所以调用方要跳过它）。
 pub const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x0000_0010;
@@ -94,6 +97,16 @@ extern "kernel32" fn GetFileInformationByHandle(
     information: *BY_HANDLE_FILE_INFORMATION,
 ) callconv(.winapi) BOOL;
 extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+extern "kernel32" fn CreateFileW(
+    file_name: [*:0]const u16,
+    desired_access: DWORD,
+    share_mode: DWORD,
+    security_attributes: ?*anyopaque,
+    creation_disposition: DWORD,
+    flags_and_attributes: DWORD,
+    template_file: ?HANDLE,
+) callconv(.winapi) HANDLE;
+extern "kernel32" fn CloseHandle(object: HANDLE) callconv(.winapi) BOOL;
 
 comptime {
     // 布局是契约：Windows SDK 在 Win64 上就是 592 字节（含 260 个 WCHAR 的文件名）。
@@ -237,11 +250,25 @@ pub const Iterator = struct {
 /// 文件系统不提供稳定 File ID 时返回 null（FAT / 网络盘），调用方退回路径键。
 pub fn identityOf(io: std.Io, path: []const u8) !?Identity {
     if (!supported) return error.Unsupported;
+    const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
+    if (stat.kind == .directory) return identityOfDirectory(path);
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| return err;
     defer file.close(io);
+    return identityFromHandle(file.handle);
+}
 
+fn identityOfDirectory(path: []const u8) !?Identity {
+    const wide = try std.unicode.wtf8ToWtf16LeAllocZ(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(wide);
+    const handle = CreateFileW(wide.ptr, 0, FILE_SHARE_READ_WRITE_DELETE, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
+    if (handle == INVALID_HANDLE_VALUE) return error.AccessDenied;
+    defer _ = CloseHandle(handle);
+    return identityFromHandle(handle);
+}
+
+fn identityFromHandle(handle: HANDLE) ?Identity {
     var information: BY_HANDLE_FILE_INFORMATION = undefined;
-    if (GetFileInformationByHandle(file.handle, &information) == 0) return null;
+    if (GetFileInformationByHandle(handle, &information) == 0) return null;
     if (information.file_index_high == 0 and information.file_index_low == 0) return null;
     return .{
         .volume_serial = information.volume_serial_number,

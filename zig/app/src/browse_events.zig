@@ -51,7 +51,7 @@ fn eventCreated(session: *browse.Session, relative: []const u8, report: *types.R
         session.skipped +|= 1;
         return false;
     };
-    if (stat.kind == .directory) {
+    if (stat.kind != .directory and stat.kind != .file) {
         session.allocator.free(full);
         return false;
     }
@@ -63,9 +63,11 @@ fn eventCreated(session: *browse.Session, relative: []const u8, report: *types.R
         .path = full,
         .size = stat.size,
         .mtime = types.mtimeMs(stat),
+        .is_directory = stat.kind == .directory,
     });
     // 分页去重登记：借条目自己的 path 切片（条目的字符串单独分配，数组搬家不影响）。
     session.event_paths.appendAssumeCapacity(session.entries.items[session.entries.items.len - 1].path);
+    session.needs_sort = true;
     report.added += 1;
     return true;
 }
@@ -132,8 +134,7 @@ fn eventRenamed(
         report.removed += 1;
         return true;
     };
-    if (stat.kind == .directory) {
-        // 改成一个目录了：这一行不再是文件。
+    if (stat.kind != .directory and stat.kind != .file) {
         session.allocator.free(new_full);
         removeAt(session, index);
         report.removed += 1;
@@ -145,7 +146,9 @@ fn eventRenamed(
     entry.path = new_full;
     entry.size = stat.size;
     entry.mtime = types.mtimeMs(stat);
+    entry.is_directory = stat.kind == .directory;
     if (was_event_row) session.event_paths.appendAssumeCapacity(entry.path);
+    session.needs_sort = true;
     report.renamed += 1;
     return true;
 }
@@ -154,11 +157,14 @@ fn eventRenamed(
 fn refreshStat(session: *browse.Session, index: usize) bool {
     const entry = &session.entries.items[index];
     const stat = std.Io.Dir.cwd().statFile(session.io, entry.path, .{}) catch return false;
-    if (stat.kind == .directory) return false;
+    if (stat.kind != .directory and stat.kind != .file) return false;
     const mtime = types.mtimeMs(stat);
-    const changed = entry.size != stat.size or entry.mtime != mtime;
+    const changed = entry.size != stat.size or entry.mtime != mtime or
+        entry.is_directory != (stat.kind == .directory);
     entry.size = stat.size;
     entry.mtime = mtime;
+    entry.is_directory = stat.kind == .directory;
+    if (changed) session.needs_sort = true;
     return changed;
 }
 

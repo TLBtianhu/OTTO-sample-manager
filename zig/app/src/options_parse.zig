@@ -363,6 +363,30 @@ pub fn browsing(options: *options_mod.Options, args: anytype, index: *usize, arg
         options.browse_watch_probe = arg["--browse-watch-probe=".len..];
         return true;
     }
+    if (std.mem.eql(u8, arg, "--browse-nav-probe")) {
+        options.browse_nav_probe = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-nav-probe=")) {
+        options.browse_nav_probe = arg["--browse-nav-probe=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--browse-nav-watch-probe")) {
+        options.browse_nav_watch_probe = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--browse-nav-watch-probe=")) {
+        options.browse_nav_watch_probe = arg["--browse-nav-watch-probe=".len..];
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--steps")) {
+        options.browse_steps = try value(args, index);
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--steps=")) {
+        options.browse_steps = arg["--steps=".len..];
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--browse-select")) {
         options.browse_select = try value(args, index);
         return true;

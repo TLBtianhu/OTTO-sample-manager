@@ -38,7 +38,13 @@ pub const Entry = struct {
     identity: ?core.model.FileIdentity = null,
     /// 文件已被删除，但这一行作为墓碑留着（"已删除"）。
     deleted: bool = false,
+    /// 与 deleted 共用原结构尾部 padding：Win64 的 Entry 仍为 64 字节。
+    is_directory: bool = false,
 };
+
+comptime {
+    if (@sizeOf(Entry) != 64) @compileError("Entry 布局必须保持 64 字节（目录标记复用 padding）");
+}
 
 /// 一次枚举的终态。
 pub const Status = enum {
@@ -124,6 +130,11 @@ pub const Info = struct {
     reconciles: u64,
     /// 已经加载的页数（含首批）。
     pages: u32,
+    /// 当前排序与导航代次（探针/工具条用）。
+    sort: []const u8,
+    epoch: u32,
+    can_back: bool,
+    can_forward: bool,
 };
 
 pub fn freeEntries(allocator: std.mem.Allocator, entries: []Entry) void {
