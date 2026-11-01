@@ -91,6 +91,15 @@ const opus_hybrid_fixture = @embedFile("fixtures/opus-hybrid-mono-48k.opus");
 const opus_hybrid_seconds: f64 = 20.0;
 const opus_hybrid_target_speedup: f64 = 100.0;
 const opus_hybrid_total_frames: u64 = 96_000;
+
+/// 2 s of stereo speech at 24 kbps: 91 SILK-only wideband packets whose frames
+/// are mid/side (so the unmixer and both per-channel resamplers run on every
+/// frame), plus the ten Hybrid packets the encoder puts at the ends. This is the
+/// stereo speech row; the mono SILK row above measures the same chain once.
+const opus_silk_stereo_fixture = @embedFile("fixtures/opus-stereo-silk-24k.opus");
+const opus_silk_stereo_seconds: f64 = 20.0;
+const opus_silk_stereo_target_speedup: f64 = 100.0;
+const opus_silk_stereo_total_frames: u64 = 96_000;
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -103,6 +112,7 @@ pub fn main() !void {
     try benchOpus(allocator, io);
     try benchOpusSilk(allocator, io);
     try benchOpusHybrid(allocator, io);
+    try benchOpusSilkStereo(allocator, io);
     try benchLegacy(allocator, io);
 }
 
@@ -510,6 +520,36 @@ fn benchOpus(allocator: std.mem.Allocator, io: std.Io) !void {
     const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
     if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
     try report("Opus 128k stereo (CELT)", elapsed_ns, @floatFromInt(decoded_frames), 48_000, 2, opus_target_speedup, files);
+}
+
+/// Stereo SILK row: mid/side unmix plus one resampler per channel.
+fn benchOpusSilkStereo(allocator: std.mem.Allocator, io: std.Io) !void {
+    var pcm: [8192]i16 = undefined;
+    var decoded_frames: u64 = 0;
+    var files: usize = 0;
+    var checksum: i64 = 0;
+
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    while (@as(f64, @floatFromInt(decoded_frames)) / 48_000 < opus_silk_stereo_seconds) : (files += 1) {
+        var reader = std.Io.Reader.fixed(opus_silk_stereo_fixture);
+        var dec = try root.open(allocator, &reader);
+        defer dec.deinit();
+        if (dec.info.channels != 2) return error.UnexpectedChannelCount;
+        while (true) {
+            const n = try dec.read(&pcm);
+            if (n == 0) break;
+            if (n % 2 != 0) return error.UnexpectedSampleCount;
+            decoded_frames += n / 2;
+            for (pcm[0..n]) |sample| checksum +%= sample;
+        }
+        if (dec.info.total_frames != opus_silk_stereo_total_frames) return error.UnexpectedFrameCount;
+    }
+    const elapsed = started.untilNow(io);
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.doNotOptimizeAway(files);
+    const elapsed_ns: f64 = @floatFromInt(elapsed.raw.nanoseconds);
+    if (elapsed_ns <= 0) return error.TimerResolutionTooLow;
+    try report("Opus 24k stereo (SILK)", elapsed_ns, @floatFromInt(decoded_frames), 48_000, 2, opus_silk_stereo_target_speedup, files);
 }
 
 /// SILK row: mono, so the sample accounting is per frame rather than per pair.

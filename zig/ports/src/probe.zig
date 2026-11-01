@@ -174,8 +174,8 @@ fn probeMkv(bytes: []const u8) ?Metadata {
 /// Ogg：首包认 Vorbis 与 Opus（Opus 的尾页 granule 会先减掉 pre_skip），别的
 /// codec → null；时长取最后一页的 granule（容器精确值）。头 + 尾各读一次，中间
 /// 不读（见 `ogg_info.zig`）。
-/// **只有元数据**：Opus 能算时长不等于能播——解码仍然归 `native-audio`，而它不
-/// 声明 `.opus`（见 `providers/native_audio.zig`），所以预览照旧谢绝。
+/// **只有元数据**：Opus 能算时长不等于能播——解码仍然归 `native-audio`
+/// （`providers/native_audio.zig`，它声明 `.opus` 并按包模式回答能不能解）。
 /// `Kind` 只有 `.ogg`：它是容器名，Vorbis / Opus 都是 Ogg，编码不进 `Metadata`。
 fn probeOgg(
     allocator: std.mem.Allocator,

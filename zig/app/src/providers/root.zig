@@ -34,8 +34,8 @@
 //!     也声明 `.wav`：当扩展名说谎（`.wav` 里是 FLAC）时，`wasapi-pcm` 按内容谢绝为
 //!     `unsupported`，注册表会继续问它——这不是给 WAV 特权，而是让"按内容作答"
 //!     的 provider 有机会接住。`.ogg` 声明的是容器、`.opus` 声明的是编码：能不能解
-//!     由库按**每个包**的 Opus 模式回答——CELT / SILK / Hybrid 都能播，多帧包与
-//!     立体声 SILK·Hybrid 得到一次 `unsupported` 谢绝，注册表照常问下一个，不会被
+//!     由库按**每个包**的 Opus 模式回答——CELT / SILK / Hybrid 都能播（v0.16 起含
+//!     立体声），多帧包得到一次 `unsupported` 谢绝，注册表照常问下一个，不会被
 //!     当成"文件坏了"。
 //!     两条音频 provider 谢绝（没有端点 / 解码失败）时，
 //!     注册表仍会继续问 thumb 兜底——这正是 decline 规则存在的理由；

@@ -22,7 +22,7 @@
 //!   * `.flac` / `.mp3` / `.aiff` / `.aif` / `.ogg` / `.oga` / `.opus` →
 //!     `providers/native_audio.zig`（vendor 的 zig-audio，纯 Zig 解码；`.wav` 也在该
 //!     provider 的声明里，但这里先问 wasapi-pcm，与预览表顺序一致）；
-//!     `.opus` / `.ogg` 装的是多帧包或立体声 SILK / Hybrid 时解码给出 `Unsupported`，
+//!     `.opus` / `.ogg` 装的是多帧包（TOC code 3）时解码给出 `Unsupported`，
 //!     本自检按失败退出——它确实不是可播的编码，这里不是预览注册表，没有"谢绝后继续
 //!     问"的下一步（预览侧的四态由 `--preview` 验收）；
 //!   * `.m4a` / `.aac` / `.wma` → `providers/mf_audio.zig`（Media Foundation，

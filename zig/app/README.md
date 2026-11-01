@@ -200,10 +200,12 @@ content: when a `.wav` actually holds FLAC, `wasapi-pcm` declines with
 compressed AIFC is `error.Unsupported` in the library.
 
 `.ogg` / `.oga` are claimed as a **container**, not as a codec: the first packet
-decides. Ogg Vorbis decodes (zig-audio v0.13), and so does Ogg **Opus** up to the
-CELT layer (configuration 16–31: music). Opus is two codecs in one stream —
-SILK for speech, CELT for the rest, switched per packet — so a stream may carry
-a few decodable packets and then a SILK one; `zig_audio.open` succeeds and the
+decides. Ogg Vorbis decodes (zig-audio v0.13), and so does Ogg **Opus** in all
+three packet modes and on both mono and stereo streams (zig-audio v0.16: CELT
+16–31, SILK 0–11, Hybrid 12–15, stereo SILK via mid/side). Opus is two codecs in
+one stream — SILK for speech, CELT for the rest, switched per packet — so a
+stream may carry a few decodable packets and then one the library refuses
+(more than two frames per packet, TOC code 3); `zig_audio.open` succeeds and the
 **`read`** returns `error.Unsupported` on the packet it cannot decode. That
 failure maps to `none.unsupported` (the same `reason` table as any other
 `Unsupported`), so `native-audio` *declines*: the registry keeps asking, and the

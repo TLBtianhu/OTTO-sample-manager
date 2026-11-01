@@ -46,7 +46,7 @@
 #   tone_440.wav       wasapi-pcm    wasapi-pcm
 #   tone_660.flac      native-audio  native-audio   (vendored zig-audio, pure Zig)
 #   vorbis-44k.ogg     native-audio  native-audio   (vendored zig-audio v0.10 Ogg Vorbis)
-#   opus-music.opus    native-audio  native-audio   (vendored zig-audio v0.15, Opus CELT)
+#   opus-music.opus    native-audio  native-audio   (vendored zig-audio v0.16, Opus CELT)
 #   opus-hybrid.opus   native-audio  native-audio   (v0.15: SILK + Hybrid two layers)
 #   opus-silk.opus     native-audio  native-audio   (v0.15: SILK speech layer)
 #   legacy-adpcm.wav   wasapi-pcm    wasapi-pcm     (MS ADPCM WAV, zig-audio v0.8)
@@ -60,8 +60,8 @@
 # a FAIL by design -- the point of the gate is that audio preview works on this
 # machine, not that it would work on one where it cannot. `.ogg` / `.opus` are
 # declared by extension, so a stream whose packets the decoder cannot handle
-# (multi-frame packets, stereo SILK / Hybrid -- the layers v0.15 only does in
-# mono) is claimed and then *declined* (`unsupported`, not `failed`) -- that
+# (multi-frame packets, TOC code 3 -- the one thing zig-audio v0.16 still
+# refuses) is claimed and then *declined* (`unsupported`, not `failed`) -- that
 # corner of the same codec is covered by the app tests
 # (`providers/native_audio_opus_decline_test.zig`), not by this table, because a
 # `none` row here would claim the opposite of what the extension promises.
@@ -126,12 +126,12 @@ $script:cases = @(
   # Ogg Vorbis: zig-audio v0.10 decodes it in pure Zig; the registry claims
   # `.ogg` in native-audio and the duration comes from the last page's granule.
   [pscustomobject]@{ Name = 'vorbis-44k.ogg'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },
-  # Ogg Opus: zig-audio v0.15 decodes all three packet modes. `opus-music` is
-  # pure CELT (config 31, 128k, 2 s); `opus-hybrid` mixes SILK (config 9),
-  # hybrid (config 15) and a little CELT; `opus-silk` is speech only. All three
-  # are claimed and answered by native-audio like any other extension.
-  # The *decline* corner of the same codec (multi-frame packets, stereo SILK /
-  # Hybrid) is covered by the app tests
+  # Ogg Opus: zig-audio v0.16 decodes all three packet modes, mono and stereo.
+  # `opus-music` is pure CELT (config 31, 128k, 2 s); `opus-hybrid` mixes SILK
+  # (config 9), hybrid (config 15) and a little CELT; `opus-silk` is speech only.
+  # All three are claimed and answered by native-audio like any other extension.
+  # The *decline* corner of the same codec (multi-frame packets, TOC code 3) is
+  # covered by the app tests
   # (`providers/native_audio_opus_decline_test.zig`), because a `none` row here
   # would make the table claim "we play every .opus".
   [pscustomobject]@{ Name = 'opus-music.opus'; Default = 'native-audio'; NoShell = 'native-audio'; Reason = '' },

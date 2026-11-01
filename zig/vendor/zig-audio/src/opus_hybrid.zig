@@ -77,31 +77,49 @@ pub fn spliceHead(dst: []f32, redundancy: []const f32) void {
     for (head, src, window) |*d, s, w| d.* = d.* * w + s * (1.0 - w);
 }
 
-/// Everything that survives a SILK frame: the synthesis state, the resampler and
-/// its buffered samples, and the last crossfade a mode switch asked for.
+/// Everything that survives a SILK frame: the synthesis state, the resamplers
+/// and their buffered samples, and the last crossfade a mode switch asked for.
+///
+/// **Stereo.** A stereo SILK frame is *not* two independent SILK streams: it is
+/// one mid channel plus one side channel, coded with three prediction weights
+/// per frame (RFC 6716 4.2.2, "stereo prediction weights"), and turned back
+/// into left/right by `silk_stereo_MS_to_LR` (`opus_silk.zig`'s `unmixMs`).
+/// What *is* per channel downstream of that is the resampler and the 48 kHz
+/// output, so this struct holds one resampler per output channel. The reference
+/// gives swresample a two-channel context whose filter position is shared, and
+/// each channel sees the same taps at the same positions, so two instances kept
+/// in lockstep are the same arithmetic.
 pub const Layer = struct {
     silk: ?silk_mod.Decoder = null,
-    resampler: ?resample_mod.Resampler = null,
+    /// One resampler per output channel, created and primed together.
+    resampler: [2]?resample_mod.Resampler = .{ null, null },
+    /// Channels the stream decodes to (1 or 2), from `OpusHead`.
+    output_channels: u8 = 1,
     /// One SILK frame at the bandwidth's own rate: up to 60 ms at 16 kHz.
     rate: [2][960]f32 = @splat(@splat(0.0)),
-    /// The same frame resampled to 48 kHz, clamped to the frame's own length.
-    out: [2880]f32 = @splat(0.0),
-    /// Samples the resampler still owes from earlier frames (the reference's
-    /// `delayed_samples`). Hybrid decoding needs this at zero.
+    /// The same frame resampled to 48 kHz, plane per channel, clamped to the
+    /// frame's own length.
+    out: [2][2880]f32 = @splat(@splat(0.0)),
+    /// Samples the resamplers still owe from earlier frames (the reference's
+    /// `delayed_samples`). Hybrid decoding needs this at zero; the end of the
+    /// stream turns it into the flush tail.
     delayed: usize = 0,
     /// The 5 ms redundancy frame, in its own buffer: the main CELT decode would
     /// overwrite the decoder's PCM buffer.
-    redundancy: [redundancy_samples]f32 = @splat(0.0),
+    redundancy: [2][redundancy_samples]f32 = @splat(@splat(0.0)),
 
-    /// Create the SILK decoder on first use and (re)build the resampler when the
-    /// bandwidth changes. The zero priming is what cancels the filter's group
-    /// delay; the delay count is the reference's per-bandwidth one.
+    /// Create the SILK decoder on first use and (re)build the resamplers when
+    /// the bandwidth changes. The zero priming is what cancels the filter's
+    /// group delay; the delay count is the reference's per-bandwidth one.
     fn ensure(self: *Layer, bandwidth: silk_mod.Bandwidth) Error!void {
-        if (self.silk == null) self.silk = silk_mod.Decoder.init(1);
+        if (self.output_channels == 0 or self.output_channels > 2) return error.Unsupported;
+        if (self.silk == null) self.silk = silk_mod.Decoder.init(self.output_channels);
         const rate = bandwidth.sampleRate();
-        if (self.resampler == null or self.resampler.?.in_rate != rate) {
-            self.resampler = try resample_mod.Resampler.init(rate);
-            self.resampler.?.primeZeros(bandwidth.resamplerDelay());
+        if (self.resampler[0] == null or self.resampler[0].?.in_rate != rate) {
+            for (0..self.output_channels) |c| {
+                self.resampler[c] = try resample_mod.Resampler.init(rate);
+                self.resampler[c].?.primeZeros(bandwidth.resamplerDelay());
+            }
             self.delayed = 0;
         }
     }
@@ -111,7 +129,7 @@ pub const Layer = struct {
     /// packet starts from a clean history instead of resuming stale state.
     pub fn leave(self: *Layer) void {
         if (self.silk) |*silk| silk.reset();
-        self.resampler = null;
+        self.resampler = .{ null, null };
         self.delayed = 0;
     }
 
@@ -124,15 +142,22 @@ pub const Layer = struct {
         bandwidth: silk_mod.Bandwidth,
         duration_ms: u32,
         per_frame: usize,
+        coded_channels: u8,
     ) Error!usize {
         const rate_samples = try self.silk.?.decodeSuperframe(
             rc,
             .{ self.rate[0][0..], self.rate[1][0..] },
             bandwidth,
-            1,
+            coded_channels,
             duration_ms,
         );
-        const written = self.resampler.?.convert(self.out[0..per_frame], self.rate[0][0..rate_samples]);
+        // Every channel runs the same filter position over the same input
+        // count, so they must agree; the smallest count is the safe answer.
+        var written = per_frame;
+        for (0..self.output_channels) |c| {
+            const w = self.resampler[c].?.convert(self.out[c][0..per_frame], self.rate[c][0..rate_samples]);
+            written = @min(written, w);
+        }
         self.delayed += per_frame - written;
         return written;
     }
@@ -146,24 +171,64 @@ pub const Layer = struct {
         celt: *celt_mod.Decoder,
         bytes: []const u8,
         end_band: usize,
-    ) Error![]const f32 {
+        stream_channels: u8,
+    ) Error!void {
         celt.reset();
         celt.start = 0;
         celt.end = end_band;
         var rc = range_mod.Decoder.init(bytes);
-        try celt.decodeFrameWithEc(&rc, redundancy_samples, 1);
-        @memcpy(&self.redundancy, celt.pcmFrame(redundancy_samples));
-        return &self.redundancy;
+        try celt.decodeFrameWithEc(&rc, redundancy_samples, stream_channels);
+        const pcm = celt.pcmFrame(redundancy_samples);
+        // `pcmFrame` is interleaved at the decoder's channel count, which is the
+        // stream's; a mono packet in a stereo stream leaves channel 1 as it was,
+        // exactly as the reference's two-channel redundancy buffer does.
+        std.debug.assert(celt.channels == self.output_channels);
+        for (0..self.output_channels) |c| {
+            for (0..redundancy_samples) |i| {
+                self.redundancy[c][i] = pcm[i * self.output_channels + c];
+            }
+        }
+    }
+
+    /// Copy one frame of planar 48 kHz audio out as interleaved PCM.
+    fn emit(self: *Layer, dst: []f32, frames: usize) void {
+        const channels = self.output_channels;
+        if (channels == 1) {
+            @memcpy(dst[0..frames], self.out[0][0..frames]);
+            return;
+        }
+        for (0..frames) |i| {
+            for (0..channels) |c| dst[i * channels + c] = self.out[c][i];
+        }
+    }
+
+    /// The reference's end-of-stream resampler flush: mirror the buffered input
+    /// and produce the samples still owed, into `out[c]`; returns how many.
+    /// The caller emits them *after* the last packet's granule trim, which is
+    /// where the reference puts them (`opus_flush_resample`).
+    pub fn flushTail(self: *Layer) usize {
+        const delayed = self.delayed;
+        if (delayed == 0 or self.resampler[0] == null) return 0;
+        var produced = delayed;
+        for (0..self.output_channels) |c| {
+            const resampler = &self.resampler[c].?;
+            resampler.flush();
+            const written = resampler.convert(self.out[c][0..delayed], &.{});
+            produced = @min(produced, written);
+        }
+        self.delayed = 0;
+        return produced;
     }
 
     /// SILK-only: one coded frame per Opus frame, resampled to 48 kHz, plus the
     /// CELT redundancy section a mode switch leaves at the end.
     ///
-    /// Two refusals live here rather than in `opus_silk.zig`, because both are
-    /// about this layer's plumbing: a stereo SILK stream (the decoder has an
-    /// unmixer, but no vector has exercised it yet, and silent wrongness is
-    /// worse than a named error), and a stream that carries more than two
-    /// frames per packet.
+    /// One refusal lives here rather than in `opus_silk.zig`, because it is
+    /// about this layer's plumbing: a stream carrying more than two frames per
+    /// packet (the multi-frame packing path is not implemented).
+    ///
+    /// A stereo packet's two channels are mid and side (see `Layer`); the
+    /// resampling that follows is per channel.
     pub fn decodeSilkPacket(
         self: *Layer,
         celt: *celt_mod.Decoder,
@@ -179,12 +244,13 @@ pub const Layer = struct {
             .wide => .wide,
             else => return error.Unsupported,
         };
-        if (packet.stereo or packet.frame_count > 2) return error.Unsupported;
+        if (packet.frame_count > 2) return error.Unsupported;
         // A SILK packet is what flushes CELT in the reference: a stream that
         // came from hybrid must not resume CELT's overlap history later.
         celt.reset();
         try self.ensure(bandwidth);
 
+        const coded_channels: u8 = if (packet.stereo) 2 else 1;
         const duration_ms: u32 = config.samples / 48;
         var frames: usize = 0;
         for (0..packet.frame_count) |i| {
@@ -192,9 +258,8 @@ pub const Layer = struct {
             if (data.len == 0) return error.Corrupt;
             const delayed_before = self.delayed;
             var rc = range_mod.Decoder.init(data);
-            const written = try self.decodeHalf(&rc, bandwidth, duration_ms, config.samples);
+            const written = try self.decodeHalf(&rc, bandwidth, duration_ms, config.samples, coded_channels);
             if (written == 0) return error.Corrupt;
-            @memcpy(fbuf[frames..][0..written], self.out[0..written]);
 
             // RFC 6716 4.2.3: with at least 17 bits left the rest of the frame
             // is a CELT redundancy section, measured from where SILK stopped.
@@ -204,17 +269,18 @@ pub const Layer = struct {
                 const to_silk = rc.decodeBitLogp(1) == 1;
                 const red_start: usize = @intCast(@divTrunc(consumed + 7, 8));
                 if (red_start >= data.len) return error.Corrupt;
-                const redundancy = try self.decodeRedundancy(celt, data[red_start..], end_band);
-                const dst = fbuf[frames..][0..written];
+                try self.decodeRedundancy(celt, data[red_start..], end_band, coded_channels);
+                for (0..self.output_channels) |c| {
+                    const dst = self.out[c][0..written];
+                    if (to_silk) spliceHead(dst, self.redundancy[c][0..]) else fadeTail(dst, self.redundancy[c][0..]);
+                }
                 if (to_silk) {
-                    spliceHead(dst, redundancy);
                     // The reference flushes again after a CELT -> SILK splice,
                     // so the next CELT frame does not continue the redundancy.
                     celt.reset();
-                } else {
-                    fadeTail(dst, redundancy);
                 }
             }
+            self.emit(fbuf[frames * self.output_channels ..], written);
             frames += written;
         }
         return frames;
@@ -231,7 +297,10 @@ pub const Layer = struct {
     /// bandwidth's band (19 for SWB, 21 for FB). The SILK half is wideband
     /// internally whatever the packet signals, and is resampled to 48 kHz.
     ///
-    /// Mixing: sample-wise addition on the frame's own 48 kHz grid.
+    /// Mixing: sample-wise addition on the frame's own 48 kHz grid, per channel.
+    /// For a stereo packet the SILK half is mid/side (unmixed to L/R before the
+    /// resampler) and the CELT half is CELT's own stereo, so the two layers meet
+    /// per channel, not as a shared mid/side pair.
     pub fn decodeHybridPacket(
         self: *Layer,
         celt: *celt_mod.Decoder,
@@ -241,10 +310,11 @@ pub const Layer = struct {
         config: packet_mod.Config,
         end_band: usize,
     ) Error!usize {
-        if (packet.stereo or packet.frame_count > 2) return error.Unsupported;
+        if (packet.frame_count > 2) return error.Unsupported;
         if (self.delayed != 0) return error.Unsupported;
         try self.ensure(.wide);
 
+        const coded_channels: u8 = if (packet.stereo) 2 else 1;
         const per_frame = config.samples;
         const duration_ms: u32 = per_frame / 48;
         var frames: usize = 0;
@@ -252,7 +322,7 @@ pub const Layer = struct {
             const data = packet.frame(bytes, i);
             if (data.len == 0) return error.Corrupt;
             var rc = range_mod.Decoder.init(data);
-            const written = try self.decodeHalf(&rc, .wide, duration_ms, per_frame);
+            const written = try self.decodeHalf(&rc, .wide, duration_ms, per_frame, coded_channels);
             // The CELT half is added at the frame's start, so a SILK half that
             // is short by even one sample would shift it. Refuse, do not smear.
             if (written != per_frame) return error.Unsupported;
@@ -261,7 +331,7 @@ pub const Layer = struct {
             const silk_bits = rc.tell();
             var celt_size = data.len;
             var to_silk = false;
-            var redundancy: ?[]const f32 = null;
+            var has_redundancy = false;
             // Hybrid needs 37 bits: the flag itself, the direction bit and the
             // smallest possible length field, plus room for the frame.
             if (silk_bits + 37 <= total_bits and rc.decodeBitLogp(12) == 1) {
@@ -270,8 +340,9 @@ pub const Layer = struct {
                 if (red_bytes > data.len) return error.Corrupt;
                 celt_size = data.len - red_bytes;
                 if (@as(i32, @intCast(celt_size * 8)) < rc.tell()) return error.Corrupt;
+                has_redundancy = true;
                 if (to_silk) {
-                    redundancy = try self.decodeRedundancy(celt, data[celt_size..], end_band);
+                    try self.decodeRedundancy(celt, data[celt_size..], end_band, coded_channels);
                     celt.reset();
                 }
             }
@@ -281,20 +352,26 @@ pub const Layer = struct {
             rc.shrink(celt_size);
             celt.start = 17;
             celt.end = end_band;
-            try celt.decodeFrameWithEc(&rc, per_frame, 1);
+            try celt.decodeFrameWithEc(&rc, per_frame, coded_channels);
 
-            const dst = fbuf[frames..][0..per_frame];
             const celt_pcm = celt.pcmFrame(per_frame);
-            for (dst, self.out[0..per_frame], celt_pcm) |*d, s, c| d.* = s + c;
-
+            std.debug.assert(celt.channels == self.output_channels);
+            for (0..self.output_channels) |c| {
+                for (0..per_frame) |s| self.out[c][s] += celt_pcm[s * self.output_channels + c];
+            }
             if (to_silk) {
-                spliceHead(dst, redundancy.?);
-            } else if (celt_size != data.len) {
+                for (0..self.output_channels) |c| {
+                    spliceHead(self.out[c][0..per_frame], self.redundancy[c][0..]);
+                }
+            } else if (has_redundancy) {
                 // A SILK -> CELT transition: the redundancy frame's second half
                 // replaces the tail, so the next CELT packet continues it.
-                redundancy = try self.decodeRedundancy(celt, data[celt_size..], end_band);
-                fadeTail(dst, redundancy.?);
+                try self.decodeRedundancy(celt, data[celt_size..], end_band, coded_channels);
+                for (0..self.output_channels) |c| {
+                    fadeTail(self.out[c][0..per_frame], self.redundancy[c][0..]);
+                }
             }
+            self.emit(fbuf[frames * self.output_channels ..], per_frame);
             frames += per_frame;
         }
         return frames;

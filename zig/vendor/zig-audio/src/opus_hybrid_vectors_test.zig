@@ -285,18 +285,20 @@ test "hybrid fixture: a pure-Hybrid stream matches ffmpeg end to end" {
     try testing.expect(quality_s16.max_diff <= 8.0);
 }
 
-test "hybrid vectors: a stereo output stream refuses Hybrid packets by name" {
-    // The layered path here is mono-only. A stereo OpusHead must not be handed
-    // to the Hybrid mixer: the CELT half would upmix to two channels while the
-    // SILK half produced one, and adding those is not a decoder, it is noise.
+test "hybrid vectors: mono packets in a stereo stream upmix, as ffmpeg does" {
+    // A stereo `OpusHead` over mono Hybrid packets is the one shape the corpus
+    // does not contain, and it is legal: the packet's channel count comes from
+    // the TOC, not from the stream. The SILK half duplicates the mid channel and
+    // the CELT half duplicates its single channel, so both output channels come
+    // out identical — and that is what the reference does too, which is why this
+    // test compares against it instead of asserting the old refusal.
     const bytes = readVector(testing.allocator, "opus-48k-24-voip.opus") catch |err| switch (err) {
         error.SkipZigTest => return error.SkipZigTest,
         else => return err,
     };
     defer testing.allocator.free(bytes);
 
-    // Rebuild OpusHead with two channels, keeping the stream's packets mono
-    // Hybrid: that is exactly the combination that must be refused.
+    // Rebuild OpusHead with two channels, keeping the stream's packets mono.
     var patched = try testing.allocator.dupe(u8, bytes);
     defer testing.allocator.free(patched);
     const at = std.mem.indexOf(u8, patched, "OpusHead") orelse return error.Corrupt;
@@ -310,9 +312,24 @@ test "hybrid vectors: a stereo output stream refuses Hybrid packets by name" {
     @memset(patched[22..26], 0);
     std.mem.writeInt(u32, patched[22..26], ogg.crc32(patched[0..page_len]), .little);
 
-    var reader = std.Io.Reader.fixed(patched);
-    var dec = try opus.Decoder.open(testing.allocator, &reader, "");
-    defer dec.deinit();
-    var pcm: [512]i16 = undefined;
-    try testing.expectError(error.Unsupported, dec.read(&pcm));
+    const decoded = try decodeAll(testing.allocator, patched);
+    defer decoded.deinit(testing.allocator);
+    // 96 000 frames of audio, two channels.
+    try testing.expectEqual(@as(usize, 192_000), decoded.pcm_f32.len);
+
+    const ref_raw = try compare.runFfmpeg(testing.allocator, patched, "f32le");
+    defer testing.allocator.free(ref_raw);
+    const quality = try compareF32(decoded.pcm_f32, ref_raw);
+    std.debug.print(
+        "hybrid mono packets in a stereo stream: f32 SNR {d:.2} dB max {e:.3}\n",
+        .{ quality.snr_db, quality.max_diff },
+    );
+    try testing.expect(quality.snr_db >= 90.0);
+    try testing.expect(quality.max_diff < 1e-4);
+
+    // Both channels carry the same signal.
+    var k: usize = 0;
+    while (k + 1 < decoded.pcm_f32.len) : (k += 2) {
+        try testing.expectEqual(decoded.pcm_f32[k], decoded.pcm_f32[k + 1]);
+    }
 }

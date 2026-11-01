@@ -58,6 +58,9 @@ pub fn denormaliseBands(
 }
 
 /// Replace collapsed time blocks with noise at the band's minimum energy.
+///
+/// Band-major, channel inner: the order decides which pseudo-random value each
+/// collapsed bin gets because one generator feeds both channels.
 pub fn antiCollapse(
     x: []f32,
     collapse_masks: []const u8,

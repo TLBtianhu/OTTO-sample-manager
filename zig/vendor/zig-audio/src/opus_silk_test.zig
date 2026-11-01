@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const silk = @import("opus_silk.zig");
+const opus = @import("opus.zig");
 const range = @import("opus_range.zig");
 
 test "impossible superframe parameters are refused, not decoded" {
@@ -95,4 +96,41 @@ test "reset drops history so a restarted stream decodes identically" {
     var rc3 = range.Decoder.init(&payload);
     _ = try a.decodeSuperframe(&rc3, .{ &out[0], &out[1] }, .wide, 1, 20);
     try std.testing.expectEqualSlices(f32, &reference[0], &out[0]);
+}
+
+test "a stereo speech stream decodes to two channels, not one doubled" {
+    // The committed fixture is 2 s of stereo 24 kbps speech: 91 SILK wideband
+    // packets (mid/side) and the ten Hybrid packets the encoder puts at the
+    // ends. It is the one hermetic check that the stereo path runs at all —
+    // conformance against ffmpeg lives in `opus_silk_vectors_test.zig`, which
+    // needs the external corpus.
+    const bytes = @embedFile("fixtures/opus-stereo-silk-24k.opus");
+    var reader = std.Io.Reader.fixed(bytes);
+    var dec = try opus.Decoder.open(std.testing.allocator, &reader, "");
+    defer dec.deinit();
+    try std.testing.expectEqual(@as(u8, 2), dec.info.channels);
+
+    var captured: std.ArrayList(f32) = .empty;
+    defer captured.deinit(std.testing.allocator);
+    dec.capture = &captured;
+    dec.capture_gpa = std.testing.allocator;
+
+    var buffer: [4096]i16 = undefined;
+    while (true) {
+        const n = try dec.read(&buffer);
+        if (n == 0) break;
+        try std.testing.expectEqual(@as(usize, 0), n % 2);
+    }
+    // `granule - pre_skip`, per channel.
+    try std.testing.expectEqual(@as(usize, 96_000 * 2), captured.items.len);
+
+    // The two channels are *not* the same signal: the fixture's left and right
+    // carry different tones, so a decoder that skipped the mid/side unmix would
+    // return two identical channels.
+    var max_difference: f32 = 0;
+    var i: usize = 0;
+    while (i + 1 < captured.items.len) : (i += 2) {
+        max_difference = @max(max_difference, @abs(captured.items[i] - captured.items[i + 1]));
+    }
+    try std.testing.expect(max_difference > 1e-3);
 }

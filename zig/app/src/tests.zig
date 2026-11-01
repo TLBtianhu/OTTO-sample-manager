@@ -25,9 +25,9 @@
 //!                         `supports`/文件缺失分支；WAV/FLAC/MP3/AIFF/Ogg/Opus 的
 //!                         整段解码测试在 `audio/decode_test.zig` 与
 //!                         `providers/native_audio_*_test.zig`（真实播放由
-//!                         `--play-test` 覆盖）。Opus 侧还钉住"三种包都能播，
-//!                         真正不支持的输入（多帧包 / 立体声 SILK）仍然谢绝、
-//!                         不是 failed"这条四态边界。
+//!                         `--play-test` 覆盖）。Opus 侧还钉住"三种包都能播（v0.16
+//!                         起含立体声 SILK / Hybrid），真正不支持的输入（多帧包）
+//!                         仍然谢绝、不是 failed"这条四态边界。
 //!   * `providers/image*.zig` —— WIC 解码链与图片 provider（真 PNG/BMP/缩放/坏文件）；
 //!                         WIC 是系统解码器，不需要窗口、Shell 或音频设备。
 test {
@@ -102,7 +102,7 @@ test {
     _ = @import("providers/native_audio_mp3_test.zig");
     _ = @import("providers/native_audio_ogg_test.zig");
     _ = @import("providers/native_audio_opus_test.zig");
-    // 谢绝侧：多帧包（code 3）与立体声 SILK 是 v0.15 真正不支持的输入，
+    // 谢绝侧：多帧包（code 3）是 v0.16 真正不支持的输入，
     // `none.unsupported` 必须仍然是谢绝而不是 failed；半截 PCM 不泄漏。
     _ = @import("providers/native_audio_opus_decline_test.zig");
     // WIC 解码器的真解码测试（素材不在时 Skip）；拆文件是为了守住 600 行。
