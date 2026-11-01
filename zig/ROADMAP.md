@@ -1,21 +1,21 @@
 # 通往 1.0 的路线
 
-## 状态（2026-11-01，v0.25.0）
+## 状态（2026-11-01，v0.32.0）
 
 | 阶段 | 状态 | 证据 |
 | --- | --- | --- |
-| M1 预览层 | ✅ | 五分支注册表；WAV 全变体 / AIFF / FLAC / MP3 / Ogg Vorbis / Opus-CELT 全部自解码 |
-| M2 搜索与中文输入 | ✅ | 搜索 + 后缀筛选（chip 多选）、键盘导航、IME 已并入上游 PR #36 |
+| M1 预览层 | ✅ | 五分支注册表；WAV 全变体 / AIFF / FLAC / MP3 / Ogg Vorbis / **Opus 的 CELT + SILK + Hybrid、单声道与立体声** 全部自解码 |
+| M2 搜索与中文输入 | ✅ | 搜索 + 后缀筛选（chip 多选）、键盘导航；IME 与 CJK 已进上游（nanoui #34 / #36） |
 | M3 导入与持久化 | ✅ | OTTOLIB v1（2000 条 6 ms）、幂等导入、按钮与拖入两条入口、首次启动空状态 |
 | M4 隔离与缓存 | ✅ | 缩略图与 PSD 预览统一走 helper、L3 热启零 helper、溢出重扫、空闲预取 |
 | M5 更新检查与基准 | ✅ | 检查→下载→验签→安装闭环、`--bench`、滚动 62.5 fps、设置面板 |
+| M6 分发纪律 | ✅ | 三形态互不相同；`verify-distribution` 52 checks；**`fresh-user.ps1` 61 条断言跑完"陌生人"的完整路径**；`prune-dist` 管住分发物 |
 
-**分发物**：`otto-lite-0.25.0-portable.zip`（1.59 MB）、`otto-lite-0.25.0-setup.exe`（1.77 MB），双签名已验。
-**测试**：core 84 / ports 184 / app 316；`zig/health.ps1` 一条命令跑完 10 项检查（含编译产物纯净性与 provider 矩阵 11/11）。
-**自解码**：WAV 全变体、AIFF、FLAC（13/13 官方向量逐样本 0）、MP3（单声道+立体声+MS/intensity）、Ogg Vorbis（133 dB）、Opus CELT（94–142 dB）；Opus 的语音层（SILK）仍明确谢绝。
-**指标**：首帧 ~100 ms（便携热，噪声内）/ 内存 42.6 MiB / 滚动 62.5 fps / 缩略图冷 4 ms（provider 后）/ 安装包 1.85 MB。
+**分发物**：`otto-lite-0.32.0-portable.zip`、`otto-lite-0.32.0-setup.exe`，双签名已验；dist 只保留 4 个版本（12.3 MB）。
+**测试**：core 84 / ports 184 / app 320；`zig\health.ps1` 一条命令 10 项（`-Fresh` 加"全新用户"一行）。
+**自解码**：WAV 全变体、AIFF、FLAC（13/13 官方向量逐样本 0）、MP3（单声道+立体声+MS/intensity）、Ogg Vorbis（133 dB）、**Opus 全模式 139–145 dB**（含立体声）。
+**指标**：gdi 滚动 62.50 fps / 49.15 MiB（**距 50 只剩 0.84**）；d3d（关 vsync）62.50 fps / 84 MiB；首帧 ~100 ms（宪章目标 100，实测 124 → 已知项）；安装包 1.9 MB。
 **还差的只有人**：拖进 DAW / 剪辑软件的实机验收，以及真实用户的日常使用。
-
 这份文件的用处不是排期，是**判断优先级**：每个阶段结束都有一个能被验收的形态，
 而不是"功能加了一些"。
 
