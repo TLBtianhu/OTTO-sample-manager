@@ -289,6 +289,7 @@ pub const Decoder = struct {
         }
 
         @memset(self.coeffs[0 .. c_ch * n], 0);
+        @memset(self.collapse_masks[0 .. c_ch * tables.bands], 0);
         const bp = frame_mod.BandParams{
             .start = self.start,
             .end = self.end,

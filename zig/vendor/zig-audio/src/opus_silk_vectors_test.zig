@@ -47,11 +47,9 @@ const Vector = struct {
     channels: u8,
     configs: [32]u64,
     /// Acceptance floors. The bar is f32 SNR >= 90 dB with max < 1e-4 and s16
-    /// SNR >= 70 dB with max <= 8 LSB. The two mono narrowband files and the
-    /// existing wideband ones clear it. The two stereo files do **not**: their
-    /// residual is the CELT transient frame (`anti-collapse` runs only there),
-    /// so the floors recorded here are the values this build actually reaches,
-    /// and the gap is named in the README rather than hidden by a loose bar.
+    /// SNR >= 70 dB with max <= 8 LSB. Every vector clears it; the stereo files
+    /// used to be recorded at their measured values while the CELT transient
+    /// path was wrong, and are now held to the same bar as everything else.
     f32_snr: f64,
     f32_max: f64,
     s16_snr: f64,
@@ -130,10 +128,10 @@ const vectors = [_]Vector{
         .frames = 96_000,
         .channels = 2,
         .configs = expectedConfigs(&[_][2]u64{ .{ 9, 91 }, .{ 13, 1 }, .{ 15, 9 } }),
-        .f32_snr = 80.0,
-        .f32_max = 1e-3,
-        .s16_snr = 80.0,
-        .s16_max = 24.0,
+        .f32_snr = 90.0,
+        .f32_max = 1e-4,
+        .s16_snr = 70.0,
+        .s16_max = 8.0,
     },
     // Stereo Hybrid, every packet configuration 15.
     .{
@@ -141,10 +139,10 @@ const vectors = [_]Vector{
         .frames = 96_000,
         .channels = 2,
         .configs = expectedConfigs(&[_][2]u64{.{ 15, 101 }}),
-        .f32_snr = 45.0,
-        .f32_max = 5e-2,
-        .s16_snr = 45.0,
-        .s16_max = 1400.0,
+        .f32_snr = 90.0,
+        .f32_max = 1e-4,
+        .s16_snr = 70.0,
+        .s16_max = 8.0,
     },
 };
 

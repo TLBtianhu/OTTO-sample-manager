@@ -243,18 +243,21 @@ pub fn quantAllBands(
             effective_lowband = @max(0, @as(i32, @intCast(m * tables.e_bands[lowband_offset])) -
                 @as(i32, @intCast(norm_offset)) - @as(i32, @intCast(n)));
             const target: usize = @as(usize, @intCast(effective_lowband)) + norm_offset;
+            // The reference scans down with a pre-decrement: the band whose
+            // `freq_bands` equals `effective_lowband` is itself foldable.
             var fold_start = lowband_offset;
-            while (fold_start > 0 and m * tables.e_bands[fold_start - 1] > target) fold_start -= 1;
+            while (fold_start > 0) {
+                fold_start -= 1;
+                if (m * tables.e_bands[fold_start] <= target) break;
+            }
             var fold_end = lowband_offset - 1;
             while (fold_end + 1 < i and m * tables.e_bands[fold_end + 1] < target + n) fold_end += 1;
             x_cm = 0;
             y_cm = 0;
             var fold_i = fold_start;
-            while (true) {
+            while (fold_i <= fold_end) : (fold_i += 1) {
                 x_cm |= collapse_masks[fold_i * p.channels];
                 y_cm |= collapse_masks[fold_i * p.channels + p.channels - 1];
-                fold_i += 1;
-                if (fold_i >= fold_end) break;
             }
         } else {
             x_cm = (@as(u32, 1) << @intCast(b)) - 1;
@@ -293,91 +296,6 @@ pub fn quantAllBands(
         ctx.avoid_split_noise = false;
     }
     return ctx.seed;
-}
-
-/// Undo denormalisation: multiply each band by `2^(logE + mean)`.
-pub fn denormaliseBands(
-    x: []const f32,
-    freq: []f32,
-    band_log_e: []const f32,
-    start: usize,
-    end: usize,
-    m: usize,
-    silence: bool,
-) void {
-    const total = m * tables.short_mdct;
-    var bound = m * tables.e_bands[end];
-    var s = start;
-    var e = end;
-    if (silence) {
-        bound = 0;
-        s = 0;
-        e = 0;
-    }
-    @memset(freq[0 .. m * tables.e_bands[s]], 0);
-    for (s..e) |i| {
-        const band_end = m * tables.e_bands[i + 1];
-        const lg = band_log_e[i] + tables.mean_energy[i];
-        const g: f32 = @exp2(@min(@as(f32, 32.0), lg));
-        const base = m * tables.e_bands[i];
-        var j = base;
-        while (j < band_end) : (j += 1) freq[j] = x[j] * g;
-    }
-    if (bound < total) @memset(freq[bound..total], 0);
-}
-
-/// Replace collapsed time blocks with noise at the band's minimum energy.
-pub fn antiCollapse(
-    x: []f32,
-    collapse_masks: []const u8,
-    lm: u3,
-    channels: usize,
-    size: usize,
-    start: usize,
-    end: usize,
-    log_e: []const f32,
-    prev1_log_e: []const f32,
-    prev2_log_e: []const f32,
-    pulses: []const i32,
-    seed_in: u32,
-) u32 {
-    var seed = seed_in;
-    for (start..end) |i| {
-        const n0: usize = tables.freq_range[i];
-        var depth = (1 + @as(u32, @intCast(pulses[i]))) / @as(u32, @intCast(n0));
-        depth >>= lm;
-        const thresh: f32 = 0.5 * @exp2(-0.125 * @as(f32, @floatFromInt(depth)));
-        const bins: usize = n0 << lm;
-        const nfl: f32 = @floatFromInt(bins);
-        const sqrt_1: f32 = 1.0 / @sqrt(nfl);
-        for (0..channels) |c| {
-            var prev1 = prev1_log_e[c * tables.bands + i];
-            var prev2 = prev2_log_e[c * tables.bands + i];
-            if (channels == 1) {
-                prev1 = @max(prev1, prev1_log_e[tables.bands + i]);
-                prev2 = @max(prev2, prev2_log_e[tables.bands + i]);
-            }
-            const ediff = @max(@as(f32, 0.0), log_e[c * tables.bands + i] - @min(prev1, prev2));
-            var r = 2.0 * @exp2(-ediff);
-            if (lm == 3) r *= 1.41421356;
-            r = @min(thresh, r) * sqrt_1;
-
-            const base = c * size + (tables.e_bands[i] << lm);
-            var renormalize = false;
-            const blocks = @as(usize, 1) << lm;
-            for (0..blocks) |k| {
-                if (collapse_masks[i * channels + c] & (@as(u8, 1) << @intCast(k)) == 0) {
-                    for (0..n0) |j| {
-                        seed = math.lcgRand(seed);
-                        x[base + (j << lm) + k] = if (seed & 0x8000 != 0) r else -r;
-                    }
-                    renormalize = true;
-                }
-            }
-            if (renormalize) pvq.renormaliseVector(x[base..][0..bins], bins, q15_one);
-        }
-    }
-    return seed;
 }
 
 test "bitexact cos hits the reference's landmarks" {

@@ -59,8 +59,11 @@ pub fn denormaliseBands(
 
 /// Replace collapsed time blocks with noise at the band's minimum energy.
 ///
-/// Band-major, channel inner: the order decides which pseudo-random value each
-/// collapsed bin gets because one generator feeds both channels.
+/// Channel-major, band inner, like FFmpeg's `process_anticollapse` (one call per
+/// coded channel). One generator feeds both channels, so this order — not the
+/// band-major order of libopus' `anti_collapse` — decides which pseudo-random
+/// value each collapsed bin receives. FFmpeg is this decoder's comparison
+/// target, so its order is the one that matters here.
 pub fn antiCollapse(
     x: []f32,
     collapse_masks: []const u8,
@@ -76,15 +79,15 @@ pub fn antiCollapse(
     seed_in: u32,
 ) u32 {
     var seed = seed_in;
-    for (start..end) |i| {
-        const n0: usize = tables.freq_range[i];
-        var depth = (1 + @as(u32, @intCast(pulses[i]))) / @as(u32, @intCast(n0));
-        depth >>= lm;
-        const thresh: f32 = 0.5 * @exp2(-0.125 * @as(f32, @floatFromInt(depth)));
-        const bins: usize = n0 << lm;
-        const nfl: f32 = @floatFromInt(bins);
-        const sqrt_1: f32 = 1.0 / @sqrt(nfl);
-        for (0..channels) |c| {
+    for (0..channels) |c| {
+        for (start..end) |i| {
+            const n0: usize = tables.freq_range[i];
+            var depth = (1 + @as(u32, @intCast(pulses[i]))) / @as(u32, @intCast(n0));
+            depth >>= lm;
+            const thresh: f32 = 0.5 * @exp2(-0.125 * @as(f32, @floatFromInt(depth)));
+            const bins: usize = n0 << lm;
+            const nfl: f32 = @floatFromInt(bins);
+            const sqrt_1: f32 = 1.0 / @sqrt(nfl);
             var prev1 = prev1_log_e[c * tables.bands + i];
             var prev2 = prev2_log_e[c * tables.bands + i];
             if (channels == 1) {
