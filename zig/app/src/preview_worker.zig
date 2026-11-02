@@ -84,6 +84,9 @@ pub const Worker = struct {
     result: ?Result = null,
     /// 最近一次提交的 generation。工作线程用它丢弃"已经被顶掉"的结果。
     latest_generation: u64 = 0,
+    /// 过期结果的计数：`publish` 时 generation 已经不是最新的（用户已经切走）。
+    /// 只增不减，`--preview-switch` 探针与单元测试用它证明"旧结果被拒绝"。
+    dropped_results: u32 = 0,
 
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
@@ -251,6 +254,8 @@ pub const Worker = struct {
         if (wanted) {
             replaced = self.result;
             self.result = .{ .generation = generation, .provider = provider, .outcome = outcome };
+        } else {
+            self.dropped_results +%= 1;
         }
         self.lock.release();
 

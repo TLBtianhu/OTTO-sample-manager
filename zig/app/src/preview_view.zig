@@ -86,10 +86,12 @@ fn drawOutcome(panel: *Panel, c: *ui.Context) void {
         // 音频分支的全部内容（标题、播放键、格式/时长、波形图 + 进度线）在
         // `preview_audio.zig`：这里只把会话递过去，视图仍然不认识媒体类型。
         .audio => |*session| preview_audio.draw(c, session, panel.current_provider, .{
-            // 位图的 key 来自当前选中行的指纹；播放时只动进度线，像素不重传。
+            // 位图的 key 来自当前选中行的指纹 + 波形内容版本：播放时只动进度线，
+            // 像素不重传；渐进式解码每长出一批列，版本变了才会重新上传。
             .path = panel.requested_path orelse "?",
             .mtime = panel.requested_mtime,
             .size = panel.requested_size,
+            .wave_version = session.waveform_version,
         }),
         .frames => {
             caption(panel, c, "帧预览");

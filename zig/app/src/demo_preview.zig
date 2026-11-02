@@ -24,6 +24,13 @@
 //! provider（`image-wic` / `mf-audio` / `mf-video`），而不是系统缩略图。
 //! `open_ms` 是 `Registry.open` 的墙钟（含 provider 查找与解码），96×96 PNG 的目标
 //! 是 ≤15 ms。
+//!
+//! 音频的 `open_ms` 现在是**第一版波形**的时间：渐进式预览在 `open` 里只解开头
+//! 1/32，剩下的在后台线程补齐（`audio/progressive.zig`）。无头命令要等它完成再
+//! 打印载荷摘要，否则 `pcm_bytes` / `peaks` 只是前缀——所以音频多一行
+//! `preview: audio_progressive=1 full_ms=...`，`full_ms` 是整段解码 + 峰值 + Player
+//! 都完成的时间。总帧数未知的容器（无 Xing 的 MP3 / Ogg）没有这一行：它们本来就
+//! 走整段解码，`open_ms` 就是完整时间。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -76,7 +83,7 @@ pub fn run(
 
     const registry = providers.registryFor(no_shell);
     const started = std.Io.Clock.Timestamp.now(io, .awake);
-    const answered = registry.openAnswered(allocator, .{
+    var answered = registry.openAnswered(allocator, .{
         .sample = &sample,
         .max_px = preview.default_max_px,
         .allow_isolation = allow_isolation,
@@ -111,14 +118,23 @@ pub fn run(
                 .{ bitmap.width, bitmap.height, bitmap.stride, bitmap.byteLen() },
             );
         },
-        .audio => |session| {
+        .audio => |*session| {
+            // 渐进式预览：`open_ms` 是"第一版波形"的时间，`full_ms` 是后台把整段
+            // 解完、峰值补齐的时间。`--preview` 要等它完成，下面打印的才算最终值；
+            // 用户界面不等（波形会自己长出来，见 `audio/progressive.zig`）。
+            const progressive = session.isDecoding();
+            if (progressive) {
+                session.waitComplete();
+                const full_ms = @as(f64, @floatFromInt(started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
+                std.debug.print("preview: audio_progressive=1 full_ms={d:.2}\n", .{full_ms});
+            }
             // 波形也打出来：`peaks=` 是桶数，`waveform=` 是那张 BGRA 位图的尺寸，
             // `bytes=` 是它的字节数——一行就能核对"解码后确实算了峰值、也渲染了"。
             // `peak_min` / `peak_max` 是所有桶合起来的全局上下界：多声道下混矩阵
             // 改动时（尤其 LFE 被丢弃），一行就能看出输出是不是真的接近静音。
             const bounds = peakBounds(session.peaks);
             std.debug.print(
-                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} peak_min={d} peak_max={d} waveform={d}x{d} bytes={d}\n",
+                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} peak_min={d} peak_max={d} waveform={d}x{d} bytes={d} playable={}\n",
                 .{
                     session.sample_rate,
                     session.channels,
@@ -131,6 +147,7 @@ pub fn run(
                     session.waveform.width,
                     session.waveform.height,
                     session.waveform.byteLen(),
+                    session.player != null,
                 },
             );
         },

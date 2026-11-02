@@ -18,6 +18,14 @@
 //!
 //! 纯函数：不碰磁盘、不碰线程、不 import nanoui。`compute` 只分配两个 i16 数组，
 //! 由调用方用**同一个 allocator** 调 `Peaks.deinit` 释放。
+//!
+//! ## 渐进式合并（`Merger`）
+//!
+//! 预览要在整段解码完之前就画出开头一段，所以另有一个 `Merger`：按帧顺序把 PCM
+//! 分片喂进来，用**与 `compute` 相同的桶边界公式**累加 min/max。总帧数在开流时
+//! 已知时（WAV/FLAC/AIFF/带 Xing 的 MP3），全部分片喂完之后的结果与一次
+//! `compute` 逐桶相等（测试钉住）；总帧数未知的容器不做渐进（见
+//! `audio/progressive.zig` 文件头）。
 
 const std = @import("std");
 const SampleFormat = @import("pcm.zig").SampleFormat;
@@ -101,6 +109,108 @@ pub fn compute(
 
     return .{ .min = min, .max = max };
 }
+
+/// 渐进式峰值合并器：**按帧顺序**把 PCM 分片喂进来，维护每个桶的 min/max。
+///
+/// 为什么需要它：预览要在**整段解码完之前**就画出开头一段波形，然后让波形跟着
+/// 解码一起长出来。桶边界由总帧数决定（`compute` 的公式），所以只要总帧数在开流
+/// 时已知，就可以把"每个分片落在哪些桶里"按**同一套边界**累加；全部分片喂完之后的
+/// 结果与一次 `compute` 逐桶相等（不是近似——测试 `Merger 与 compute 逐桶相等` 钉住）。
+///
+/// 与 `compute` 的关系：
+///   * 桶 i 的帧区间完全相同：`[i*total/count, (i+1)*total/count)`，`total >= count`；
+///   * 多声道混合、位深/float 折算复用同一个 `mixedSample`；
+///   * `complete` 是**已经结束**的桶数（这些桶的值是最终值）。当前桶还可能再收到
+///     帧，所以它不算 complete——视图只画 `complete` 之前的列，波形就不会"倒退"。
+///
+/// 不分配内存：两个数组由调用方持有（长度 = `count`），生命周期覆盖整个解码。
+pub const Merger = struct {
+    total_frames: u64,
+    count: usize,
+    min: []i16,
+    max: []i16,
+    /// 已经喂进来的总帧数（= 下一个帧的全局下标）。
+    frame: u64 = 0,
+    /// 当前正在累加的桶下标；`count` 表示已经全部结束。
+    bucket: usize = 0,
+    /// 当前桶的起始帧（闭）与下一桶的起始帧（开）。
+    bucket_end: u64 = 0,
+    low: i16 = std.math.maxInt(i16),
+    high: i16 = std.math.minInt(i16),
+    /// 已经结束的桶数。全部喂完并 `finish` 之后等于 `count`。
+    complete: usize = 0,
+
+    pub fn init(total_frames: u64, count: usize, min: []i16, max: []i16) Merger {
+        std.debug.assert(min.len == count and max.len == count);
+        var merger: Merger = .{
+            .total_frames = total_frames,
+            .count = count,
+            .min = min,
+            .max = max,
+        };
+        if (count > 0) {
+            merger.bucket_end = merger.endOf(0);
+            @memset(min, 0);
+            @memset(max, 0);
+        }
+        return merger;
+    }
+
+    /// 一桶的结束帧（开区间）。`total >= count` 保证每个桶至少一帧；
+    /// `else` 分支只是防御，与 `compute` 的写法一致。
+    fn endOf(self: *const Merger, bucket: usize) u64 {
+        const start = @as(u64, bucket) * self.total_frames / self.count;
+        const next = (@as(u64, bucket) + 1) * self.total_frames / self.count;
+        return if (next > start) next else start + 1;
+    }
+
+    /// 收入一段交错 PCM（与 `compute` 同一种字节形态）。只按整帧切分：
+    /// `pcm.len` 不足一帧的尾巴被忽略（解码层保证不会出现，防御而已）。
+    pub fn push(self: *Merger, pcm: []const u8, channels: u16, bits: u16, format: SampleFormat) void {
+        if (self.count == 0 or channels == 0) return;
+        const bytes_per_sample: usize = @as(usize, bits) / 8;
+        if (bytes_per_sample == 0) return;
+        const frame_bytes = @as(usize, channels) * bytes_per_sample;
+        const frames_here = pcm.len / frame_bytes;
+
+        var local: usize = 0;
+        while (local < frames_here) : (local += 1) {
+            if (self.bucket >= self.count) return;
+            // 到桶边界：把上一个桶定稿，再进下一个。
+            while (self.frame >= self.bucket_end) {
+                self.commit();
+                if (self.bucket >= self.count) return;
+            }
+            const value = mixedSample(pcm, local, @as(usize, channels), bits, format);
+            self.low = @min(self.low, value);
+            self.high = @max(self.high, value);
+            self.frame += 1;
+            // 刚好吃掉桶的最后一帧：立刻定稿，视图不用等下一块 PCM 才知道这一列
+            // 已经可以画了（桶长 >= 1，所以一次提交之后不会紧接着再越界）。
+            if (self.frame == self.bucket_end) self.commit();
+        }
+    }
+
+    /// 把当前桶定稿（只有"它的最后一帧真的到了"才算）。正常情况下 `push` 已经
+    /// 在边界上提交过，`finish` 只是防御；**截断的流**里最后一个桶不完整，它不会
+    /// 被算进 `complete`——视图因此不会画一条"没解完却假装完成"的列。
+    /// 重复调用无操作。
+    pub fn finish(self: *Merger) void {
+        if (self.bucket < self.count and self.frame == self.bucket_end) self.commit();
+    }
+
+    fn commit(self: *Merger) void {
+        self.min[self.bucket] = self.low;
+        self.max[self.bucket] = self.high;
+        self.bucket += 1;
+        self.complete += 1;
+        self.low = std.math.maxInt(i16);
+        self.high = std.math.minInt(i16);
+        if (self.bucket < self.count) {
+            self.bucket_end = self.endOf(self.bucket);
+        }
+    }
+};
 
 /// 单帧的 i16 值（多声道先平均）。给音频图标的**粗采样**用：只读几帧时不需要
 /// 构造整段 PCM。调用方保证 `frame * channels * bytes_per_sample` 在 `pcm` 内。
@@ -316,4 +426,124 @@ test "24 位 PCM：按高位折算成 i16" {
     defer peaks.deinit(testing.allocator);
     try testing.expectEqual(@as(i16, 32767), peaks.max[0]);
     try testing.expectEqual(@as(i16, -32768), peaks.min[1]);
+}
+
+/// 把 `samples` 按 `chunk_frames` 帧一片喂给 Merger，返回合并结果。
+/// 调用方用 `defer merged.deinit(testing.allocator)` 释放。
+fn mergeByChunks(
+    allocator: std.mem.Allocator,
+    samples: []const i16,
+    channels: u16,
+    buckets: usize,
+    chunk_frames: usize,
+) !Peaks {
+    const frames = samples.len / channels;
+    const count = @min(buckets, frames);
+    const min = try allocator.alloc(i16, count);
+    errdefer allocator.free(min);
+    const max = try allocator.alloc(i16, count);
+    errdefer allocator.free(max);
+
+    var merger = Merger.init(frames, count, min, max);
+    var index: usize = 0;
+    while (index < samples.len) {
+        const take = @min(samples.len - index, chunk_frames * channels);
+        merger.push(std.mem.sliceAsBytes(samples[index..][0..take]), channels, 16, .pcm);
+        index += take;
+    }
+    merger.finish();
+    return .{ .min = min, .max = max };
+}
+
+test "Merger：10 帧 3 桶，按 1 帧一片合并与 compute 逐桶相等" {
+    // 这个用例是"前瞻映射"的陷阱：帧 3 属于桶 1（边界 [0,3)[3,6)[6,10)），
+    // 但 `frame*count/total` 会算出 0。Merger 必须按边界推进，不能按除法反推。
+    var samples: [10]i16 = undefined;
+    for (&samples, 0..) |*sample, index| sample.* = @intCast(@as(i32, @intCast(index)) * 37 - 100);
+
+    const expected = try computeI16(testing.allocator, &samples, 1, 3);
+    defer expected.deinit(testing.allocator);
+    const merged = try mergeByChunks(testing.allocator, &samples, 1, 3, 1);
+    defer merged.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(i16, expected.min, merged.min);
+    try testing.expectEqualSlices(i16, expected.max, merged.max);
+}
+
+test "Merger：随机帧数/分片/声道与 compute 逐桶相等（桶边界落在分片中间）" {
+    var prng = std.Random.DefaultPrng.init(0x0110_9ea4);
+    const random = prng.random();
+
+    var frames: u64 = 1;
+    while (frames <= 3000) : (frames += 1 + random.uintLessThan(u64, 97)) {
+        const channels: u16 = if (random.boolean()) 1 else 2;
+        const total_samples: usize = @intCast(frames * @as(u64, channels));
+        const samples = try testing.allocator.alloc(i16, total_samples);
+        defer testing.allocator.free(samples);
+        for (samples) |*sample| sample.* = @bitCast(random.int(u16));
+
+        const buckets: usize = switch (random.uintLessThan(u8, 4)) {
+            0 => default_buckets,
+            1 => 1,
+            2 => @intCast(@min(frames, 7)),
+            else => @intCast(@min(frames, random.uintLessThan(usize, 600) + 1)),
+        };
+        const chunk_frames: usize = 1 + random.uintLessThan(usize, 400);
+
+        const expected = try compute(
+            testing.allocator,
+            std.mem.sliceAsBytes(samples),
+            channels,
+            16,
+            .pcm,
+            buckets,
+        );
+        defer expected.deinit(testing.allocator);
+        const merged = try mergeByChunks(testing.allocator, samples, channels, buckets, chunk_frames);
+        defer merged.deinit(testing.allocator);
+
+        try testing.expectEqual(expected.len(), merged.len());
+        try testing.expectEqualSlices(i16, expected.min, merged.min);
+        try testing.expectEqualSlices(i16, expected.max, merged.max);
+    }
+}
+
+test "Merger：complete 只推进到已结束的桶；finish 幂等；截断流不补假桶" {
+    const samples = [_]i16{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    const min = try testing.allocator.alloc(i16, 3);
+    defer testing.allocator.free(min);
+    const max = try testing.allocator.alloc(i16, 3);
+    defer testing.allocator.free(max);
+
+    var merger = Merger.init(10, 3, min, max);
+    // 第一桶 [0,3)：喂两帧时还没有任何桶结束。
+    merger.push(std.mem.sliceAsBytes(samples[0..2]), 1, 16, .pcm);
+    try testing.expectEqual(@as(usize, 0), merger.complete);
+    // 第 3 帧一到，第一桶立刻定稿（不用等下一块 PCM）。
+    merger.push(std.mem.sliceAsBytes(samples[2..3]), 1, 16, .pcm);
+    try testing.expectEqual(@as(usize, 1), merger.complete);
+    // 跨过第二桶的一次性分片。
+    merger.push(std.mem.sliceAsBytes(samples[3..9]), 1, 16, .pcm);
+    try testing.expectEqual(@as(usize, 2), merger.complete);
+    merger.push(std.mem.sliceAsBytes(samples[9..10]), 1, 16, .pcm);
+    try testing.expectEqual(@as(usize, 3), merger.complete);
+
+    merger.finish();
+    try testing.expectEqual(@as(usize, 3), merger.complete);
+    merger.finish();
+    try testing.expectEqual(@as(usize, 3), merger.complete);
+    try testing.expectEqualSlices(i16, &[_]i16{ 1, 4, 7 }, min);
+    try testing.expectEqualSlices(i16, &[_]i16{ 3, 6, 10 }, max);
+
+    // 截断到 7 帧：只该定稿前两桶；第三桶不出现"用 maxInt 冒充数据"的值。
+    const short_min = try testing.allocator.alloc(i16, 3);
+    defer testing.allocator.free(short_min);
+    const short_max = try testing.allocator.alloc(i16, 3);
+    defer testing.allocator.free(short_max);
+    var short = Merger.init(10, 3, short_min, short_max);
+    short.push(std.mem.sliceAsBytes(samples[0..7]), 1, 16, .pcm);
+    short.finish();
+    try testing.expectEqual(@as(usize, 2), short.complete);
+    try testing.expectEqualSlices(i16, &[_]i16{ 1, 4, 0 }, short_min);
+    try testing.expectEqualSlices(i16, &[_]i16{ 3, 6, 0 }, short_max);
 }

@@ -79,6 +79,7 @@ const core = @import("otto_core");
 const decode_mod = @import("../audio/decode.zig");
 const file_reader_mod = @import("../audio/file_reader.zig");
 const player = @import("../audio/player.zig");
+const progressive = @import("../audio/progressive.zig");
 const session_mod = @import("../audio/session.zig");
 const preview = @import("../preview.zig");
 
@@ -146,12 +147,9 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
     // 图标请求：不整段解码，直接谢绝（正常路径下注册表根本不会问到这里）。
     if (request.icon) return .{ .none = .unsupported };
 
-    var decoded = decode(allocator, request.sample.file_path) catch |err| return decline(err, request.sample.file_path);
-    defer decoded.deinit(allocator);
-
-    // 与 wasapi-pcm / MF 完全相同的会话装配（峰值/波形/Player）；失败文案按本语境。
-    const session = session_mod.build(allocator, &decoded) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+    // 与 wasapi-pcm 共用同一条渐进式路径：先出第一版波形，后台补齐；总帧数
+    // 未知的容器（Ogg Vorbis / Opus、无 Xing 的 MP3）在 `start` 里整段解码。
+    const started = progressive.start(allocator, request.sample.file_path, .{}) catch |err| switch (err) {
         error.NoAudioEndpoint => {
             std.debug.print(
                 "otto-lite: 没有默认音频输出端点，纯 Zig 音频预览谢绝（{s}）\n",
@@ -159,7 +157,6 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
             );
             return .{ .none = .failed };
         },
-        error.Unsupported => return .{ .none = .unsupported },
         error.InvalidFormat, error.DeviceFailure, error.ThreadFailure => {
             std.debug.print(
                 "otto-lite: 纯 Zig 音频播放初始化失败 {s}（{s} hresult=0x{x:0>8}）\n",
@@ -167,9 +164,10 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
             );
             return .{ .none = .failed };
         },
+        else => return decline(@errorCast(err), request.sample.file_path),
     };
 
-    return .{ .audio = session };
+    return .{ .audio = started.session };
 }
 
 /// 解码错误 → 谢绝原因。映射表在 `audio/decode.zig`，这里只做日志。

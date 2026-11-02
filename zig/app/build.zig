@@ -147,6 +147,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            // `preview_switch_test.zig` 直接驱动 `preview_panel.Panel`（工作线程 +
+            // generation + 切换），Panel 的类型签名里有 `nanoui.ui.Context`，所以
+            // 测试模块也要认识 nanoui。测试只调 init/sync/poll/deinit，不建窗口、
+            // 不画一帧。
+            .{ .name = "nanoui", .module = nanoui_dep.module("nanoui") },
             .{ .name = "otto_core", .module = core_dep.module("otto_core") },
             // providers/root.zig → providers/native_audio.zig 会 import 这个模块。
             .{ .name = "zig_audio", .module = zig_audio_dep.module("zig_audio") },
@@ -161,7 +166,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "otto_scan", .module = ports_dep.module("otto_scan") },
             .{ .name = "otto_probe", .module = ports_dep.module("otto_probe") },
             .{ .name = "otto_browse_dir", .module = ports_dep.module("otto_browse_dir") },
-        .{ .name = "otto_win_path", .module = ports_dep.module("otto_win_path") },
+            .{ .name = "otto_win_path", .module = ports_dep.module("otto_win_path") },
             .{ .name = "otto_wav_header", .module = ports_dep.module("otto_wav_header") },
             .{ .name = "otto_feed", .module = ports_dep.module("otto_feed") },
         },

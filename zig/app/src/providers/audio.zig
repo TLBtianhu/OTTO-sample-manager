@@ -43,6 +43,7 @@ const core = @import("otto_core");
 const coarse = @import("../audio/coarse.zig");
 const decode_mod = @import("../audio/decode.zig");
 const player = @import("../audio/player.zig");
+const progressive = @import("../audio/progressive.zig");
 const session_mod = @import("../audio/session.zig");
 const preview = @import("../preview.zig");
 
@@ -93,11 +94,14 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
     // 行内小图：粗采样 32 个窗口，不读整段 PCM、不初始化 WASAPI / Player。
     if (request.icon) return openIcon(allocator, request);
 
-    var decoded = load(allocator, request.sample.file_path) catch |err| return decline(err);
-    defer decoded.deinit(allocator);
-
-    const session = sessionFromDecoded(allocator, &decoded) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+    // 渐进式预览：先解开头 1/32 出第一版波形，剩下的交给后台线程；总帧数未知的
+    // 容器（无 Xing 的 MP3 / Ogg）在 `start` 里走整段解码的老路径。见
+    // `audio/progressive.zig` 的文件头。
+    const started = progressive.start(
+        allocator,
+        request.sample.file_path,
+        .{ .expected_format = .wav },
+    ) catch |err| switch (err) {
         error.NoAudioEndpoint => {
             std.debug.print(
                 "otto-lite: 没有默认音频输出端点，音频预览谢绝（{s}）\n",
@@ -105,7 +109,6 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
             );
             return .{ .none = .failed };
         },
-        error.Unsupported => return .{ .none = .unsupported },
         error.InvalidFormat, error.DeviceFailure, error.ThreadFailure => {
             std.debug.print(
                 "otto-lite: 音频初始化失败 {s}（{s} hresult=0x{x:0>8}）\n",
@@ -113,9 +116,10 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
             );
             return .{ .none = .failed };
         },
+        else => return decline(@errorCast(err)),
     };
 
-    return .{ .audio = session };
+    return .{ .audio = started.session };
 }
 
 /// 图标请求：读头部 + 32 个等距窗口，渲染波形条。错误按四态映射：

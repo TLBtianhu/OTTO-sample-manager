@@ -77,6 +77,13 @@ pub const Panel = struct {
     /// 上一帧看到的播放状态：播放自然结束时没有新 Outcome，靠它触发一次重画，
     /// 让按钮从"停止"变回"播放"。
     was_playing: bool = false,
+    /// 当前显示的是哪一次提交（单调递增的 generation）。`preview_switch_test.zig`
+    /// 用它断言"最后显示的是最后一次选中"，不是某个后到的旧结果。
+    current_generation: u64 = 0,
+    /// 被丢掉（generation 已过期）的答案数。只增不减，供验收/诊断读取。
+    stale_results: u32 = 0,
+    /// 波形重画次数（渐进式解码每长出一批列 +1）。
+    wave_updates: u32 = 0,
     /// 当前想要的样本指纹（路径 + mtime + size），用来判断"选中行变了没有"。
     /// 也是图像缓存键的来源；`current` 有效期间它不会变。
     requested_path: ?[]u8 = null,
@@ -176,31 +183,50 @@ pub const Panel = struct {
         self.worker.submit(generation, snapshot);
     }
 
-    /// 取走工作线程交回的答案。返回 true 表示画面变了，调用方应重画。
-    /// 只由 UI 线程调（`tick` 里），一次最多接手一份结果。
+    /// 取走工作线程交回的答案，并推进当前音频的渐进式波形。返回 true 表示画面
+    /// 变了，调用方应重画。只由 UI 线程调（`tick` 里），一次最多接手一份结果。
+    ///
+    /// 为什么先接手结果再 `pump`：换行会 `clearCurrent` 掉旧会话（取消它的解码
+    /// 线程），新会话如果已经解完，第一次 poll 就能直接画出最终波形。
     pub fn poll(self: *Panel) bool {
-        const result = self.worker.take() orelse return false;
-        // 选中行在我们读完之前又变了：这份答案已经过期，丢掉。
-        if (result.generation != self.active_generation) {
-            result.outcome.deinit(self.allocator);
-            return false;
+        var changed = false;
+        if (self.worker.take()) |result| {
+            // 选中行在我们读完之前又变了：这份答案已经过期，丢掉。
+            if (result.generation != self.active_generation) {
+                self.stale_results +%= 1;
+                result.outcome.deinit(self.allocator);
+            } else {
+                self.clearCurrent();
+                self.current = result.outcome;
+                self.current_provider = result.provider;
+                self.current_generation = result.generation;
+                self.pending = false;
+                changed = true;
+                // Enter 比读数先按：现在音频到了，补上这次播放。
+                if (self.wants_play) {
+                    self.wants_play = false;
+                    if (self.current) |*outcome| switch (outcome.*) {
+                        .audio => |*session| {
+                            if (!session.isPlaying()) _ = preview_audio.play(session);
+                        },
+                        else => {},
+                    };
+                }
+            }
         }
 
-        self.clearCurrent();
-        self.current = result.outcome;
-        self.current_provider = result.provider;
-        self.pending = false;
-        // Enter 比读数先按：现在音频到了，补上这次播放。
-        if (self.wants_play) {
-            self.wants_play = false;
-            if (self.current) |*outcome| switch (outcome.*) {
-                .audio => |*session| {
-                    if (!session.isPlaying()) _ = preview_audio.play(session);
-                },
-                else => {},
-            };
-        }
-        return true;
+        // 渐进式波形：后台解出一批新列就重画同一张位图（`waveform_version` 变了，
+        // 视图才会把像素重新上传图集）。全部解完时这一拍接手最终结果。
+        if (self.current) |*outcome| switch (outcome.*) {
+            .audio => |*session| {
+                if (session.pump()) {
+                    self.wave_updates +%= 1;
+                    changed = true;
+                }
+            },
+            else => {},
+        };
+        return changed;
     }
 
     /// 一行摘要，给 `tick` 打日志 / `--nanoui-snapshot` 的 stdout 核对用。
@@ -221,7 +247,7 @@ pub const Panel = struct {
             ) catch "?",
             .audio => |session| std.fmt.bufPrint(
                 buffer,
-                "provider={s} audio {d}Hz ch={d} bits={d} {d}ms peaks={d} wave={d}x{d}",
+                "provider={s} audio {d}Hz ch={d} bits={d} {d}ms peaks={d} wave={d}x{d} v={d} pcm={d}B decoding={}",
                 .{
                     provider,
                     session.sample_rate,
@@ -231,6 +257,9 @@ pub const Panel = struct {
                     session.peaks.len(),
                     session.waveform.width,
                     session.waveform.height,
+                    session.waveform_version,
+                    session.pcmBytes(),
+                    session.isDecoding(),
                 },
             ) catch "?",
             .frames => std.fmt.bufPrint(buffer, "provider={s} frames(placeholder)", .{provider}) catch "?",

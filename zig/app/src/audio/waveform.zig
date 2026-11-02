@@ -33,7 +33,7 @@ pub const default_color: Color = .{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff }
 
 pub const Error = std.mem.Allocator.Error;
 
-/// 把峰值画成一张 `width` × `height` 的 BGRA 位图。
+/// 把峰值画成一张 `width` × `height` 的 BGRA 位图（完整波形）。
 ///
 /// 空 peaks 也是一张合法的（全透明）位图：视图可以照常画，不需要额外判空。
 pub fn render(
@@ -43,14 +43,29 @@ pub fn render(
     height: u32,
     color: Color,
 ) Error!preview.Bitmap {
+    return renderPrefix(allocator, peaks, width, height, color, peaks.len());
+}
+
+/// 只画**前 `complete_buckets` 桶**：渐进式解码时调用，未解出的列保持透明
+/// （露出轨道底色），不画任何猜测出来的数据。
+///
+/// `complete_buckets` 由调用方保证是"已经定稿的桶数"。一列只有在它覆盖的
+/// **全部**桶都定稿时才画——这样同一列像素只依赖已经完成的数据，不会在后续
+/// 解码中反悔（视图端按列数做缓存键，见 `preview_audio.drawWave`）。
+pub fn renderPrefix(
+    allocator: std.mem.Allocator,
+    peaks: peaks_mod.Peaks,
+    width: u32,
+    height: u32,
+    color: Color,
+    complete_buckets: usize,
+) Error!preview.Bitmap {
     // 0 宽/0 高在 UI 里没有意义（`ui.image` 会直接拒绝），夹到 1 免得除零。
     const w: u32 = @max(1, width);
     const h: u32 = @max(1, height);
     const stride: usize = @as(usize, w) * 4;
     const pixels = try allocator.alloc(u8, stride * @as(usize, h));
     errdefer allocator.free(pixels);
-    // 透明背景：预乘 alpha 下 RGB 也必须是 0，否则半透明处会泛白。
-    @memset(pixels, 0);
 
     const bitmap: preview.Bitmap = .{
         .pixels = pixels,
@@ -58,8 +73,30 @@ pub fn render(
         .height = h,
         .stride = stride,
     };
-    if (peaks.len() == 0) return bitmap;
+    renderPrefixInto(pixels, stride, w, h, peaks, color, complete_buckets);
+    return bitmap;
+}
 
+/// 把（前 `complete_buckets` 桶的）波形画进**已有的**像素缓冲：先清零，再画列。
+/// 渐进式解码每前进一列都重画到同一块内存，不每次分配 53 KiB。
+pub fn renderPrefixInto(
+    pixels: []u8,
+    stride: usize,
+    width: u32,
+    height: u32,
+    peaks: peaks_mod.Peaks,
+    color: Color,
+    complete_buckets: usize,
+) void {
+    std.debug.assert(pixels.len >= stride * @as(usize, height));
+    std.debug.assert(stride >= @as(usize, width) * 4);
+    // 透明背景：预乘 alpha 下 RGB 也必须是 0，否则半透明处会泛白。
+    @memset(pixels[0 .. stride * @as(usize, height)], 0);
+    if (peaks.len() == 0 or complete_buckets == 0) return;
+
+    const done = @min(complete_buckets, peaks.len());
+    const w = width;
+    const h = height;
     var x: u32 = 0;
     while (x < w) : (x += 1) {
         // 这一列覆盖的桶区间：列比桶多时多列共用一个桶，列比桶少时先合并
@@ -67,6 +104,8 @@ pub fn render(
         const first: usize = @as(usize, x) * peaks.len() / w;
         const next: usize = (@as(usize, x) + 1) * peaks.len() / w;
         const last = if (next > first) next else first + 1;
+        // 未解出的列：不画。只画"整列都已完成"的列，像素因此不会再变。
+        if (last > done) break;
         var low: i16 = peaks.min[first];
         var high: i16 = peaks.max[first];
         var index = first + 1;
@@ -87,8 +126,24 @@ pub fn render(
             pixels[at + 3] = color.a;
         }
     }
+}
 
-    return bitmap;
+/// 已经可以画的**完整列数**：第 x 列只覆盖桶 `[x*n/w, (x+1)*n/w)`，整段都定稿
+/// 才算完成。`complete_buckets` 之前的桶是定稿的（`peaks.Merger.complete`）。
+/// 渐进式波形用它做缓存键（列数 → 像素），列数只会增加。
+pub fn completeColumns(peaks_len: usize, width: u32, complete_buckets: usize) u32 {
+    if (peaks_len == 0 or width == 0 or complete_buckets == 0) return 0;
+    const done = @min(complete_buckets, peaks_len);
+    var columns: u32 = 0;
+    var x: u32 = 0;
+    while (x < width) : (x += 1) {
+        const first: usize = @as(usize, x) * peaks_len / width;
+        const next: usize = (@as(usize, x) + 1) * peaks_len / width;
+        const last = if (next > first) next else first + 1;
+        if (last > done) break;
+        columns += 1;
+    }
+    return columns;
 }
 
 /// 采样值 → 行号：`+32767` 是第 0 行（顶），`-32768` 是最后一行。
@@ -243,4 +298,67 @@ test "positionMsAt：50% 点击 = 半个时长，越界夹到两端，0 宽/0 �
     // 退化输入不除零。
     try testing.expectEqual(@as(u64, 0), positionMsAt(10, 0, 800));
     try testing.expectEqual(@as(u64, 0), positionMsAt(10, 240, 0));
+}
+
+test "completeColumns：全未完成 / 按桶边界推进 / 全完成 / 桶比列少" {
+    // 512 桶 240 列：第 0 列覆盖桶 [0,2)，第 1 列 [2,4)……完成 2 桶才有 1 列。
+    try testing.expectEqual(@as(u32, 0), completeColumns(512, 240, 0));
+    try testing.expectEqual(@as(u32, 1), completeColumns(512, 240, 2));
+    try testing.expectEqual(@as(u32, 2), completeColumns(512, 240, 4));
+    try testing.expectEqual(@as(u32, 239), completeColumns(512, 240, 511));
+    try testing.expectEqual(@as(u32, 240), completeColumns(512, 240, 512));
+    // 桶比列少：每列覆盖一个桶（多列共用），完成 k 桶时前 6 列可画（10 列 5 桶：
+    // 第 0/1 列共用桶 0，第 2/3 列共用桶 1……第 6 列才是桶 3）。
+    try testing.expectEqual(@as(u32, 6), completeColumns(5, 10, 3));
+    try testing.expectEqual(@as(u32, 10), completeColumns(5, 10, 5));
+    // 退化输入不除零。
+    try testing.expectEqual(@as(u32, 0), completeColumns(0, 240, 10));
+    try testing.expectEqual(@as(u32, 0), completeColumns(512, 0, 10));
+}
+
+test "渐进渲染：只画完成列，未完成列全透明（没有假数据）" {
+    const count = 512;
+    const mins = try testing.allocator.alloc(i16, count);
+    defer testing.allocator.free(mins);
+    const maxs = try testing.allocator.alloc(i16, count);
+    defer testing.allocator.free(maxs);
+    for (mins, 0..) |*value, index| value.* = -@as(i16, @intCast(index % 5000));
+    for (maxs, 0..) |*value, index| value.* = @as(i16, @intCast(index % 5000));
+
+    const peaks: peaks_mod.Peaks = .{ .min = mins, .max = maxs };
+    const partial = try renderPrefix(testing.allocator, peaks, default_width, default_height, default_color, 16);
+    defer partial.deinit(testing.allocator);
+
+    const columns = completeColumns(peaks.len(), partial.width, 16);
+    try testing.expectEqual(@as(u32, 7), columns);
+    var x: u32 = columns;
+    while (x < partial.width) : (x += 1) {
+        var y: u32 = 0;
+        while (y < partial.height) : (y += 1) {
+            const alpha = partial.pixels[@as(usize, y) * partial.stride + @as(usize, x) * 4 + 3];
+            try testing.expectEqual(@as(u8, 0), alpha);
+        }
+    }
+    // 已完成的列必须有像素（静音时也是中间一条细线）。
+    x = 0;
+    while (x < columns) : (x += 1) {
+        var ink: usize = 0;
+        var y: u32 = 0;
+        while (y < partial.height) : (y += 1) {
+            if (partial.pixels[@as(usize, y) * partial.stride + @as(usize, x) * 4 + 3] != 0) ink += 1;
+        }
+        try testing.expect(ink > 0);
+    }
+
+    // 完成 0 桶：整张图透明（"还没解出来"不是"静音"）。
+    const blank = try renderPrefix(testing.allocator, peaks, 8, 6, default_color, 0);
+    defer blank.deinit(testing.allocator);
+    for (blank.pixels) |byte| try testing.expectEqual(@as(u8, 0), byte);
+
+    // 全部完成：与一次性 `render` 逐字节相等（渐进不改变最终像素）。
+    const full = try render(testing.allocator, peaks, default_width, default_height, default_color);
+    defer full.deinit(testing.allocator);
+    const completed = try renderPrefix(testing.allocator, peaks, default_width, default_height, default_color, peaks.len());
+    defer completed.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, full.pixels, completed.pixels);
 }

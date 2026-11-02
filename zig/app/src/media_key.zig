@@ -19,11 +19,28 @@ pub fn make(
     mtime: i64,
     size: u64,
 ) []const u8 {
+    return makeVersioned(buffer, prefix, path, mtime, size, 0);
+}
+
+/// 带**内容版本**的键：位图在同一份文件上会变（渐进式波形）时用。
+///
+/// 图集的规则是"一个键记住它第一次看到的像素"，所以波形每长出一批列就必须换一个
+/// 键；版本由完成列数给出（`preview.AudioSession.waveform_version`），同一版本的
+/// 像素永远相同，旧图不会被当成新图。
+pub fn makeVersioned(
+    buffer: []u8,
+    prefix: []const u8,
+    path: []const u8,
+    mtime: i64,
+    size: u64,
+    version: u32,
+) []const u8 {
     var hasher = std.hash.Wyhash.init(0x6d65_6469); // "medi"
     hasher.update(prefix);
     hasher.update(path);
     hasher.update(std.mem.asBytes(&mtime));
     hasher.update(std.mem.asBytes(&size));
+    hasher.update(std.mem.asBytes(&version));
     return std.fmt.bufPrint(buffer, "{s}|{x:0>16}", .{ prefix, hasher.final() }) catch prefix;
 }
 
@@ -49,4 +66,18 @@ test "media_key：前缀/路径/mtime/size 任一变化都换键，同内容稳�
     try testing.expect(!std.mem.eql(u8, base, make(&b, "preview", "C:\\samples\\kick.wav", 112, 222)));
     try testing.expect(!std.mem.eql(u8, base, make(&b, "preview", "C:\\samples\\kick.wav", 111, 223)));
     try testing.expect(!std.mem.eql(u8, base, make(&b, "preview", "C:\\samples\\snare.wav", 111, 222)));
+}
+
+test "media_key：波形版本进键（渐进式一版一图，同版本稳定）" {
+    var a: [64]u8 = undefined;
+    var b: [64]u8 = undefined;
+    const v7 = makeVersioned(&a, "wave", "C:\\samples\\kick.wav", 111, 222, 7);
+    try testing.expectEqualStrings(v7, makeVersioned(&b, "wave", "C:\\samples\\kick.wav", 111, 222, 7));
+    // 长出一批列 → 换键，图集才会重新上传像素。
+    try testing.expect(!std.mem.eql(u8, v7, makeVersioned(&b, "wave", "C:\\samples\\kick.wav", 111, 222, 8)));
+    // 版本 0 与不带版本的旧键相同（静态图/整段解码的波形继续用同一条路径）。
+    try testing.expectEqualStrings(
+        make(&a, "wave", "C:\\samples\\kick.wav", 111, 222),
+        makeVersioned(&b, "wave", "C:\\samples\\kick.wav", 111, 222, 0),
+    );
 }

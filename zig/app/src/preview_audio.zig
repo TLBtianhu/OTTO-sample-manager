@@ -10,6 +10,10 @@
 //! （`audio/peaks.zig` + `audio/waveform.zig`）。这里不认识 WAV、不认识采样率、
 //! 不认识 min/max，只认识"会话里有一张图和一个毫秒位置"。
 //!
+//! 渐进式解码期间同一张位图会被重画（后台每解出一批列就画一次），所以位图的缓存键
+//! 里带 `wave_version`（完成列数）：版本不变就不重新上传像素，版本变了才换键。
+//! 未解出的列是透明的，露出轨道底色——不是猜测出来的波形。
+//!
 //! 为什么进度线不画进位图：位图的 key 只随文件内容变化（路径 + mtime + size），
 //! 播放时不该每帧重新编码/上传像素。线用绝对定位的 div 画，动的只有 offset。
 //!
@@ -33,6 +37,9 @@ pub const Identity = struct {
     path: []const u8,
     mtime: i64 = 0,
     size: u64 = 0,
+    /// 波形位图的内容版本（完成列数）。渐进式解码每长出一批列就 +1，键跟着换，
+    /// 图集才会重新上传像素；静态图（`preview_view`）一直用 0。
+    wave_version: u32 = 0,
 };
 
 /// 画 `.audio` 分支。`provider` 是注册表答话的 provider 名字（截图能核对"是谁答的"）。
@@ -67,10 +74,11 @@ pub fn draw(
         session.channels,
         session.bits,
     });
-    ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "时长 {d}.{d:0>3} 秒 · {d} 字节 PCM", .{
+    ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "时长 {d}.{d:0>3} 秒 · {d} 字节 PCM{s}", .{
         session.duration_ms / 1000,
         session.duration_ms % 1000,
-        session.pcm.len,
+        session.pcmBytes(),
+        if (session.isDecoding()) "（解码中）" else "",
     });
 
     drawWave(c, session, identity);
@@ -139,8 +147,16 @@ fn drawWave(c: *ui.Context, session: *preview.AudioSession, identity: Identity) 
     if (it.clicked) seekFromClick(c, session, it.rect);
 
     var key_buffer: [64]u8 = undefined;
+    const wave_key = media_key.makeVersioned(
+        &key_buffer,
+        "wave",
+        identity.path,
+        identity.mtime,
+        identity.size,
+        identity.wave_version,
+    );
     if (!ui.image(c, .{
-        .key = media_key.make(&key_buffer, "wave", identity.path, identity.mtime, identity.size),
+        .key = wave_key,
         .source = .{ .pixels = .{
             .bgra = bitmap.pixels,
             .width = bitmap.width,
