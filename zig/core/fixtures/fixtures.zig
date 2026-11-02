@@ -8,5 +8,3 @@ pub const dangling_refs = @embedFile("dangling_refs.json");
 pub const duplicate_ids = @embedFile("duplicate_ids.json");
 pub const subfolders = @embedFile("subfolders.json");
 pub const index_events = @embedFile("index_events.json");
-/// 由 0.47（OTTOLIB v1 编码器）实际写出的迁移夹具，含分组/目录/中文路径。
-pub const legacy_binary_v1 = @embedFile("library_v1.otto");

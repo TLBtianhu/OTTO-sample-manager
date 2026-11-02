@@ -1,6 +1,6 @@
 //! 两个不开窗的库文件命令：
 //!
-//!   * `--convert <in.json> <out.otto>`：electron-store JSON → OTTOLIB v1；
+//!   * `--convert <in.json> <out.otto>`：electron-store JSON → OTTOLIB v2；
 //!   * `--library-info <file>`：按 magic 判断格式，打印
 //!     `format=json|otto samples=N groups=M bytes=…`。
 //!
