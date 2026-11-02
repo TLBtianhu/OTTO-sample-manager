@@ -285,7 +285,7 @@ zig\package.ps1 -Version 0.44.0    # zig\dist\ 下出 portable.zip + setup.exe�
 
 Windows NSIS 安装版支持两种更新检查方式：
 
-- 启动时自动联网检查更新
+- 不会启动时联网；只在设置里手动点「检查更新」（或用 `--check-update <url>` 命令行）
 - 在顶部右侧 `⚙` 设置菜单中手动点击 `检查更新`
 
 设置菜单中会显示：
