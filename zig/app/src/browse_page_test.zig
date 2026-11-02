@@ -12,6 +12,7 @@ const core = @import("otto_core");
 const browse = @import("browse.zig");
 const browse_dir = @import("otto_browse_dir");
 const budget_mod = @import("browse_budget.zig");
+const types = @import("browse_types.zig");
 const selection_mod = @import("selection.zig");
 const testing = std.testing;
 
@@ -247,4 +248,31 @@ test "预算：每行字节取两种口径的较大值，只增不减" {
     // 4 MiB 预算、当前 1 MiB、每行 20 B：加 20 万行 = 3.8 MiB → 越过。
     try testing.expect(budget.wouldExceed(1024 * 1024, 20, 200_020));
     try testing.expect(!budget.wouldExceed(1024 * 1024, 20, 100));
+}
+
+test "宪章 90 MiB：10 万行在 90 处拒绝，每行略小则放行" {
+    // 上限本身是 90 MiB（不是 89、也不是 91）。
+    try testing.expectEqual(@as(usize, 90), types.memory_budget_bytes >> 20);
+
+    var budget = budget_mod.Budget{ .baseline_ws = 0, .cap_bytes = types.memory_budget_bytes };
+    // 0.35.0 的实测常驻口径是 ~721 B/行；这里取 1000 B/行，模拟路径更长的目录。
+    budget.per_row = 1000;
+    const ws: usize = 45 * 1024 * 1024;
+    // 45 MiB + 5 万行 × 1000 B + 2 MiB 安全页 = 95.7 MiB → 必须拒绝。
+    try testing.expect(budget.wouldExceed(ws, 50_000, 100_000));
+    // 同样的 10 万行，每行 900 B：45 + 42.9 + 2 = 89.9 MiB → 放行（刚好在 90 以内）。
+    budget.per_row = 900;
+    try testing.expect(!budget.wouldExceed(ws, 50_000, 100_000));
+}
+
+test "宪章 10 万行 ≤ 90 MiB：每行固定字节再多 512 B 就越线" {
+    // 这条是「5 万行 × 你加的字节 = 多少 MiB」的可执行版：把行结构 + id 的
+    // 固定开销乘上 10 万行，和 0.35.0 实测基线 13.44 MiB、2 MiB 安全页一起算。
+    // 下次给 Entry / Sample 加固定字段，这个乘数会自己变大，越线就红。
+    const per_row: usize = @sizeOf(types.Entry) + @sizeOf(core.model.Sample) + types.id_stride;
+    const baseline: usize = 14 * 1024 * 1024;
+    const rows: usize = 100_000;
+    try testing.expect(rows * per_row + baseline + types.memory_safety_bytes <= types.memory_budget_bytes);
+    // 每行固定部分 +512 B（例如路径/身份字段扩宽）就会越过 90 MiB。
+    try testing.expect(rows * (per_row + 512) + baseline + types.memory_safety_bytes > types.memory_budget_bytes);
 }

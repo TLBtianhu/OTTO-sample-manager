@@ -2,6 +2,10 @@
 # (thumbnail isolation on and off), print both breakdown tables, and a
 # before/after summary. See zig\PERF.md for the Chinese report.
 #
+# This is the HIDDEN-window breakdown (41-43 MiB). The hard charter criterion
+# (visible GDI scroll form <= 50 MiB, and l2+preview budget <= 48 MiB) lives in
+# zig\membudget.ps1; health.ps1's "内存" row runs that one.
+#
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\mem.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\mem.ps1 -Release
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\mem.ps1 -NoBuild

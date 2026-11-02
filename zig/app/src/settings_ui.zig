@@ -299,9 +299,9 @@ pub const Panel = struct {
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "缩略图内存预算 (MiB)", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "缩略图内存预算 (MiB，上限 32)", .{ .size = 11, .color = c.theme.muted });
         _ = ui.textField(c, &self.l2_field, .{
-            .placeholder = "64",
+            .placeholder = "32",
             .width = .fill,
             .size = 11,
             .select_all_on_focus = true,
@@ -314,6 +314,8 @@ pub const Panel = struct {
             .size = 11,
             .select_all_on_focus = true,
         });
+
+        ui.text(c, "行内缩略图 + 256px 预览合计 ≤ 48 MiB；超过上限会被夹取并提示", .{ .size = 10, .color = c.theme.muted });
 
         ui.text(c, "关闭面板时自动保存；置顶 / 不透明度 / 预算立即生效", .{ .size = 10, .color = c.theme.muted });
 
@@ -333,10 +335,15 @@ pub const Panel = struct {
 
     fn syncFields(self: *Panel) void {
         self.url_field.set(self.settings.update_url orelse "");
-        var buffer: [16]u8 = undefined;
-        self.l2_field.set(std.fmt.bufPrint(&buffer, "{d}", .{self.settings.l2_budget_mib}) catch "64");
-        self.l3_field.set(std.fmt.bufPrint(&buffer, "{d}", .{self.settings.l3_budget_mib}) catch "256");
+        self.syncBudgetFields();
         self.opacity_percent = settings_store.percentFromAlpha(self.settings.opacity);
+    }
+
+    /// 预算文本框回写**生效值**（夹取之后）。打开面板与夹取之后各调一次。
+    fn syncBudgetFields(self: *Panel) void {
+        var buffer: [16]u8 = undefined;
+        self.l2_field.set(std.fmt.bufPrint(&buffer, "{d}", .{self.settings.l2_budget_mib}) catch "32");
+        self.l3_field.set(std.fmt.bufPrint(&buffer, "{d}", .{self.settings.l3_budget_mib}) catch "256");
     }
 
     /// 滑块动了：写进 `settings.opacity`，并立刻改窗口（不等关闭面板）。
@@ -363,12 +370,14 @@ pub const Panel = struct {
         };
         update.setUrl(self.settings.update_url);
 
-        const l2 = parseBudget(&self.l2_field, self.settings.l2_budget_mib, "缩略图内存预算");
-        const l3 = parseBudget(&self.l3_field, self.settings.l3_budget_mib, "磁盘缓存预算");
+        const l2 = parseBudget(&self.l2_field, self.settings.l2_budget_mib, "缩略图内存预算", settings_store.max_l2_mib);
+        const l3 = parseBudget(&self.l3_field, self.settings.l3_budget_mib, "磁盘缓存预算", settings_store.max_budget_mib);
         if (l2 != self.settings.l2_budget_mib or l3 != self.settings.l3_budget_mib) {
             self.settings.l2_budget_mib = l2;
             self.settings.l3_budget_mib = l3;
             thumbs.setBudgets(self.settings.l2BudgetBytes(), self.settings.l3BudgetBytes());
+            // 夹取过就把夹取后的值写回文本框：用户看到的必须是**生效**的那个数。
+            self.syncBudgetFields();
         }
     }
 
@@ -399,12 +408,21 @@ pub const Panel = struct {
 };
 
 /// 文本框 → MiB。空串表示"不改"；非数字也是不改（并打一行），不静默变成 0。
-fn parseBudget(field: *const ui.TextBuffer, fallback: u32, label: []const u8) u32 {
+/// 超过 `max` 会被**夹取并提示**：宪章「行内缩略图 + 256px 预览 ≤ 48 MiB」的
+/// 执行点就在这里（L2 上限 32 MiB，预览由 `mem_budget` 派生 16 MiB）。
+fn parseBudget(field: *const ui.TextBuffer, fallback: u32, label: []const u8, max: u32) u32 {
     const text = std.mem.trim(u8, field.text(), " \t\r\n");
     if (text.len == 0) return fallback;
     const value = std.fmt.parseInt(u32, text, 10) catch {
         std.debug.print("otto-lite: {s} 不是整数，保留 {d}MiB\n", .{ label, fallback });
         return fallback;
     };
-    return @min(value, settings_store.max_budget_mib);
+    if (value > max) {
+        std.debug.print(
+            "otto-lite: {s} {d}MiB 超过上限 {d}MiB（行内缩略图 + 256px 预览合计 ≤ 48MiB），已按 {d}MiB 生效\n",
+            .{ label, value, max, max },
+        );
+        return max;
+    }
+    return value;
 }

@@ -111,6 +111,10 @@ pub const Options = struct {
     /// L3 缩略图磁盘缓存的预算（字节）。默认 256 MiB；`--cache-budget-kib=<n>`
     /// 按 KiB 调小，用于验证淘汰（正常用户不需要碰它）。
     disk_cache_budget_bytes: u64 = 256 * 1024 * 1024,
+    /// `--l2-budget-mib=<n>`：**基准/探针专用**的 L2 预算覆盖（0 = 用设置面板的值，
+    /// 已被 `mem_budget` 夹到 32 MiB）。存在的理由只有一个：反向证明内存判据
+    /// 真的会红——把预算抬到 128 MiB 必须能让断言失败，否则那条判据是装饰。
+    l2_budget_mib: u32 = 0,
     /// 用户显式给了 `--cache-budget-kib` 吗？设置面板里的 L3 预算只在**没给**
     /// 命令行时生效——显式参数永远优先，和 `--update-url` 覆盖设置里的更新源同理。
     cache_budget_set: bool = false,
