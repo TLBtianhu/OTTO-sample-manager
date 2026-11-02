@@ -28,9 +28,9 @@
 //! 音频的 `open_ms` 现在是**第一版波形**的时间：渐进式预览在 `open` 里只解开头
 //! 1/32，剩下的在后台线程补齐（`audio/progressive.zig`）。无头命令要等它完成再
 //! 打印载荷摘要，否则 `pcm_bytes` / `peaks` 只是前缀——所以音频多一行
-//! `preview: audio_progressive=1 full_ms=...`，`full_ms` 是整段解码 + 峰值 + Player
-//! 都完成的时间。总帧数未知的容器（无 Xing 的 MP3 / Ogg）没有这一行：它们本来就
-//! 走整段解码，`open_ms` 就是完整时间。
+//! `preview: audio_progressive=1 full_ms=...`，`full_ms` 是整段解码 + 峰值完成的
+//! 时间（不再含 Player）。总帧数未知的容器（无 Xing 的 MP3 / Ogg）没有这一行：
+//! 它们走整段解码，`open_ms` 就是完整时间。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -134,7 +134,7 @@ pub fn run(
             // 改动时（尤其 LFE 被丢弃），一行就能看出输出是不是真的接近静音。
             const bounds = peakBounds(session.peaks);
             std.debug.print(
-                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} peak_min={d} peak_max={d} waveform={d}x{d} bytes={d} playable={}\n",
+                "preview: outcome=audio sample_rate={d} channels={d} bits={d} duration_ms={d} pcm_bytes={d} peaks={d} peak_min={d} peak_max={d} waveform={d}x{d} bytes={d} playable={} player_created={}\n",
                 .{
                     session.sample_rate,
                     session.channels,
@@ -147,6 +147,7 @@ pub fn run(
                     session.waveform.width,
                     session.waveform.height,
                     session.waveform.byteLen(),
+                    session.pcm.len != 0,
                     session.player != null,
                 },
             );

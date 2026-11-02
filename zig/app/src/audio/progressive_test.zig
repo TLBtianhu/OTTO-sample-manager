@@ -13,6 +13,7 @@ const progressive = @import("progressive.zig");
 const decode_mod = @import("decode.zig");
 const peaks_mod = @import("peaks.zig");
 const waveform = @import("waveform.zig");
+const player = @import("player.zig");
 
 const testing = std.testing;
 const io = testing.io;
@@ -75,6 +76,17 @@ fn peakDiff(a: peaks_mod.Peaks, b: peaks_mod.Peaks) i32 {
     return worst;
 }
 
+fn noEndpoint(
+    _: std.mem.Allocator,
+    _: []const u8,
+    _: u32,
+    _: u16,
+    _: u16,
+    _: bool,
+) player.Error!*player.Player {
+    return error.NoAudioEndpoint;
+}
+
 test "渐进峰值与整段一次算逐桶相等（真 WAV / 真 MP3+Xing）" {
     if (!ffmpegAvailable()) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
@@ -87,7 +99,7 @@ test "渐进峰值与整段一次算逐桶相等（真 WAV / 真 MP3+Xing）" {
         .{ .name = "progressive_41s.mp3", .seconds = 41, .codec = &.{ "-c:a", "libmp3lame", "-b:a", "128k" } },
     };
 
-    for (cases) |case| {
+    for (cases, 0..) |case, case_index| {
         const path = try encode(&tmp, case.name, case.seconds, case.codec);
         defer testing.allocator.free(path);
 
@@ -97,6 +109,12 @@ test "渐进峰值与整段一次算逐桶相等（真 WAV / 真 MP3+Xing）" {
         // 第一版波形在 `open` 返回时就已经有可画的列（不是空白等后台）。
         const first_columns = started.session.waveform_version;
         try testing.expect(first_columns > 0);
+        if (case_index == 1) {
+            // 渐进解码中就按播放：adopt 后才建 Player；注入无端点，证明波形不受影响。
+            started.session.lazy.factory = noEndpoint;
+            try started.session.startPlayback();
+            try testing.expect(started.session.isStartingAudio());
+        }
         // 按 UI 的节拍推进（`pump`），而不是直接 wait：这会真实经过"全部桶定稿、
         // Player 还在初始化"的那几十毫秒——那段窗口里曾经把位图清空过（见
         // `finalize` 的注释），最后同一版本的最终像素就再也画不出来。
@@ -116,6 +134,17 @@ test "渐进峰值与整段一次算逐桶相等（真 WAV / 真 MP3+Xing）" {
         }
         _ = started.session.pump();
         try testing.expect(!started.session.isDecoding());
+        if (case_index == 1) {
+            var spins: usize = 0;
+            while (started.session.isStartingAudio() and spins < 1000) : (spins += 1) {
+                _ = started.session.pump();
+                std.Thread.yield() catch {};
+            }
+            try testing.expect(spins < 1000);
+            try testing.expectEqual(error.NoAudioEndpoint, started.session.audioError().?);
+        }
+        // finish 也只交 PCM/峰值；Player 只在有播放意图时尝试创建，失败不毁波形。
+        try testing.expect(started.session.player == null);
 
         // 最终位图必须与"从最终 peaks 重新渲染"逐字节相同。
         const expected_bitmap = try waveform.render(

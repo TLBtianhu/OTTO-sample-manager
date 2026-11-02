@@ -5,9 +5,8 @@
 //!
 //!   1. 算波形峰值（`peaks.compute`，512 桶 min/max）；
 //!   2. 把峰值渲染成 BGRA 波形位图（`waveform.render`，240×56）；
-//!   3. 建播放会话（`player.Player.create`，WASAPI 设备 + 播放线程）；
-//!   4. 把 PCM / 采样率 / 声道 / 位深 / 时长装进 `preview.AudioSession`，并把
-//!      PCM 的所有权转移给它。
+//!   3. 把 PCM / 采样率 / 声道 / 位深 / 时长装进 `preview.AudioSession`，并把
+//!      PCM 的所有权转移给它；Player 留到第一次播放再建。
 //!
 //! 如果每个 provider 复制一份这段代码，几份就会在"桶数、波形尺寸、失败时谁释放
 //! PCM、时长取整"上慢慢漂移——而这些恰好是 `--preview` 输出的可比性所在。所以
@@ -28,6 +27,7 @@ const preview = @import("../preview.zig");
 const peaks_mod = @import("peaks.zig");
 const pcm = @import("pcm.zig");
 const player = @import("player.zig");
+const lazy_player = @import("lazy_player.zig");
 const waveform = @import("waveform.zig");
 
 /// 波形位图尺寸（像素）。`waveform.default_*` 是唯一来源，provider 不另写数字。
@@ -41,8 +41,8 @@ pub const Decoded = pcm.Decoded;
 /// 字节含义。zig-audio 与 MF 的生产路径都只交 `.pcm` + 16 位；类型留在 `pcm.zig`。
 pub const SampleFormat = pcm.SampleFormat;
 
-/// 算峰值 → 渲染波形 → 建播放器 → 装会话。`player.Error` 原样上抛，调用方按
-/// 自己的语境把它映射成 `none.*`（音频 provider 与 MF provider 日志文案不同）。
+/// 算峰值 → 渲染波形 → 装会话。默认不建 Player，首次播放的具名设备错误由
+/// `AudioSession.play` 原样上抛；`lazy_player.enabled = false` 仅用于反向对照。
 ///
 /// 成功时 `decoded.pcm` 的所有权归会话；失败时仍归 `decoded`。
 pub fn build(
@@ -73,23 +73,28 @@ pub fn build(
     const wave_ms = @as(f64, @floatFromInt(wave_started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
     const player_started = std.Io.Clock.Timestamp.now(io, .awake);
 
-    const created = try player.Player.create(
-        allocator,
-        decoded.pcm,
-        decoded.sample_rate,
-        decoded.channels,
-        decoded.bits,
-        decoded.format == .float,
-    );
+    var created: ?*player.Player = null;
+    if (!lazy_player.enabled) {
+        created = try player.Player.create(
+            allocator,
+            decoded.pcm,
+            decoded.sample_rate,
+            decoded.channels,
+            decoded.bits,
+            decoded.format == .float,
+        );
+    }
     const player_ms = @as(f64, @floatFromInt(player_started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
     const session: preview.AudioSession = .{
         .pcm = decoded.pcm,
         .sample_rate = decoded.sample_rate,
         .channels = decoded.channels,
         .bits = decoded.bits,
+        .sample_float = decoded.format == .float,
         .duration_ms = decoded.duration_ms,
         .position_ms = 0,
         .player = created,
+        .lazy = .{ .allocator = allocator, .state = if (created != null) .ready else .idle },
         .peaks = peaks,
         .waveform = bitmap,
         // 非渐进会话的第一版就是最终版：完成列数 = 整条宽度（空 peaks 为 0）。
@@ -97,8 +102,8 @@ pub fn build(
         .waveform_version = waveform.completeColumns(peaks.len(), bitmap.width, peaks.len()),
     };
     std.debug.print(
-        "otto-lite: audio-phase peaks_ms={d:.2} waveform_ms={d:.2} player_ms={d:.2}\n",
-        .{ peaks_ms, wave_ms, player_ms },
+        "otto-lite: audio-phase peaks_ms={d:.2} waveform_ms={d:.2} player_ms={d:.2} player_deferred={}\n",
+        .{ peaks_ms, wave_ms, player_ms, lazy_player.enabled },
     );
     // 所有权已经交给会话；`Decoded.deinit` 之后只释放空切片。
     decoded.pcm = &.{};

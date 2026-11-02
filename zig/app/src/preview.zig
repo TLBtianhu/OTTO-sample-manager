@@ -1,24 +1,8 @@
-//! 预览层的契约与注册表（ROADMAP M1：一个注册表，不是一堆 if）。
+//! 预览契约与注册表：UI 只认识 `Outcome`，不认识具体媒体 provider。
 //!
-//! 一句话：**预览不是一堆 if-else，是一张注册表**。试听、试看、视频抽帧、三维预览
-//! 是同一层级的 provider，共用这一份 `Outcome`；UI 只认识 `image / audio / frames /
-//! text / none` 五个分支，不认识"音频""视频""三维"。新增一种媒体 = 新增一个
-//! provider，`main.zig` 与视图零改动（本文件的验收就是这句话）。
+//! ## 契约与四态
 //!
-//! ## 契约的形状（与 ROADMAP 的差异）
-//!
-//! ROADMAP 写的是示意代码，落地时必须补三样东西，否则编译不过、也说不清内存：
-//!
-//!   1. **具体的派生类型**：`Bitmap` / `AudioSession` / `FrameSource` / `Reason`
-//!      在 ROADMAP 里只是名字，这里给它们形状。`Bitmap` 与 `ports/thumb.Thumbnail`
-//!      同形（BGRA8、预乘 alpha、顶行在前、`stride == width * 4`），这样缩略图
-//!      provider 不需要转换就能把像素交出来。
-//!   2. **函数指针写成 `*const fn`**：ROADMAP 的 `supports: fn (...)` 是示例简写；
-//!      Zig 里能存进结构体的运行时字段的是函数指针。签名一字未改。
-//!   3. **`Error` 与 `Outcome.deinit`**：ROADMAP 写了 `Error!Outcome` 却没定义
-//!      `Error`。这里把它收成一个 `OutOfMemory`——**"文件读不出来"不是错误，是
-//!      `none.*` 的一次作答**（谢绝或认领后失败）；错误只在"连 outcome 都构造
-//!      不出来"时出现。
+//! `Outcome` 只有五个分支；`supports` 是廉价声明，真正能力由 `open` 回答。
 //!
 //! ## 谢绝（decline）与四态：一张统一的映射表
 //!
@@ -57,13 +41,10 @@
 //!   * `Outcome` 的载荷由**调用方传进 `open` 的那个 allocator** 分配，
 //!     并且必须用**同一个 allocator** 调 `Outcome.deinit` 释放；
 //!   * `image.pixels` 与 `text` 归 `Outcome` 所有；
-//!   * `audio` 拥有解码后的 PCM（`pcm`，用同一个 allocator 释放）、解码时顺带
-//!     算出的波形峰值（`peaks`）与渲染好的位图（`waveform`），以及一个
-//!     `audio/player.zig` 的 `Player`（设备句柄 + 播放线程）。`AudioSession.deinit`
-//!     负责停播、join、释放全部四样；`Outcome.deinit` 已经带 allocator，调用方不用改；
-//!   * `audio.progress`（非 null 时）指向后台渐进式解码器：它**临时**拥有还没交出来
-//!     的 PCM / 峰值 / Player，`pump`/`waitComplete` 完成时把所有权移进会话，
-//!     `deinit` 先 cancel（join 线程）再 destroy。契约层只认识 `AudioProgress` 的
+//!   * `audio` 拥有 PCM、峰值与波形；`Player` 只在第一次播放时按需创建。
+//!     `AudioSession.deinit` 停播、join 并释放它们（含尚未完成的创建线程）；
+//!   * `audio.progress` 临时拥有还没交出的 PCM / 峰值，完成时移进会话；
+//!     `deinit` 先 cancel（join 线程）再 destroy。契约层只认识 `AudioProgress`
 //!     vtable，不认识 `zig_audio` 或线程实现（实现见 `audio/progressive.zig`）；
 //!   * `frames` 本阶段仍是占位，不持有任何系统句柄或内存；
 //!     `Outcome.deinit` 仍会走它的 `deinit`，将来接上会话时不需要改调用方；
@@ -98,6 +79,7 @@
 const std = @import("std");
 const core = @import("otto_core");
 const audio_player = @import("audio/player.zig");
+const lazy_player = @import("audio/lazy_player.zig");
 const peaks_mod = @import("audio/peaks.zig");
 
 /// provider 声明的"我产出的载荷是什么"。注意：这是 **provider 的属性**，不是
@@ -186,8 +168,8 @@ pub const AudioProgress = struct {
         decodedBytes: *const fn (ctx: *anyopaque) usize,
         /// 还在解吗？`false` = 已结束（成功/失败/取消都算结束）。
         decoding: *const fn (ctx: *anyopaque) bool,
-        /// 用户按了播放但 Player 还没建好：记下意图，完成时由 `pump` 补播。
-        requestPlay: *const fn (ctx: *anyopaque) void,
+        /// 记录/撤销“解码完成后播放”的意图；真正建 Player 仍由会话按需发起。
+        requestPlay: *const fn (ctx: *anyopaque, wanted: bool) void,
     };
 };
 
@@ -214,9 +196,12 @@ pub const AudioSession = struct {
     sample_rate: u32,
     channels: u16,
     bits: u16,
+    sample_float: bool = false,
     duration_ms: u64,
     position_ms: u64 = 0,
     player: ?*audio_player.Player = null,
+    /// 按需创建的状态/工作线程。实际会话在装配时写入 allocator；测试可替换 factory。
+    lazy: lazy_player.Lazy = .{},
     /// 波形峰值，长度 = 桶数（`audio/peaks.zig` 的 `default_buckets`）；空音频为 0。
     peaks: peaks_mod.Peaks = .{},
     /// 由 `peaks` 渲染的 BGRA 位图（`audio/waveform.zig`）。视图把它当图片画，
@@ -229,18 +214,96 @@ pub const AudioSession = struct {
     /// 非 null = 后台还在解码：峰值会继续长出来，播放要等 Player 建好。
     progress: ?AudioProgress = null,
 
+    /// 同步播放入口（`--play-test` / bench）：首次调用同步建 Player，设备错误原样上抛。
     pub fn play(self: *AudioSession) !void {
-        if (self.player) |player| return player.play();
-        // Player 还没建好（渐进式解码中）：记下意图，完成时补播，不打扰用户。
-        if (self.progress) |progress| {
-            progress.vtable.requestPlay(progress.ctx);
+        if (self.player) |player| return self.playExisting(player);
+        if (self.lazy.starter != null) {
+            self.lazy.cancelled = false;
+            _ = try self.finishStart(true);
             return;
         }
-        return error.NoAudioPlayer;
+        if (self.pcm.len == 0) {
+            if (self.progress) |progress| {
+                self.lazy.state = .starting;
+                progress.vtable.requestPlay(progress.ctx, true);
+                return;
+            }
+            return error.NoAudioPlayer;
+        }
+        if (self.lazy.allocator == null) return error.NoAudioPlayer;
+        const created = try self.lazy.createSync(
+            self.pcm,
+            self.sample_rate,
+            self.channels,
+            self.bits,
+            self.sample_float,
+        );
+        try self.adoptCreated(created);
+    }
+
+    /// UI 播放入口：WASAPI 在后台创建，状态立即可见，完成由 `pump` 接手并起播。
+    pub fn startPlayback(self: *AudioSession) !void {
+        if (self.player) |player| return self.playExisting(player);
+        if (self.lazy.starter != null) {
+            self.lazy.cancelled = false;
+            return;
+        }
+        if (self.pcm.len == 0) {
+            const progress = self.progress orelse return error.NoAudioPlayer;
+            self.lazy.state = .starting;
+            self.lazy.failure = null;
+            self.lazy.cancelled = false;
+            progress.vtable.requestPlay(progress.ctx, true);
+            return;
+        }
+        if (self.lazy.allocator == null) return error.NoAudioPlayer;
+        try self.lazy.startAsync(self.pcm, self.sample_rate, self.channels, self.bits, self.sample_float);
+    }
+
+    fn playExisting(self: *AudioSession, player: *audio_player.Player) audio_player.Error!void {
+        try player.play();
+        self.lazy.ready();
+    }
+
+    fn adoptCreated(self: *AudioSession, created: *audio_player.Player) audio_player.Error!void {
+        self.player = created;
+        self.playCreated(created) catch |err| {
+            self.lazy.fail(err);
+            return err;
+        };
+    }
+
+    fn playCreated(self: *AudioSession, created: *audio_player.Player) audio_player.Error!void {
+        // 打开后、首次播放前点击过波形：把暂存的播放头交给新建 Player。
+        if (self.position_ms > 0) try created.seek(self.position_ms);
+        try created.play();
+        self.lazy.ready();
+    }
+
+    fn finishStart(self: *AudioSession, block: bool) audio_player.Error!bool {
+        const created = (try self.lazy.collect(block)) orelse return false;
+        if (self.lazy.cancelled) {
+            created.deinit();
+            self.lazy.state = .idle;
+            self.lazy.failure = null;
+            return true;
+        }
+        try self.adoptCreated(created);
+        return true;
+    }
+
+    pub fn isStartingAudio(self: *const AudioSession) bool {
+        return self.lazy.state == .starting;
+    }
+
+    pub fn audioError(self: *const AudioSession) ?audio_player.Error {
+        return self.lazy.failure;
     }
 
     /// 停播；位置保留在最后播到的地方（不是归零）。
     pub fn stop(self: *AudioSession) void {
+        self.lazy.cancelled = true;
+        if (self.progress) |progress| progress.vtable.requestPlay(progress.ctx, false);
         if (self.player) |player| player.stop();
         self.position_ms = self.positionMs();
     }
@@ -276,8 +339,18 @@ pub const AudioSession = struct {
     /// UI 线程每拍调一次：有新完成的波形就重画一版，全部完成时接手最终结果。
     /// 返回 true = 画面变了，调用方应重画。没有后台解码时是无操作。
     pub fn pump(self: *AudioSession) bool {
-        const progress = self.progress orelse return false;
-        return progress.vtable.pump(progress.ctx, self);
+        var changed = false;
+        if (self.progress) |progress| {
+            changed = progress.vtable.pump(progress.ctx, self);
+        }
+        const player_changed = self.finishStart(false) catch |err| {
+            std.debug.print(
+                "otto-lite: 音频启动失败（{s} hresult=0x{x:0>8}）\n",
+                .{ @errorName(err), @as(u32, @bitCast(audio_player.lastHresult())) },
+            );
+            return true;
+        };
+        return changed or player_changed;
     }
 
     /// 等后台解码结束并接手结果（无头命令 / 测试；正常 UI 用 `pump`）。
@@ -315,6 +388,8 @@ pub const AudioSession = struct {
             progress.vtable.destroy(progress.ctx, allocator);
             self.progress = null;
         }
+        // Player 创建工作线程借用 PCM，必须先 join，再释放 PCM/波形。
+        self.lazy.deinit();
         if (self.player) |player| {
             player.stop();
             player.deinit();
