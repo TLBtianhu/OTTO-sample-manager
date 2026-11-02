@@ -104,10 +104,13 @@ pub fn build(b: *std.Build) void {
     app_module.linkSystemLibrary("mfreadwrite", .{});
     // 启动下载好的 NSIS 安装包：ShellExecuteW（只在这一处，且绝不弹我们的窗口）。
     app_module.linkSystemLibrary("shell32", .{});
+    // 启动致命错误的最后可见出口：startup_dx.zig 手写 MessageBoxW。
+    app_module.linkSystemLibrary("user32", .{});
     const exe = b.addExecutable(.{
         .name = "otto-lite",
         .root_module = app_module,
     });
+    addWin32Resources(b, app_module, app_version, "otto-lite.exe");
     // Windows 子系统（PE Subsystem = 2）：双击/开始菜单启动时由系统直接建窗口，
     // 不会先分配控制台、也就不会闪一个黑框。Zig 0.17 的 `addExecutable` options
     // 里没有这个字段，它挂在 Compile step 上（会变成编译器的 `--subsystem`）。
@@ -128,6 +131,8 @@ pub fn build(b: *std.Build) void {
     // 这里只把它拷进同一个 `zig-out/bin`。**一次 `zig build` 出两个 exe**，
     // 而不是让用户/打包脚本自己拼——helper 与 otto-lite 必须是同一次构建的产物。
     const thumb_host_exe = thumb_host_dep.artifact("otto-thumb-host");
+    // helper 也由这个构建图挂资源：版本仍只有本包 build.zig.zon 一个来源。
+    addWin32Resources(b, thumb_host_exe.root_module, app_version, "otto-thumb-host.exe");
     const install_thumb_host = b.addInstallBinFile(thumb_host_exe.getEmittedBin(), "otto-thumb-host.exe");
     b.getInstallStep().dependOn(&install_thumb_host.step);
 
@@ -231,4 +236,64 @@ fn manifestVersion(b: *std.Build) []const u8 {
         diagnostics.fatal(manifest_path);
     };
     return b.dupe(parsed.version);
+}
+
+/// Zig 0.17 自带 resinator：把生成的 .rc 编进 PE，不需要 rc.exe / C / @cImport。
+/// 图标与版本都作为模块的 Win32 resource 输入，主程序与 helper 共用这一份模板。
+fn addWin32Resources(
+    b: *std.Build,
+    module: *std.Build.Module,
+    version: []const u8,
+    original_filename: []const u8,
+) void {
+    // resinator 0.17.0 的绝对路径分支会打开后漏掉 return；用相对构建根的
+    // 路径（编译器以本包为 build-root），并在缓存中正确登记这条依赖。
+    const icon = "../../resources/icon.ico";
+
+    var parts = std.mem.splitScalar(u8, version, '.');
+    const major = parts.next() orelse @panic("版本号缺 major");
+    const minor = parts.next() orelse @panic("版本号缺 minor");
+    const patch = parts.next() orelse @panic("版本号缺 patch");
+    if (parts.next() != null) @panic("资源版本必须是 x.y.z");
+    for ([_][]const u8{ major, minor, patch }) |part| {
+        if (part.len == 0) @panic("资源版本不能有空段");
+        for (part) |ch| if (!std.ascii.isDigit(ch)) @panic("资源版本只能是数字");
+    }
+
+    const source = b.fmt(
+        \\1 ICON "{s}"
+        \\1 VERSIONINFO
+        \\ FILEVERSION {s},{s},{s},0
+        \\ PRODUCTVERSION {s},{s},{s},0
+        \\ FILEFLAGSMASK 0x3fL
+        \\ FILEFLAGS 0x0L
+        \\ FILEOS 0x40004L
+        \\ FILETYPE 0x1L
+        \\ FILESUBTYPE 0x0L
+        \\BEGIN
+        \\  BLOCK "StringFileInfo"
+        \\  BEGIN
+        \\    BLOCK "040904b0"
+        \\    BEGIN
+        \\      VALUE "CompanyName", "CandaceZcc"
+        \\      VALUE "FileDescription", "OTTO Sample Manager"
+        \\      VALUE "FileVersion", "{s}"
+        \\      VALUE "InternalName", "OTTO Lite"
+        \\      VALUE "LegalCopyright", "MIT License"
+        \\      VALUE "OriginalFilename", "{s}"
+        \\      VALUE "ProductName", "OTTO Sample Manager"
+        \\      VALUE "ProductVersion", "{s}"
+        \\    END
+        \\  END
+        \\  BLOCK "VarFileInfo"
+        \\  BEGIN
+        \\    VALUE "Translation", 0x409, 1200
+        \\  END
+        \\END
+        \\
+    , .{ icon, major, minor, patch, major, minor, patch, version, original_filename, version });
+    const generated = b.addWriteFiles();
+    module.addWin32ResourceFile(.{
+        .file = generated.add(b.fmt("{s}.rc", .{original_filename}), source),
+    });
 }

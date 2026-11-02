@@ -36,6 +36,7 @@ const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
 const preview_providers = @import("providers/root.zig");
 const settings_store = @import("settings_store.zig");
+const startup_dx = @import("startup_dx.zig");
 const thumbs_mod = @import("thumbs.zig");
 const trace = @import("trace.zig");
 
@@ -118,16 +119,12 @@ const LibraryLoad = struct {
         if (self.thread == null) loadMain(&self.job);
     }
 
-    /// 等线程结束，并把结果落到 `library`。失败按"打开库失败"退出 1（与改动前
-    /// 完全相同的一句话、同一个退出码）。
-    fn adopt(self: *LibraryLoad) void {
+    /// 等线程结束，并把结果落到 `library`。失败交回顶层：GUI 不再只写一条
+    /// 没人看得见的 stderr 后直接 `exit`，而是由 startup_dx 弹窗并记日志。
+    fn adopt(self: *LibraryLoad) !void {
         self.join();
         const job = &self.job;
-        if (job.failure) |err| {
-            // 存在但读不了 / 损坏：一行具名错误 + 退出 1（"不存在"已在 open 里变成空库）。
-            std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ job.path, @errorName(err) });
-            std.process.exit(1);
-        }
+        if (job.failure) |err| return err;
         const opened = job.opened orelse return;
         job.opened = null;
         // 文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态。
@@ -241,7 +238,8 @@ pub fn boot(
     errdefer load.abandon();
     errdefer if (browse_session) |session| session.deinit();
     if (!overlap) {
-        load.adopt();
+        startup_dx.mark(.read_library);
+        try load.adopt();
         trace.mark("setup.library");
         probe.mark("library", .{});
     }
@@ -262,8 +260,10 @@ pub fn boot(
     // 设置：三种形态都写各自的数据目录（dev 在 %LOCALAPPDATA%\OTTO\dev），
     // 编译产物里不落任何运行数据；读不到 / 坏了都用默认值（见 settings_store）。
     // 浏览模式**只读**：路径照旧解析（这样主题/不透明度仍能读），但写入口关闭。
+    startup_dx.mark(.read_settings);
     const settings_path = settings_store.resolvePath(allocator, init.io) catch null;
     const settings = settings_store.load(init.gpa, init.io, settings_path);
+    startup_dx.mark(.read_library);
 
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
     // 运行形态决定（dev 在 %LOCALAPPDATA%\OTTO\dev\cache，不写工程目录、不写源目录）。
@@ -299,6 +299,7 @@ pub fn boot(
     // 字体索引写进各自的数据目录；dev 也在 %LOCALAPPDATA%，不在 zig-out 里。
     // 上屏：默认 GDI（`--mem-probe` 实测比 D3D11 翻转交换链少 29 MiB 常驻、
     // present 便宜一个数量级）；`--d3d` 回到旧的 D3D 路径（要 vsync 时用）。
+    startup_dx.mark(.create_window);
     const app = try nanoui.App.create(init, .{ .name = "OTTO Lite", .fonts_dir = mode_mod.systemFontDir(), .font_cache = mode_mod.fontCachePath(allocator, init.io) catch null, .gdi = !options.d3d });
     trace.mark("setup.app");
     // 验收探针：快照默认不开真实窗口，但置顶断言需要真 HWND；仍然 hidden。
@@ -315,7 +316,8 @@ pub fn boot(
     // join 之后才建 `Live`（它要读样本），所以列表从第一帧起就是完整内容——
     // 不存在"先画空列表再跳变"。
     if (overlap) {
-        load.adopt();
+        startup_dx.mark(.read_library);
+        try load.adopt();
         trace.markf("setup.library", "worker_ms={d:.2} overlapped=1", .{load.job.ms});
         live_store = try makeLive(init, library, root, false, options.watch_dir != null);
         trace.mark("setup.live");
