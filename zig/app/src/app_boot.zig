@@ -29,6 +29,7 @@ const core = @import("otto_core");
 const browse_mod = @import("browse.zig");
 const library_io = @import("library_io.zig");
 const live_mod = @import("live.zig");
+const mem_budget = @import("mem_budget.zig");
 const mem_probe = @import("mem_probe.zig");
 const mode_mod = @import("mode.zig");
 const options_mod = @import("options.zig");
@@ -266,6 +267,13 @@ pub fn boot(
 
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
     // 运行形态决定（dev 在 %LOCALAPPDATA%\OTTO\dev\cache，不写工程目录、不写源目录）。
+    //
+    // L2 预算：设置面板的值（已被 `settings_store` 夹到 32 MiB）或基准/探针的
+    // `--l2-budget-mib` 覆盖。预览一档永远按同一政策从 L2 派生，合计 ≤ 48 MiB。
+    const l2_bytes = if (options.l2_budget_mib > 0)
+        @as(usize, options.l2_budget_mib) * 1024 * 1024
+    else
+        settings.l2BudgetBytes();
     const thumbs = try thumbs_mod.Thumbs.init(init.gpa, init.io, .{
         .isolation = !options.no_isolation,
         .no_shell_preview = options.no_shell_preview,
@@ -273,7 +281,8 @@ pub fn boot(
         .prefetch = !options.no_prefetch,
         .disk_cache_dir = mode_mod.thumbsCacheDir(allocator, init.io) catch null,
         .disk_cache_budget = if (options.cache_budget_set) options.disk_cache_budget_bytes else settings.l3BudgetBytes(),
-        .budget_bytes = settings.l2BudgetBytes(),
+        .budget_bytes = l2_bytes,
+        .preview_budget_bytes = mem_budget.l2Bytes(mem_budget.previewMib(l2_bytes / (1024 * 1024))),
     });
     errdefer thumbs.deinit();
     // 预览条也用 `init.gpa`（工作线程分配位图/文本）。注册表只有一张

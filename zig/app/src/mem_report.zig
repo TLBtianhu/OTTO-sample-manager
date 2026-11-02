@@ -79,6 +79,109 @@ extern "kernel32" fn K32EnumProcessModules(process: bench_win.HANDLE, modules: ?
 extern "kernel32" fn K32GetModuleInformation(process: bench_win.HANDLE, module: usize, info: *ModuleInfo, cb: u32) callconv(.winapi) bench_win.BOOL;
 extern "kernel32" fn K32GetModuleBaseNameW(process: bench_win.HANDLE, module: usize, name: [*]u16, size: u32) callconv(.winapi) u32;
 extern "kernel32" fn GetCurrentProcess() bench_win.HANDLE;
+extern "kernel32" fn K32QueryWorkingSet(process: bench_win.HANDLE, pv: ?*anyopaque, cb: u32) callconv(.winapi) bench_win.BOOL;
+extern "kernel32" fn VirtualQuery(addr: ?*const anyopaque, buf: *MemBasic, len: usize) callconv(.winapi) usize;
+
+/// `MEMORY_BASIC_INFORMATION` on Win64 (48 bytes: 8+8+4+2+2+8+4+4+4).
+pub const MemBasic = extern struct {
+    base_address: usize = 0,
+    allocation_base: usize = 0,
+    allocation_protect: u32 = 0,
+    partition_id: u16 = 0,
+    pad: u16 = 0,
+    region_size: usize = 0,
+    state: u32 = 0,
+    protect: u32 = 0,
+    typ: u32 = 0,
+};
+
+const mem_image: u32 = 0x1000000;
+const mem_mapped: u32 = 0x40000;
+const mem_private: u32 = 0x20000;
+
+/// 把 `VirtualQuery` 包一层：分解表（`mem_breakdown.zig`）按线程栈区间走同一条路。
+pub fn virtualQuery(address: usize, info: *MemBasic) usize {
+    return VirtualQuery(@ptrFromInt(address), info, @sizeOf(MemBasic));
+}
+
+/// 驻留页表：`K32QueryWorkingSet` 给出每一页（低 12 位是标志，地址是高位），按地址
+/// 升序排好，调用方负责 `allocator.free`。
+///
+/// 为什么不用 `K32QueryWorkingSetEx`：本机（Win11 26200）它对自身进程返回成功却
+/// 一个条目都不写（`K32QueryWorkingSet` 同一进程能拿到几千条），所以用后者。
+pub fn residentPages(allocator: std.mem.Allocator) ?[]WsEntry {
+    const ws = if (bench_win.resident()) |r| r.working_set else return null;
+    var words = allocator.alloc(usize, ws / page_bytes + 8192) catch return null;
+    defer allocator.free(words);
+    while (true) {
+        @memset(words, 0);
+        const bytes = words.len * @sizeOf(usize);
+        if (K32QueryWorkingSet(GetCurrentProcess(), @ptrCast(words.ptr), @intCast(bytes)) != 0) break;
+        if (words.len > (1 << 23)) return null;
+        const bigger = allocator.alloc(usize, words.len * 2) catch return null;
+        allocator.free(words);
+        words = bigger;
+    }
+    // words[0] 是条目数，之后每个 usize 是一页（VirtualPage << 12 | flags）。
+    const count = @min(words[0], words.len - 1);
+    const entries = allocator.alloc(WsEntry, count) catch return null;
+    errdefer allocator.free(entries);
+    for (words[1 .. 1 + count], 0..) |word, i| {
+        entries[i] = .{ .address = word & ~@as(usize, page_bytes - 1) };
+    }
+    std.mem.sort(WsEntry, entries, {}, struct {
+        fn lt(_: void, a: WsEntry, b: WsEntry) bool {
+            return a.address < b.address;
+        }
+    }.lt);
+    return entries;
+}
+
+/// 驻留页按 `VirtualQuery` 的类型分账。页地址升序排一遍，同一区域的 `VirtualQuery`
+/// 只做一次（几十次系统调用，不是每页一次）。三者和 ≈ `WorkingSetSize`。
+pub fn splitPages(pages: []const WsEntry) Split {
+    var split: Split = .{};
+    var region_end: usize = 0;
+    var region_type: u32 = 0;
+    for (pages) |entry| {
+        if (entry.address == 0) continue;
+        if (entry.address >= region_end) {
+            var info = std.mem.zeroes(MemBasic);
+            if (VirtualQuery(@ptrFromInt(entry.address), &info, @sizeOf(MemBasic)) == 0) continue;
+            region_end = info.base_address + info.region_size;
+            region_type = info.typ;
+        }
+        switch (region_type) {
+            mem_image => split.image += page_bytes,
+            mem_mapped => split.mapped += page_bytes,
+            mem_private => split.private += page_bytes,
+            else => {},
+        }
+    }
+    return split;
+}
+
+/// 驻留页里落在**已加载模块区间**内的字节数。`reportModules` 按模块列名字，
+/// 内存分解只要总数（模块代码是不可压缩的下限，不是我们能省的）。
+pub fn modulesResident(pages: []const WsEntry) usize {
+    const allocator = std.heap.page_allocator;
+    var needed: u32 = 0;
+    if (K32EnumProcessModules(GetCurrentProcess(), null, 0, &needed) == 0 or needed == 0) return 0;
+    const count = needed / @sizeOf(usize);
+    const modules = allocator.alloc(usize, count) catch return 0;
+    defer allocator.free(modules);
+    if (K32EnumProcessModules(GetCurrentProcess(), modules.ptr, needed, &needed) == 0) return 0;
+    var total: usize = 0;
+    for (modules) |m| {
+        var info = std.mem.zeroes(ModuleInfo);
+        if (K32GetModuleInformation(GetCurrentProcess(), m, &info, @sizeOf(ModuleInfo)) == 0) continue;
+        const end = info.base + info.size_of_image;
+        for (pages) |p| {
+            if (p.address >= info.base and p.address < end) total += page_bytes;
+        }
+    }
+    return total;
+}
 
 /// 映像页到底是谁的：整个进程的驻留页表按模块区间数一遍，排前 10。这一行回答
 /// 「不可压缩的下限里，DLL 代码占多少、我们的 exe 占多少」。

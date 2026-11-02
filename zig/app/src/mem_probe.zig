@@ -58,23 +58,6 @@ const MSG = extern struct {
 /// flags, masked off before use). 类型定义在报表那边（与 `reportModules` 共用）。
 const WsEntry = mem_report.WsEntry;
 
-/// `MEMORY_BASIC_INFORMATION` on Win64 (48 bytes: 8+8+4+2+2+8+4+4+4).
-const MemBasic = extern struct {
-    base_address: usize = 0,
-    allocation_base: usize = 0,
-    allocation_protect: u32 = 0,
-    partition_id: u16 = 0,
-    pad: u16 = 0,
-    region_size: usize = 0,
-    state: u32 = 0,
-    protect: u32 = 0,
-    typ: u32 = 0,
-};
-
-const mem_image: u32 = 0x1000000;
-const mem_mapped: u32 = 0x40000;
-const mem_private: u32 = 0x20000;
-
 extern "user32" fn SendMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) callconv(.winapi) isize;
 extern "user32" fn GetDC(hwnd: ?HWND) callconv(.winapi) ?*anyopaque;
 extern "user32" fn ReleaseDC(hwnd: ?HWND, dc: *anyopaque) callconv(.winapi) i32;
@@ -107,9 +90,6 @@ const BitmapInfo = extern struct {
 extern "user32" fn PeekMessageW(msg: *MSG, hwnd: ?HWND, min: u32, max: u32, remove: u32) callconv(.winapi) i32;
 extern "user32" fn TranslateMessage(msg: *const MSG) callconv(.winapi) i32;
 extern "user32" fn DispatchMessageW(msg: *const MSG) callconv(.winapi) isize;
-extern "kernel32" fn K32QueryWorkingSet(process: bench_win.HANDLE, pv: ?*anyopaque, cb: u32) callconv(.winapi) bench_win.BOOL;
-extern "kernel32" fn VirtualQuery(addr: ?*const anyopaque, buf: *MemBasic, len: usize) callconv(.winapi) usize;
-extern "kernel32" fn GetCurrentProcess() bench_win.HANDLE;
 extern "kernel32" fn GetCurrentProcessId() u32;
 extern "kernel32" fn CreateToolhelp32Snapshot(flags: u32, pid: u32) callconv(.winapi) usize;
 extern "kernel32" fn Thread32First(snap: usize, entry: *ThreadEntry) callconv(.winapi) bench_win.BOOL;
@@ -189,7 +169,7 @@ pub const Probe = struct {
         self.mark("idle", ctx);
 
         mem_report.table(self.marks[0..self.len]);
-        if (residentPages(std.heap.page_allocator)) |pages| {
+        if (mem_report.residentPages(std.heap.page_allocator)) |pages| {
             defer std.heap.page_allocator.free(pages);
             mem_report.reportModules(pages);
         }
@@ -337,9 +317,9 @@ fn take(name: []const u8, ctx: Context) Sample {
 
 /// 驻留页按 `VirtualQuery` 的类型分账（见 `residentPages` / `splitPages`）。
 fn takeSplit() Split {
-    const pages = residentPages(std.heap.page_allocator) orelse return .{};
+    const pages = mem_report.residentPages(std.heap.page_allocator) orelse return .{};
     defer std.heap.page_allocator.free(pages);
-    return splitPages(pages);
+    return mem_report.splitPages(pages);
 }
 
 /// 字体系统自己的账（`OTTO_TRACE=1` 时才打：扫描耗时 / 已知 face / 图集边长）。
@@ -353,62 +333,8 @@ fn reportFonts(surface: anytype) void {
     );
 }
 
-/// 驻留页表：`K32QueryWorkingSet` 给出每一页（低 12 位是标志，地址是高位），按地址
-/// 升序排好，调用方负责 `allocator.free`。
-///
-/// 为什么不用 `K32QueryWorkingSetEx`：本机（Win11 26200）它对自身进程返回成功却
-/// 一个条目都不写（`K32QueryWorkingSet` 同一进程能拿到几千条），所以用后者。
-fn residentPages(allocator: std.mem.Allocator) ?[]WsEntry {
-    const ws = if (bench_win.resident()) |r| r.working_set else return null;
-    var words = allocator.alloc(usize, ws / page_bytes + 8192) catch return null;
-    defer allocator.free(words);
-    while (true) {
-        @memset(words, 0);
-        const bytes = words.len * @sizeOf(usize);
-        if (K32QueryWorkingSet(GetCurrentProcess(), @ptrCast(words.ptr), @intCast(bytes)) != 0) break;
-        if (words.len > (1 << 23)) return null;
-        const bigger = allocator.alloc(usize, words.len * 2) catch return null;
-        allocator.free(words);
-        words = bigger;
-    }
-    // words[0] 是条目数，之后每个 usize 是一页（VirtualPage << 12 | flags）。
-    const count = @min(words[0], words.len - 1);
-    const entries = allocator.alloc(WsEntry, count) catch return null;
-    errdefer allocator.free(entries);
-    for (words[1 .. 1 + count], 0..) |word, i| {
-        entries[i] = .{ .address = word & ~@as(usize, page_bytes - 1) };
-    }
-    std.mem.sort(WsEntry, entries, {}, struct {
-        fn lt(_: void, a: WsEntry, b: WsEntry) bool {
-            return a.address < b.address;
-        }
-    }.lt);
-    return entries;
-}
-
-/// 驻留页按 `VirtualQuery` 的类型分账。页地址升序排一遍，同一区域的 `VirtualQuery`
-/// 只做一次（几十次系统调用，不是每页一次）。
-fn splitPages(pages: []const WsEntry) Split {
-    var split: Split = .{};
-    var region_end: usize = 0;
-    var region_type: u32 = 0;
-    for (pages) |entry| {
-        if (entry.address == 0) continue;
-        if (entry.address >= region_end) {
-            var info = std.mem.zeroes(MemBasic);
-            if (VirtualQuery(@ptrFromInt(entry.address), &info, @sizeOf(MemBasic)) == 0) continue;
-            region_end = info.base_address + info.region_size;
-            region_type = info.typ;
-        }
-        switch (region_type) {
-            mem_image => split.image += page_bytes,
-            mem_mapped => split.mapped += page_bytes,
-            mem_private => split.private += page_bytes,
-            else => {},
-        }
-    }
-    return split;
-}
+/// 驻留页表已搬到 `mem_report.zig`（分解表与探针共用一份实现）：
+/// `mem_report.residentPages` / `mem_report.splitPages`。
 
 const th32cs_snapthread: u32 = 0x00000004;
 

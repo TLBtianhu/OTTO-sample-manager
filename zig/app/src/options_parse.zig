@@ -531,6 +531,15 @@ pub fn misc(options: *options_mod.Options, args: anytype, index: *usize, arg: []
         options.cache_budget_set = true;
         return true;
     }
+    // 基准/探针专用：L2 预算覆盖（绕过设置面板的 32 MiB 夹取，见 `options.l2_budget_mib`）。
+    if (std.mem.eql(u8, arg, "--l2-budget-mib")) {
+        options.l2_budget_mib = try parseCount(try value(args, index));
+        return true;
+    }
+    if (std.mem.startsWith(u8, arg, "--l2-budget-mib=")) {
+        options.l2_budget_mib = try parseCount(arg["--l2-budget-mib=".len..]);
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--settings-probe")) {
         options.settings_probe = true;
         return true;

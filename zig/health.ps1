@@ -13,7 +13,7 @@
 #      `--no-shell-preview`, asserting which provider answers (the 0.9.0
 #      "each format is self-sufficient" claim plus the 0.16 legacy formats and
 #      the Ogg/Opus rows; also runs under -Quick)
-#   5. bench.ps1 (-Big, six rows), scroll.ps1, mem.ps1
+#   5. bench.ps1 (-Big, six rows), scroll.ps1, membudget.ps1
 #   6. opacity.ps1: real hidden HWND; product entry --set-opacity (also runs
 #      under -Quick)
 #   7. --demo / --demo-rescan / --demo-thumbs / --demo-transport
@@ -644,30 +644,40 @@ function Invoke-Mem {
     return
   }
 
+  # The hard criterion lives in membudget.ps1: the visible GDI scroll form's
+  # WorkingSet <= 50 MiB AND the effective l2 + preview budget <= 48 MiB. This
+  # row used to print the hidden-window number and assert nothing about the
+  # scroll form; now it adopts the script's verdict (exit 1 on either clause).
   $memArgs = @('-Release', '-NoBuild', '-Samples', $Samples, '-Zig', $Zig)
-  $result = Invoke-Child (Join-Path $script:root 'mem.ps1') $memArgs
+  $result = Invoke-Child (Join-Path $script:root 'membudget.ps1') $memArgs
   $text = $result.Text
 
-  $on = [regex]::Match($text, '(?m)^\s*isolation-on\s+ws=\s*([0-9.]+)\s+private=\s*([0-9.]+)')
-  $off = [regex]::Match($text, '(?m)^\s*isolation-off\s+ws=\s*([0-9.]+)\s+private=\s*([0-9.]+)')
+  $verdict = [regex]::Match($text, '(?m)^== membudget: (PASS|FAIL) (.*)==\s*$')
+  $wsLine = [regex]::Match($text, '(?m)^\s+ws\s+([0-9.]+) MiB\s+target <= ([0-9.]+) MiB\s+(PASS|FAIL)')
+  $budgetLine = [regex]::Match($text, '(?m)^\s+budget\s+([0-9]+) \+ ([0-9]+) = ([0-9]+) MiB\s+target <= ([0-9]+) MiB\s+(PASS|FAIL)')
 
-  if (-not $on.Success) {
-    Add-Row $item 'FAIL' '—' ('mem exit {0}；没有 isolation-on 行；{1:N1} s' -f $result.Code, $result.Seconds)
+  if (-not $wsLine.Success -or -not $budgetLine.Success) {
+    Add-Row $item 'FAIL' '—' ('membudget exit {0}；没有 ws/budget 判据行；{1:N1} s' -f $result.Code, $result.Seconds)
     Write-FailureTail $result.Lines 40
     return
   }
 
-  $ws = [double]$on.Groups[1].Value
-  $private = [double]$on.Groups[2].Value
-  $stat = '{0:N1} MiB（目标 50）' -f $ws
-  $note = 'private {0:N1}' -f $private
-  if ($off.Success) { $note += ('；isolation-off {0:N1}' -f [double]$off.Groups[1].Value) }
+  $ws = [double]$wsLine.Groups[1].Value
+  $targetWs = [double]$wsLine.Groups[2].Value
+  $l2 = [int]$budgetLine.Groups[1].Value
+  $preview = [int]$budgetLine.Groups[2].Value
+  $combined = [int]$budgetLine.Groups[3].Value
+  $targetCombined = [int]$budgetLine.Groups[4].Value
+  $wsOk = ($wsLine.Groups[3].Value -eq 'PASS' -and $ws -le $targetWs)
+  $budgetOk = ($budgetLine.Groups[5].Value -eq 'PASS' -and $combined -le $targetCombined)
+  $stat = '{0:N2} MiB（目标 {1:N0}）' -f $ws, $targetWs
+  $note = 'gdi 可见滚动形态；预算 l2 {0} + preview {1} = {2} MiB（上限 {3}）' -f $l2, $preview, $combined, $targetCombined
   $note += ('；{0:N1} s' -f $result.Seconds)
 
-  if ($ws -le 50.0) {
+  if ($result.Code -eq 0 -and $verdict.Success -and $verdict.Groups[1].Value -eq 'PASS' -and $wsOk -and $budgetOk) {
     Add-Row $item 'PASS' $stat $note
   } else {
-    Add-Row $item 'FAIL' $stat ($note + '；超出宪章目标')
+    Add-Row $item 'FAIL' $stat ($note + '；判据失败（ws 或预算越线）')
     Write-FailureTail $result.Lines 40
   }
 }

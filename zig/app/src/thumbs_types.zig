@@ -8,6 +8,7 @@
 const std = @import("std");
 const l3 = @import("thumbs_disk.zig");
 const icon = @import("thumbs_icon.zig");
+const mem_budget = @import("mem_budget.zig");
 
 /// 请求的边长（像素）。列表那格是 32 点，Windows 的窗口在 150% / 200% 缩放下是
 /// 2x，所以按 64 请求：2x 屏上正好 1:1，1x 屏由图集缩到 32 点，不会糊。
@@ -18,12 +19,12 @@ pub const default_size_px: u32 = 64;
 pub const default_queue_capacity: usize = 32;
 
 /// 缩略图 L2 缓存预算。一张 64×64 BGRA 是 16 KiB，32 MiB 装得下两千张左右，
-/// 远多于一屏的可见行数。
-pub const default_budget_bytes: usize = 32 * 1024 * 1024;
+/// 远多于一屏的可见行数。上限与预览一档一起由 `mem_budget.zig` 统一管。
+pub const default_budget_bytes: usize = mem_budget.default_l2_mib * 1024 * 1024;
 
 /// 预览一档（256px）的 L2 预算。一张 256×256 BGRA 是 256 KiB（顶十六张行内图），
 /// 所以**单独一份缓存**：16 MiB ≈ 64 张预览，与行内图互不挤占。
-pub const default_preview_budget_bytes: usize = 16 * 1024 * 1024;
+pub const default_preview_budget_bytes: usize = mem_budget.default_preview_mib * 1024 * 1024;
 
 /// 失败记忆的条数上限；满了丢最旧的。
 pub const default_failure_memory: usize = 64;

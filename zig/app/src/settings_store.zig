@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const library_file = @import("otto_library_file");
+const mem_budget = @import("mem_budget.zig");
 const mode_mod = @import("mode.zig");
 
 /// 设置文件的上限。五个字段的 JSON 不到 300 字节；64 KiB 只用来拒绝
@@ -40,11 +41,15 @@ pub const max_file_bytes: usize = 64 * 1024;
 /// 更新源的最大字节数。和 `update_ui.Report.url` 的缓冲同一个量级。
 pub const max_update_url: usize = 1024;
 
-/// 预算字段的上限（MiB）。core 的缓存上限是 1 GiB；这里把设置也夹到同一档，
-/// 避免 `u32 * MiB` 在 32 位目标上绕出新花样。
+/// L3 预算字段的上限（MiB）。core 的缓存上限是 1 GiB；这里把设置也夹到同一档，
+/// 避免 `u32 * MiB` 在 32 位目标上绕出新花样。**L2 不用这个数**：它的上限由
+/// `mem_budget.zig` 按宪章「行内缩略图 + 预览共享 ≤ 48 MiB」给出（32 MiB）。
 pub const max_budget_mib: u32 = 1024;
 
-pub const default_l2_mib: u32 = 64;
+/// L2（缩略图内存缓存）的上限：来自 `mem_budget`，不是 1024。
+pub const max_l2_mib: u32 = @intCast(mem_budget.max_l2_mib);
+
+pub const default_l2_mib: u32 = @intCast(mem_budget.default_l2_mib);
 pub const default_l3_mib: u32 = 256;
 /// 窗口不透明度默认值：255 = 完全不透明（和没有这个功能时一样）。
 pub const default_opacity: u8 = 255;
@@ -95,7 +100,7 @@ pub const Settings = struct {
     }
 
     pub fn l2BudgetBytes(self: *const Settings) usize {
-        return @as(usize, @min(self.l2_budget_mib, max_budget_mib)) * 1024 * 1024;
+        return @as(usize, @min(self.l2_budget_mib, max_l2_mib)) * 1024 * 1024;
     }
 
     pub fn l3BudgetBytes(self: *const Settings) u64 {
@@ -203,7 +208,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
     var settings = Settings.init(allocator);
     settings.always_on_top = parsed.value.always_on_top;
     // 缺字段时 Wire 的默认值已经生效；这里再夹一次范围，防止手改出来的天文数字。
-    settings.l2_budget_mib = @min(parsed.value.l2_budget_mib, max_budget_mib);
+    settings.l2_budget_mib = @min(parsed.value.l2_budget_mib, max_l2_mib);
     settings.l3_budget_mib = @min(parsed.value.l3_budget_mib, max_budget_mib);
     settings.opacity = @intCast(std.math.clamp(parsed.value.opacity, 0, 255));
     if (parsed.value.update_url) |text| {
@@ -260,7 +265,7 @@ test "round-trip：五个字段经原子写读回来一模一样（含 URL 转�
     var original = Settings.init(testing.allocator);
     defer original.deinit();
     original.always_on_top = true;
-    original.l2_budget_mib = 96;
+    original.l2_budget_mib = 24;
     original.l3_budget_mib = 512;
     original.opacity = alphaFromPercent(60);
     try testing.expectEqual(@as(u8, 153), original.opacity);
@@ -272,7 +277,7 @@ test "round-trip：五个字段经原子写读回来一模一样（含 URL 转�
     var loaded = load(testing.allocator, testing.io, path);
     defer loaded.deinit();
     try testing.expect(loaded.always_on_top);
-    try testing.expectEqual(@as(u32, 96), loaded.l2_budget_mib);
+    try testing.expectEqual(@as(u32, 24), loaded.l2_budget_mib);
     try testing.expectEqual(@as(u32, 512), loaded.l3_budget_mib);
     try testing.expectEqual(@as(u8, 153), loaded.opacity);
     try testing.expectEqualStrings("https://example.com/feed.json?channel=dev&lang=zh", loaded.update_url.?);
@@ -335,9 +340,22 @@ test "未知字段忽略；手改的超大预算与 opacity 夹到上限" {
     var settings = decode(testing.allocator, text);
     defer settings.deinit();
     try testing.expect(settings.always_on_top);
-    try testing.expectEqual(max_budget_mib, settings.l2_budget_mib);
+    try testing.expectEqual(max_l2_mib, settings.l2_budget_mib);
     try testing.expectEqual(max_budget_mib, settings.l3_budget_mib);
     try testing.expectEqual(@as(u8, 255), settings.opacity);
+}
+
+test "宪章 48 MiB：手改的 L2 预算被夹到 32，合计不超过上限" {
+    const text =
+        \\{"l2_budget_mib":128}
+    ;
+    var settings = decode(testing.allocator, text);
+    defer settings.deinit();
+    try testing.expectEqual(@as(u32, 32), settings.l2_budget_mib);
+    // 生效预算（L2 字节 + 派生预览）必须落在 48 MiB 以内。
+    const l2 = settings.l2BudgetBytes() / (1024 * 1024);
+    try testing.expect(l2 + mem_budget.previewMib(l2) <= mem_budget.combined_max_mib);
+    try testing.expectEqual(mem_budget.combined_max_mib, l2 + mem_budget.previewMib(l2));
 }
 
 test "opacity 越界钳到 0..255，而不是让整份设置回默认" {
@@ -349,7 +367,7 @@ test "opacity 越界钳到 0..255，而不是让整份设置回默认" {
     var negative = decode(testing.allocator, low);
     defer negative.deinit();
     try testing.expect(negative.always_on_top);
-    try testing.expectEqual(@as(u32, 96), negative.l2_budget_mib);
+    try testing.expectEqual(@as(u32, 32), negative.l2_budget_mib);
     try testing.expectEqual(@as(u8, 0), negative.opacity);
 
     const high =

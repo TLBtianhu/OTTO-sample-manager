@@ -63,6 +63,7 @@ const codec = @import("thumbs_codec.zig");
 const icon = @import("thumbs_icon.zig");
 const keys_mod = @import("thumbs_keys.zig");
 const l3 = @import("thumbs_disk.zig");
+const mem_budget = @import("mem_budget.zig");
 const queue_mod = @import("thumbs_queue.zig");
 const worker_mod = @import("thumbs_worker.zig");
 const share_mod = @import("thumbs_preview.zig");
@@ -190,6 +191,14 @@ pub const Thumbs = struct {
         };
         // 缩略图占满整个预算：L2 里缩略图不该被别的 Kind 挤出去（软配额 100%）。
         self.cache.setKindPercent(.thumbnail, 100);
+
+        // 生效预算的**唯一机器可读来源**：`zig\membudget.ps1` 按这一行断言
+        // 「L2 + 预览 ≤ 48 MiB」。设置面板夹取后的值也走这里（`setBudgets` 再打一次）。
+        const mib: u64 = 1024 * 1024;
+        std.debug.print(
+            "otto-lite: cache budget l2={d}MiB preview={d}MiB\n",
+            .{ @as(u64, options.budget_bytes) / mib, @as(u64, options.preview_budget_bytes) / mib },
+        );
 
         // 隔离是默认路径：helper exe 不在就是**启动错误**，不是「没有预览」。
         // 只查文件、不 spawn（懒启动）；也不静默退回进程内（那等于把第三方 handler
@@ -396,15 +405,16 @@ pub const Thumbs = struct {
         self.lock.acquire();
         self.cache.setBudget(l2_bytes);
         self.lock.release();
-        // 预览一档按 L2 的 1/4 分（下限 4 MiB、不超过 L2）：一张 256×256 的像素
-        // 重量是行内图的十六倍，单独一份预算才不会把整屏行内图挤出去。
-        const preview_budget = @max(4 * 1024 * 1024, @min(l2_bytes, l2_bytes / 4));
+        // 预览一档按 L2 的一半分（夹在 4–16 MiB，见 `mem_budget.zig`）：一张
+        // 256×256 的像素重量是行内图的十六倍，单独一份预算才不会把整屏行内图挤出去。
+        // 两个数都来自同一个政策文件，设置面板不能把合计推过 48 MiB。
+        const preview_budget = mem_budget.l2Bytes(mem_budget.previewMib(l2_bytes / (1024 * 1024)));
         self.preview_share.setBudget(preview_budget);
 
         const mib: u64 = 1024 * 1024;
         std.debug.print(
-            "otto-lite: cache budget l2={d}MiB l3={d}MiB preview={d}MiB\n",
-            .{ @as(u64, l2_bytes) / mib, l3_bytes / mib, @as(u64, preview_budget) / mib },
+            "otto-lite: cache budget l2={d}MiB preview={d}MiB l3={d}MiB\n",
+            .{ @as(u64, l2_bytes) / mib, @as(u64, preview_budget) / mib, l3_bytes / mib },
         );
 
         if (self.disk) |*disk| {

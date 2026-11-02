@@ -524,7 +524,7 @@ pub fn main(init: std.process.Init) !void {
             state.samples = session.samples();
             state.selection.resize(state.gpa, state.samples.len) catch {};
         }
-        try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe);
+        try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe, state.samples, boot.library.arena.queryCapacity());
     }
     state.window = try boot.app.newWindow(.{
         .title = title,

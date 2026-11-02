@@ -27,7 +27,7 @@ const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const bench_stats = @import("bench_stats.zig");
 const bench_win = @import("bench_win.zig");
-const library_io = @import("library_io.zig");
+const mem_breakdown = @import("mem_breakdown.zig");
 const row_probe = @import("row_probe.zig");
 const scroll_stats = @import("bench_scroll_stats.zig");
 const thumbs_mod = @import("thumbs.zig");
@@ -161,6 +161,8 @@ pub fn runCli(
     view: nanoui.ui.View,
     title: []const u8,
     probe: *row_probe.RowProbe,
+    samples: []const core.model.Sample,
+    loader_arena: usize,
 ) !noreturn {
     const library = options.bench_scroll orelse return error.NoLibrary;
     const window = try app.newWindow(.{
@@ -182,7 +184,7 @@ pub fn runCli(
         .notches = options.scroll_notches,
         .edge = options.bench_scroll_edge,
         .prefetch = !options.no_prefetch,
-    });
+    }, samples, loader_arena);
     std.process.exit(code);
 }
 
@@ -193,6 +195,8 @@ pub fn run(
     thumbs: *thumbs_mod.Thumbs,
     probe: *row_probe.RowProbe,
     options: Options,
+    samples: []const core.model.Sample,
+    loader_arena: usize,
 ) !u8 {
     if (app.flags.hidden) {
         std.debug.print("scroll-bench: 需要真实可见窗口（不要加 --nanoui-hidden）\n", .{});
@@ -294,13 +298,13 @@ pub fn run(
 
     // 预取验收：量"滚动经过的行里，图标已就绪的比例"。行 → 样本的下标由视图写进
     // `probe`（每帧一份），这里按样本去重、只看**第一次**出现在视口的那一帧。
-    var loaded: ?core.store.Library = library_io.loadWith(io, allocator, options.library) catch null;
-    defer if (loaded) |*value| value.deinit();
+    //
+    // `samples` 是**视图正在显示的那一份**（`State.samples`），不是再读一遍库。
+    // 以前这里为了拿样本又 `loadWith` 一次：同一份 2000 行库在探针进程里存了两份，
+    // 把那 5 MiB 算进了"滚动形态常驻内存"——量的就不是应用，是应用+探针自己。
     var visits: Visits = .{ .seen = &.{} };
-    if (loaded) |*value| {
-        visits.seen = try allocator.alloc(bool, value.samples.len);
-        @memset(visits.seen, false);
-    }
+    visits.seen = try allocator.alloc(bool, samples.len);
+    @memset(visits.seen, false);
 
     // 从这里开始记每一帧。日志在内存里（不带 path = 不写文件）。
     const log = try surface.recordFrames(init.gpa);
@@ -363,30 +367,9 @@ pub fn run(
         "scroll-bench: phases_p95 build={d:.2} layout={d:.2} paint={d:.2} raster={d:.2} present={d:.2} wait={d:.2} after={d:.2} ms\n",
         .{ stats.build.p95, stats.layout.p95, stats.paint.p95, stats.raster.p95, stats.present.p95, stats.wait.p95, stats.after.p95 },
     );
-    if (memory) |resident| {
-        std.debug.print(
-            "scroll-bench: ws_mib={d:.2} private_mib={d:.2} peak_ws_mib={d:.2}\n",
-            .{
-                @as(f64, @floatFromInt(resident.working_set)) / mib,
-                @as(f64, @floatFromInt(resident.private_bytes)) / mib,
-                @as(f64, @floatFromInt(resident.peak_working_set)) / mib,
-            },
-        );
-    } else {
-        std.debug.print("scroll-bench: ws_mib=n/a（K32GetProcessMemoryInfo 不可用）\n", .{});
-    }
-    std.debug.print(
-        "scroll-bench: thumbs ready={d} pending={d} entries={d} bytes_mib={d:.2} prefetched={d} dropped={d}\n",
-        .{
-            thumbs.readyCount(),
-            thumb_stats.pending,
-            thumb_stats.entries,
-            @as(f64, @floatFromInt(thumb_stats.bytes)) / mib,
-            thumb_stats.prefetched,
-            thumb_stats.dropped,
-        },
-    );
-    reportPrefetch(thumbs, if (loaded) |*value| value else null, &visits, options, thumb_stats, idle_frames, posted);
+    // 分解表：`ws_mib` 的每一项都在这里归账（`mem_breakdown.zig`）。
+    mem_breakdown.print(mem_breakdown.measure(samples, thumbs, surface, memory, loader_arena), thumbs);
+    reportPrefetch(thumbs, samples, &visits, options, thumb_stats, idle_frames, posted);
 
     // 判据：帧产量 ≥ 60/s、单帧做工 p95 在 16.67 ms 内、没有一帧超预算、
     // 我们的窗口从来不是前台。无关程序抢前台不影响 verdict。
@@ -445,7 +428,7 @@ const Visits = struct {
 /// （没有预取时新行是滚到眼前才入队的，所以接近 0）；`ready_end` 只证明"没有漏画"。
 fn reportPrefetch(
     thumbs: *thumbs_mod.Thumbs,
-    library: ?*core.store.Library,
+    samples: []const core.model.Sample,
     visits: *const Visits,
     options: Options,
     thumb_stats: thumbs_mod.Stats,
@@ -454,15 +437,7 @@ fn reportPrefetch(
 ) void {
     const percent = if (visits.visited == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(visits.ready_arriving)) / @as(f64, @floatFromInt(visits.visited));
     const idle_pct = if (total_frames == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(idle_frames)) / @as(f64, @floatFromInt(total_frames));
-    if (library == null) {
-        std.debug.print(
-            "scroll-bench: prefetch enabled={} visited={d} ready_arriving={d} ({d:.1}%) ready_end=n/a prefetched={d} idle_frames={d}/{d}（库读不出来，末态不统计）\n",
-            .{ options.prefetch, visits.visited, visits.ready_arriving, percent, thumb_stats.prefetched, idle_frames, total_frames },
-        );
-        return;
-    }
     var ready_end: usize = 0;
-    const samples = library.?.samples;
     for (visits.seen, 0..) |seen, index| {
         if (!seen or index >= samples.len) continue;
         if (thumbs.has(samples[index])) ready_end += 1;
