@@ -15,6 +15,16 @@
 
 
 
+
+## 0.48.0
+
+- **路径改成分块存储**：64 KiB 稳定块 + 每条 8 B 块头，取代每行一次独立堆分配；空块回收。identity、完整绝对路径、排序、监听语义全部不变，只换了容器。
+- 10 万行实测（同会话三轮交替）：**639.2 → 470.8 B/行（−26%）**，峰值 **65.57 → 55.04 MiB**，当前工作集 **63.92 → 46.74 MiB**。
+- `--browse-legacy-paths` 保留旧分配方式作反向开关（开回去每行就回到 659 B）。
+- **预算改看峰值**：`max(working_set, peak_working_set)`，防止 20 万行"先越过 90 MiB 再回落"被误判为装得下。
+- **20 万行的明确回答：仍装不下**。现在会在 150,000 行处具名拒绝最后 50,000 行（`mem_refused=true`），峰值 76.13 MiB，不再越线。
+- 浏览 49 项验收全过（452 字符长路径、junction、真实 UNC、identity 恢复、四排序、事件 reconcile）。
+
 ## 0.47.0
 
 - **exe 有图标和版本信息了**：`otto-lite.exe` 与 `otto-thumb-host.exe` 现在嵌入 `resources/icon.ico` 与 VERSIONINFO（FileDescription / ProductName / FileVersion 等），版本号仍只从 `build.zig.zon` 取。用 Zig 自带 resinator，不需要 rc.exe。
