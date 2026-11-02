@@ -1,23 +1,8 @@
-//! 目录浏览（Stage 0）：把一个**真实目录**变成一份可滚动的行列表，全程只读。
-//!
-//! 四件事，分别落在四个文件里：
-//!   1. **懒枚举 + 分页**（`browse_source.zig`）：后台线程用 `ports/browse_dir.zig`
-//!      （`FindFirstFileExW`）把目录读成 `Entry`，每 512 条发布一批；一页读满就
-//!      **保留枚举句柄**，下一页接着 `FindNextFileW` 读，不从目录头重扫。窗口先
-//!      出来，行后到。页大小 = `--browse-limit`（默认 50000，总硬上限 200000）。
-//!   2. **内存预算**（`browse_budget.zig`）：实测每行字节数；「加载更多」之前按
-//!      "当前工作集 + 预计新增行"判断 90 MiB 峰值，超了就拒绝并数清剩余条数
-//!      （状态条写「已到内存上限，剩余 N 条未加载」——**不静默停**）。
-//!   3. **事件驱动**（`browse_events.zig` + 本文件 `poll`）：`ports/watch.zig` 的
-//!      `ReadDirectoryChangesW`（**非递归**）→ 每帧一次合并应用。一次超过 500 条
-//!      （或内核溢出 / 序号缺口）就改成一次全量重枚举；重扫期间**不消费**事件，
-//!      重扫完成后按单调序号把扫描开始之后的事件补应用一遍（reconcile-after-rescan），
-//!      期间再来 overflow 只合并成一次重扫。不做定时轮询。
-//!   4. **选中项按身份跟踪**（`browse_select.zig`）：变更前记下选中行的
-//!      `卷序列号 + 文件索引`（退化时用路径），变更后按身份找回它；文件被删掉时
-//!      那一行留成墓碑（`deleted`），选中项移到相邻的存活行。
-//!
-//! 路径不可用时保留具名原因，只在用户下一次交互时重试；全程只读，不做定时轮询。
+//! 目录浏览：后台懒枚举/续页、90 MiB 具名拒绝、事件驱动重扫、按文件身份恢复选中。
+//! Source 负责 FindFirstFileExW 与批次；Budget 负责实测行开销；事件只在 poll 合并应用，
+//! 风暴/溢出后重扫并 replay；Tracker 以卷序列号+文件索引（无身份才退到路径）跟踪选中。
+//! 路径由共享 PathStore 持有完整绝对路径，长路径/UNC/Unicode 与排序语义不变。
+//! 全程只读；路径不可用保留具名原因，只在下一次交互重试，不做定时轮询。
 
 const std = @import("std");
 const core = @import("otto_core");
@@ -34,6 +19,7 @@ const sort_mod = @import("browse_sort.zig");
 const history_mod = @import("browse_history.zig");
 const navigation = @import("browse_navigation.zig");
 const view = @import("browse_view.zig");
+const path_store_mod = @import("browse_path_store.zig");
 const browse_dir = @import("otto_browse_dir");
 
 const Entry = types.Entry;
@@ -68,6 +54,8 @@ pub const Options = struct {
     limit: usize = types.default_limit,
     /// 内存预算；默认 90 MiB。测试注入更小的值来走"拒绝加载"那条路。
     memory_budget_bytes: usize = types.memory_budget_bytes,
+    /// `legacy` 仅用于反向证明：恢复每行完整路径逐条堆分配。
+    path_mode: path_store_mod.Mode = .compact,
 };
 
 pub const Session = struct {
@@ -135,6 +123,8 @@ pub const Session = struct {
 
     // ---- 消费侧（只有 UI 线程碰） ----
     entries: std.ArrayListUnmanaged(Entry) = .empty,
+    /// Entry.path 的唯一所有者；Source 与事件线程共用，Session 最后销毁。
+    path_store: path_store_mod.Store,
     view_rows: std.ArrayListUnmanaged(core.model.Sample) = .empty,
     /// 合成 id 的字节（每条一段，指向这里；`view_rows` 每轮重建）。
     ids: std.ArrayListUnmanaged(u8) = .empty,
@@ -175,11 +165,13 @@ pub const Session = struct {
             .name = if (core.model.baseName(absolute).len > 0) core.model.baseName(absolute) else absolute,
             .limit = @max(1, @min(options.limit, types.hard_limit)),
             .watch_enabled = options.watch,
+            .path_store = path_store_mod.Store.init(allocator, options.path_mode),
             .source = undefined,
             .started_ns = types.nowNs(io),
             .tracker = select_mod.Tracker.init(allocator),
             .history = undefined,
         };
+        errdefer self.path_store.deinit();
         errdefer self.tracker.deinit();
         self.history = try history_mod.History.init(allocator, absolute);
         errdefer self.history.deinit();
@@ -196,7 +188,7 @@ pub const Session = struct {
 
         // 基线要在生产线程起跑**之前**量：之后的工作集里就有行了。
         self.budget = budget_mod.Budget.initWithCap(options.memory_budget_bytes);
-        self.source = try source_mod.Source.init(allocator, io, absolute, self.limit);
+        self.source = try source_mod.Source.init(allocator, io, absolute, self.limit, &self.path_store);
         errdefer self.source.deinit();
         return self;
     }
@@ -212,6 +204,7 @@ pub const Session = struct {
         self.ids.deinit(self.allocator);
         self.tracker.deinit();
         self.history.deinit();
+        self.path_store.deinit();
         if (self.event_buffer.len > 0) self.allocator.free(self.event_buffer);
         self.allocator.free(self.root);
         self.allocator.destroy(self);
@@ -237,6 +230,10 @@ pub const Session = struct {
 
     pub fn rootPath(self: *const Session) []const u8 {
         return self.root;
+    }
+
+    pub fn pathAllocator(self: *Session) std.mem.Allocator {
+        return self.path_store.allocator();
     }
 
     pub fn info(self: *const Session) Info {
@@ -311,7 +308,9 @@ pub const Session = struct {
         if (!self.canLoadMore()) return false;
         const rows = self.entries.items.len;
         const projected = @min(rows + self.limit, types.hard_limit);
-        const current_ws = if (bench_win.resident()) |resident| resident.working_set else 0;
+        // 预算管的是生命周期峰值；数组搬家/批次交接的瞬时页不会被 current_ws 看见。
+        // 用历史峰值作下界，宁可具名拒绝，也不能先越过 90 MiB 再报告。
+        const current_ws = if (bench_win.resident()) |resident| @max(resident.working_set, resident.peak_working_set) else 0;
         if (self.budget.wouldExceed(current_ws, rows, projected)) {
             // 不许悄悄停：状态条会写"已到内存上限，剩余 N 条未加载"。
             self.mem_refused = true;
@@ -337,11 +336,12 @@ pub const Session = struct {
     /// 内存拒绝后把剩下的条目数出来（生产线程只数不装）。
     fn observeBudget(self: *Session) void {
         const resident = bench_win.resident() orelse return;
-        self.row_bytes = budget_mod.rowBytes(
+        self.row_bytes = budget_mod.rowBytesWithPathCapacity(
             self.entries.capacity,
             self.view_rows.capacity,
             self.ids.capacity,
             self.entries.items,
+            if (self.path_store.mode == .compact) self.path_store.allocatedBytes() else null,
         );
         self.budget.observe(self.entries.items.len, self.row_bytes, resident.working_set);
     }
@@ -405,7 +405,7 @@ pub const Session = struct {
             defer self.source.releaseBatch(node);
             if (node.epoch != current) {
                 // 过期代次的批次：连条目的 path 一起丢掉。
-                types.freeEntries(self.allocator, node.items);
+                types.freeEntries(self.pathAllocator(), node.items);
                 continue;
             }
             if (node.done) {
@@ -447,7 +447,7 @@ pub const Session = struct {
                     .failed => {
                         self.unavailable = true;
                         self.path_error = null;
-                    }
+                    },
                 }
                 if (self.reconciling and !node.append) {
                     // 重扫的 done 到了：事件步骤把队列里的补应用一遍。
@@ -477,7 +477,7 @@ pub const Session = struct {
     fn appendRow(self: *Session, entry: Entry) void {
         for (self.event_paths.items) |known| {
             if (std.mem.eql(u8, known, entry.path)) {
-                self.allocator.free(entry.path);
+                self.pathAllocator().free(entry.path);
                 return;
             }
         }
@@ -538,7 +538,7 @@ pub const Session = struct {
     fn clearEntries(self: *Session) void {
         // 去重表借用条目的 path 切片：先清表，再释放字符串。
         self.event_paths.clearRetainingCapacity();
-        for (self.entries.items) |entry| self.allocator.free(entry.path);
+        for (self.entries.items) |entry| self.pathAllocator().free(entry.path);
         self.entries.clearRetainingCapacity();
         self.view_rows.clearRetainingCapacity();
         self.ids.clearRetainingCapacity();

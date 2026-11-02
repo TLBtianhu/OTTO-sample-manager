@@ -78,10 +78,21 @@ pub fn rowBytes(
     ids_capacity: usize,
     entries: []const types.Entry,
 ) usize {
+    return rowBytesWithPathCapacity(entries_capacity, samples_capacity, ids_capacity, entries, null);
+}
+
+/// `path_capacity` 非空时采用路径存储向后备分配器实际申请的容量；legacy 仍按路径内容计。
+pub fn rowBytesWithPathCapacity(
+    entries_capacity: usize,
+    samples_capacity: usize,
+    ids_capacity: usize,
+    entries: []const types.Entry,
+    path_capacity: ?usize,
+) usize {
     var paths: usize = 0;
     for (entries) |entry| paths += entry.path.len;
     return entries_capacity * @sizeOf(types.Entry) +
         samples_capacity * @sizeOf(core.model.Sample) +
         ids_capacity +
-        paths;
+        (path_capacity orelse paths);
 }

@@ -425,6 +425,10 @@ pub fn browsing(options: *options_mod.Options, args: anytype, index: *usize, arg
         options.browse_pages = try parseCount(arg["--pages=".len..]);
         return true;
     }
+    if (std.mem.eql(u8, arg, "--browse-legacy-paths")) {
+        options.browse_legacy_paths = true;
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--force-rescan")) {
         options.browse_force_rescan = true;
         return true;

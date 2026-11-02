@@ -169,6 +169,18 @@ pub fn joinPath(allocator: std.mem.Allocator, root: []const u8, name: []const u8
     return std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ root, std.fs.path.sep, name });
 }
 
+/// 紧凑存储专用：不经过 Allocator.print 的增长/收缩缓冲，一次请求最终字节数。
+pub fn joinPathExact(allocator: std.mem.Allocator, root: []const u8, name: []const u8) error{OutOfMemory}![]u8 {
+    const has_separator = root.len != 0 and std.fs.path.isSep(root[root.len - 1]);
+    const separator: usize = if (has_separator) 0 else 1;
+    const total = std.math.add(usize, root.len, separator + name.len) catch return error.OutOfMemory;
+    const path = try allocator.alloc(u8, total);
+    @memcpy(path[0..root.len], root);
+    if (!has_separator) path[root.len] = std.fs.path.sep;
+    @memcpy(path[root.len + separator ..], name);
+    return path;
+}
+
 /// 目录 → 绝对路径。与 `mode.realPathDupe` 同一个理由：`realPathFileAlloc` 返回
 /// 带哨兵的分配，调用方按普通切片释放会长度对不上。
 pub fn realPathAlloc(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {

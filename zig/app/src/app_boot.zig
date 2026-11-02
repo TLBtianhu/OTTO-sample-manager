@@ -219,6 +219,7 @@ pub fn boot(
             library.* = try core.store.empty(init.gpa);
             const session = browse_mod.Session.init(init.gpa, init.io, dir, .{
                 .limit = options.browse_limit,
+                .path_mode = if (options.browse_legacy_paths) .legacy else .compact,
             }) catch |err| {
                 std.debug.print(
                     "otto-lite: 浏览入口无效 reason={s} path={s}\n",

@@ -15,9 +15,11 @@
 //! 一份"只读目录、不建视图、不起监听"的旁路实现量出来的数字不解释任何事。
 
 const std = @import("std");
+const core = @import("otto_core");
 const browse_dir = @import("otto_browse_dir");
 const bench_win = @import("bench_win.zig");
 const browse = @import("browse.zig");
+const types = @import("browse_types.zig");
 const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
 const providers = @import("providers/root.zig");
@@ -60,6 +62,7 @@ pub fn runProbe(
     const probe_started = trace.now();
     const session = browse.Session.init(init.gpa, io, directory, .{
         .limit = options.browse_limit,
+        .path_mode = if (options.browse_legacy_paths) .legacy else .compact,
     }) catch |err| {
         std.debug.print(
             "browse-probe: FAIL reason={s} path={s}\n",
@@ -128,6 +131,12 @@ pub fn runProbe(
         0;
 
     const info = session.info();
+    var path_content_bytes: usize = 0;
+    for (session.entries.items) |entry| path_content_bytes += entry.path.len;
+    const path_storage_bytes = if (session.path_store.mode == .compact)
+        session.path_store.allocatedBytes()
+    else
+        path_content_bytes;
     std.debug.print(
         "browse-probe: entries={d} truncated={} first_page_ms={d:.2} enum_ms={d:.2} rss_mib={d:.2} writes={d} " ++
             "skipped={d} unreadable={d} unavailable={} denied={} wall_ms={d:.2} root={s} " ++
@@ -158,6 +167,18 @@ pub fn runProbe(
             current_mib,
             info.rescans,
             info.reconciles,
+        },
+    );
+    std.debug.print(
+        "browse-row-cost: rows={d} entry_bytes={d} sample_bytes={d} id_bytes={d} path_content_bytes={d} path_storage_bytes={d} path_mode={s}\n",
+        .{
+            session.entries.items.len,
+            session.entries.capacity * @sizeOf(types.Entry),
+            session.view_rows.capacity * @sizeOf(core.model.Sample),
+            session.ids.capacity,
+            path_content_bytes,
+            path_storage_bytes,
+            @tagName(session.path_store.mode),
         },
     );
 
@@ -241,7 +262,6 @@ fn runPreviewProbe(
     );
     return if (arrived) 0 else 4;
 }
-
 
 // ---------------------------------------------------------------------------
 // 源目录快照：名字 + 大小 + mtime
