@@ -161,74 +161,75 @@ OTTO Sample Manager：
 
 ## 技术栈
 
-- Tauri 2 + Rust
-- React
-- TypeScript
-- Zustand
-- SQLite（WAL、增量写入、后台导入）
-- Web Audio API + `HTMLMediaElement` Range 流式播放
-- pinyin-pro（用于歌词转拼音）
+- **Zig 0.17**，零第三方运行时、零 C 依赖（不用 `@cImport`）
+- 原生 Win32：DWM 合成、DirectWrite 文字、WIC 图片、Media Foundation、WASAPI
+- UI 基于 [nanoui](https://github.com/TLBtianhu/nanoui)（本项目的 fork 分支 `otto-091`）
+- 音频解码：自带的 [zig-audio](https://github.com/TLBtianhu/zig-audio)（WAV / AIFF / FLAC / MP3 / Vorbis / Opus 全部自解码）
+- 安装包 NSIS + minisign 双签名
 
-当前发布版以 Tauri 为主，Tauri 源码与发布流程位于 `tauri` 分支。Electron 仅保留为历史兼容实现，
-不再作为主要技术栈和发布入口。前端通过统一的 `DesktopBridge` 与 Rust 后端通信，不直接暴露
-原始文件系统或 SQL。
+> 历史实现保留在分支上：`tauri`（Rust + WebView2）与 `electron`（更早的 Electron 版），
+> 都不再是发布入口。仓库里 `electron/`、`native/`、`src/` 等目录属于那条线，`zig/` 才是现在的产品。
 
 ---
 
-## 安装与运行
+## 构建与运行
 
 ### 环境要求
 
-- Node.js 18+
-- npm
-- Rust 1.85+
 - Windows 10/11 x64
-- Visual Studio 2022/2026 C++ Desktop Build Tools 与 Windows SDK
-- Microsoft Edge WebView2 Runtime（Windows 10/11 通常已安装）
-
----
-
-### 安装依赖
-
-以下开发与构建命令以 `tauri` 分支为准：
-
-```bash
-git switch tauri
-npm install
-```
-
-> 已包含 `pinyin-pro`，无需额外手动安装
-
----
-
-### 开发模式
-
-```bash
-npm run tauri:dev
-```
-
----
+- Zig 0.17（`zig` 在 PATH 里，或改 `zig\*.ps1` 里的路径）
+- PowerShell 7（`pwsh`）
+- 出安装包需要 Node.js 与 NSIS（`zig\package.ps1` 会自动检查）
 
 ### 构建
 
-类型、前端测试与 Rust 测试：
-
-```bash
-npm run check:types
-npm test
-cargo test --manifest-path src-tauri/Cargo.toml
+```powershell
+cd zig\app
+zig build -Drelease=true        # 产出 zig\app\zig-out\bin\otto-lite.exe（约 3.7 MB）
 ```
 
-生成 Tauri NSIS 安装包：
+### 测试
 
-```bash
-npm run tauri:build
+```powershell
+cd zig\core   ; zig build test   # 数据层
+cd zig\ports  ; zig build test   # Win32 接口
+cd zig\app    ; zig build test   # 应用层
 ```
 
-若要把未安装的 Tauri exe 作为便携版运行，可在 exe 同目录创建
-`otto-portable.flag`。该模式会把 SQLite、缓存与 `Copy` 放在同目录的 `data` 下；没有标记的
-NSIS 安装版使用 `%APPDATA%/sample-manager`，并自动迁移旧版数据。
+### 一条命令跑全部门禁
 
+```powershell
+zig\health.ps1 -Quick     # 10 项（构建 / 测试 / 形态 / provider 矩阵 / 签名…）
+zig\health.ps1           # 加上滚动与内存
+zig\health.ps1 -Fresh    # 再加"全新用户"安装→升级→卸载
+```
+
+### 出安装包
+
+```powershell
+zig\package.ps1 -Version 0.44.0    # zig\dist\ 下出 portable.zip + setup.exe，各自带 .sig
+```
+
+### 运行时数据在哪
+
+| 形态 | 数据目录 |
+| --- | --- |
+| 便携版（zip 解压） | `<exe>\data` |
+| 安装版 | `%APPDATA%\OTTO` |
+| 开发版（`zig build` 产物） | `%LOCALAPPDATA%\OTTO\dev` |
+
+卸载不会删除用户数据。
+
+---
+
+## 开发文档
+
+- [`zig/app/README.md`](zig/app/README.md)：应用层全部能力、验收口径、性能数字
+- [`zig/core/README.md`](zig/core/README.md)：数据层
+- [`zig/CHARTER.md`](zig/CHARTER.md)：不可协商的规则（内存预算、只读浏览、命名…）
+- [`zig/ROADMAP.md`](zig/ROADMAP.md)：通往 1.0 的阶段与判据
+- [`zig/PERF.md`](zig/PERF.md) / [`zig/MEMORY.md`](zig/MEMORY.md)：性能与内存的实测账本
+- [`zig/CHANGELOG.md`](zig/CHANGELOG.md)：每个版本改了什么
 ---
 
 ## 使用方法
@@ -300,9 +301,10 @@ Windows NSIS 安装版支持两种更新检查方式：
 - 便携版：不会替换运行中的 EXE，只会打开 Release 下载页
 
 ### 更新来源与安全说明
+当前通过 GitHub Releases 发布 Windows NSIS 安装包与便携 zip，各自带 minisign 签名（`.sig`）。
+安装版下载更新后，用应用内置的 minisign 公钥验证安装包签名；签名不匹配时不安装。
 
-当前版本通过 Tauri updater 发布 Windows NSIS 安装包、对应的 `.sig` 签名和 `latest.json`。
-安装版下载更新后，会使用应用内置的 updater 公钥验证安装包签名；签名不匹配时不会安装。
-
-安装包、签名和更新清单均由同一次 Tauri 构建生成，并在发布前校验版本、文件大小、SHA-512
+发布包与签名由同一次 `zig\package.ps1` 生成，并在发布前校验版本号、文件大小与签名；
+该签名用于保护应用内更新链路，与 Windows Authenticode 发布者签名不是同一机制。
+更新走覆盖式升级：新安装包直接盖在旧程序目录上，素材库与设置保持不变。
 和 updater 签名。该签名用于保护应用内更新链路，与 Windows Authenticode 发布者签名不是同一机制。
