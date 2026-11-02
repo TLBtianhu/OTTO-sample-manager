@@ -65,6 +65,8 @@ test "created：追加到末尾，派生名正确，不查磁盘" {
     try std.testing.expect(added.pending_metadata);
     try std.testing.expectEqual(@as(i64, 0), added.imported_at);
     try std.testing.expectEqual(@as(i64, 0), added.mtime);
+    try std.testing.expectEqualStrings("D:/new", added.rootPath());
+    try std.testing.expectEqualStrings("Crash 01.wav", added.relativePath());
     try std.testing.expectEqual(@as(u64, 0), added.file_size);
     try std.testing.expect(!added.is_copy);
     try std.testing.expectEqual(@as(usize, 0), added.group_ids.len);

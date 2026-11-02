@@ -13,10 +13,11 @@
 //! ## 格式
 //!
 //! ```json
-//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255}
+//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255,"version":2,"view":{"mode":"library","expanded_folders":[]},"layout":{"width":380,"height":700}}
 //! ```
 //!
-//! 缺字段用默认值，未知字段忽略，坏 JSON / 读不到 / 类型不对**一律**回到默认值：
+//! 缺字段用默认值，未知字段忽略；无 version 的 v1 自动按旧平铺格式迁移，
+//! 写盘只写 v2。坏 JSON / 读不到 / 类型不对**一律**回到默认值：
 //! 设置文件坏了只该丢设置，不该让应用起不来（没有弹窗）。
 //! **例外是 `opacity` 的越界值**：它是个 u8，手改出来的 300 / -5 不该让整份设置
 //! 回默认（那会把用户的置顶与预算一起丢掉），所以按 0..255 钳住。
@@ -33,6 +34,7 @@ const std = @import("std");
 const library_file = @import("otto_library_file");
 const mem_budget = @import("mem_budget.zig");
 const mode_mod = @import("mode.zig");
+const settings_v2 = @import("settings_v2.zig");
 
 /// 设置文件的上限。五个字段的 JSON 不到 300 字节；64 KiB 只用来拒绝
 /// "把别的文件改名成 settings.json"这种明显不对的输入，不是产品策略。
@@ -89,13 +91,18 @@ pub const Settings = struct {
     l2_budget_mib: u32 = default_l2_mib,
     /// L3（缩略图磁盘缓存）预算，MiB。
     l3_budget_mib: u32 = default_l3_mib,
+    /// 当前视图与库树展开状态（v2 新增）。
+    view: settings_v2.View,
+    /// 上次正常关闭时的窗口尺寸（v2 新增）。
+    layout: settings_v2.Layout = .{},
 
     pub fn init(allocator: std.mem.Allocator) Settings {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .view = settings_v2.View.init(allocator) };
     }
 
     pub fn deinit(self: *Settings) void {
         if (self.update_url) |value| self.allocator.free(value);
+        self.view.deinit();
         self.* = undefined;
     }
 
@@ -140,6 +147,12 @@ pub const Settings = struct {
             .l2_budget_mib = self.l2_budget_mib,
             .l3_budget_mib = self.l3_budget_mib,
             .opacity = self.opacity,
+            .version = settings_v2.version,
+            .view = .{
+                .mode = @tagName(self.view.mode),
+                .expanded_folders = self.view.expanded_folders.items.items,
+            },
+            .layout = self.layout,
         }, .{});
     }
 
@@ -195,6 +208,15 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
         /// 用 i64 接：手改出来的 300 / -5 要能读进来再钳到 0..255，用 u8 的话
         /// 300 会让整份解析失败、把别的设置一起丢回默认值。
         opacity: i64 = default_opacity,
+        version: u16 = 1,
+        view: ?struct {
+            mode: ?[]const u8 = null,
+            expanded_folders: []const []const u8 = &.{},
+        } = null,
+        layout: struct {
+            width: u32 = 380,
+            height: u32 = 700,
+        } = .{},
     };
 
     var parsed = std.json.parseFromSlice(Wire, allocator, bytes, .{
@@ -211,6 +233,14 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
     settings.l2_budget_mib = @min(parsed.value.l2_budget_mib, max_l2_mib);
     settings.l3_budget_mib = @min(parsed.value.l3_budget_mib, max_budget_mib);
     settings.opacity = @intCast(std.math.clamp(parsed.value.opacity, 0, 255));
+    if (parsed.value.view) |view| {
+        settings.view.mode = settings_v2.ViewMode.parse(view.mode);
+        for (view.expanded_folders) |path| {
+            settings.view.expanded_folders.set(path, true) catch {};
+        }
+    }
+    settings.layout.width = std.math.clamp(parsed.value.layout.width, 200, 16384);
+    settings.layout.height = std.math.clamp(parsed.value.layout.height, 150, 16384);
     if (parsed.value.update_url) |text| {
         settings.setUpdateUrl(text) catch |err| switch (err) {
             error.UrlTooLong => std.debug.print(
@@ -270,6 +300,9 @@ test "round-trip：五个字段经原子写读回来一模一样（含 URL 转�
     original.opacity = alphaFromPercent(60);
     try testing.expectEqual(@as(u8, 153), original.opacity);
     try original.setUpdateUrl("https://example.com/feed.json?channel=dev&lang=zh");
+    original.layout = .{ .width = 640, .height = 900 };
+    original.view.mode = .browse;
+    try original.view.expanded_folders.set("D:/素材包/一层", true);
 
     try original.save(testing.io, path);
     try tmp.dir.access(testing.io, "settings.json", .{});
@@ -281,6 +314,10 @@ test "round-trip：五个字段经原子写读回来一模一样（含 URL 转�
     try testing.expectEqual(@as(u32, 512), loaded.l3_budget_mib);
     try testing.expectEqual(@as(u8, 153), loaded.opacity);
     try testing.expectEqualStrings("https://example.com/feed.json?channel=dev&lang=zh", loaded.update_url.?);
+    try testing.expectEqual(@as(u32, 640), loaded.layout.width);
+    try testing.expectEqual(@as(u32, 900), loaded.layout.height);
+    try testing.expectEqual(settings_v2.ViewMode.browse, loaded.view.mode);
+    try testing.expect(loaded.view.expanded_folders.contains("D:/素材包/一层"));
 
     // 重复写同一个目标：旧文件被替换，不是追加。
     original.always_on_top = false;
@@ -310,6 +347,33 @@ test "缺字段用默认值；空 URL 读回来是 null" {
     var clear = decode(testing.allocator, empty_url);
     defer clear.deinit();
     try testing.expect(clear.update_url == null);
+}
+
+test "设置 v1 自动迁移：旧字段一个不少，写回只写 v2 并补 view/layout 默认值" {
+    const legacy =
+        \\{"always_on_top":true,"update_url":"https://old.example/feed.json","l2_budget_mib":24,"l3_budget_mib":512,"opacity":153,"future_field":"保留原文件时由写盘策略决定"}
+    ;
+    var migrated = decode(testing.allocator, legacy);
+    defer migrated.deinit();
+    try testing.expect(migrated.always_on_top);
+    try testing.expectEqual(@as(u32, 24), migrated.l2_budget_mib);
+    try testing.expectEqual(@as(u32, 512), migrated.l3_budget_mib);
+    try testing.expectEqual(@as(u8, 153), migrated.opacity);
+    try testing.expectEqualStrings("https://old.example/feed.json", migrated.update_url.?);
+    try testing.expectEqual(settings_v2.ViewMode.library, migrated.view.mode);
+    try testing.expectEqual(@as(usize, 0), migrated.view.expanded_folders.items.items.len);
+    try testing.expectEqual(@as(u32, 380), migrated.layout.width);
+    try testing.expectEqual(@as(u32, 700), migrated.layout.height);
+
+    const bytes = try migrated.toJson(testing.allocator);
+    defer testing.allocator.free(bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"version\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"view\":") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"layout\":{\"width\":380,\"height\":700}") != null);
+    var written = decode(testing.allocator, bytes);
+    defer written.deinit();
+    try testing.expect(written.always_on_top);
+    try testing.expectEqualStrings("https://old.example/feed.json", written.update_url.?);
 }
 
 test "坏 JSON / 类型不对：回到默认值，不报错" {

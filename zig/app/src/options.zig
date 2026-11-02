@@ -60,7 +60,7 @@ pub const Options = struct {
     import_into: ?[]const u8 = null,
     /// `--import` 的底库：`.otto` 或旧 JSON，按 magic 判断。缺省 = 新建空库。
     import_library: ?[]const u8 = null,
-    /// `--import` 的输出路径（OTTOLIB v1，原子写）。
+    /// `--import` 的输出路径（OTTOLIB v2，原子写）。
     save_path: ?[]const u8 = null,
     /// `--browse <dir>`：进入"浏览模式"（只读地把一个真实目录列成列表）。
     /// 必须指向**目录**：给文件就是 exit 2（见 `main.zig` / `browse.resolveTarget`）。

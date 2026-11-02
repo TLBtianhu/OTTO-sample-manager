@@ -144,12 +144,14 @@ test "buildSample：名称去扩展名、时长换算、无 L1 时 pending_metad
         .kind = .wav,
         .estimated = false,
     };
-    const sample = import_cli.buildSample(fact, metadata, "im_test", 1_800_000_000_000);
+    const sample = import_cli.buildSample(fact, metadata, "im_test", 1_800_000_000_000, "C:\\packs");
 
     try testing.expectEqualStrings("im_test", sample.id);
     try testing.expectEqualStrings("Kick 01", sample.file_name);
     try testing.expectEqualStrings(".wav", sample.file_ext);
     try testing.expectEqualStrings("C:\\packs\\Kick 01.wav", sample.file_path);
+    try testing.expectEqualStrings("C:\\packs", sample.rootPath());
+    try testing.expectEqualStrings("Kick 01.wav", sample.relativePath());
     try testing.expectEqualStrings("im_test", sample.original_id);
     try testing.expect(sample.duration == 0.8);
     try testing.expectEqual(@as(u32, 22_050), sample.sample_rate);
@@ -169,7 +171,7 @@ test "buildSample：名称去扩展名、时长换算、无 L1 时 pending_metad
         .mtime = 0,
         .identity = null,
     };
-    const image = import_cli.buildSample(image_fact, null, "im_img", 0);
+    const image = import_cli.buildSample(image_fact, null, "im_img", 0, "C:\\packs");
     try testing.expect(image.duration == 0);
     try testing.expectEqual(@as(u32, 0), image.sample_rate);
     try testing.expect(image.pending_metadata);
@@ -335,7 +337,11 @@ test "端到端：3 wav + 2 png + 子目录 → 导入 5 条，再导入 added=0
             try testing.expect(sample.pending_metadata);
             try testing.expect(sample.duration == 0);
         }
-        // id 规则在真实样本上也要成立：im_ + 16 位十六进制。
+        // id 规则在真实样本上也要成立：im_ + 16 位十六进制；根内层级必须落库。
+        try testing.expectEqualStrings(fixture.absoluteRoot(), sample.rootPath());
+        if (std.mem.eql(u8, sample.file_name, "tone_1320")) {
+            try testing.expectEqualStrings("sub\\tone_1320.wav", sample.relativePath());
+        }
         try testing.expect(std.mem.startsWith(u8, sample.id, "im_"));
         try testing.expectEqual(@as(usize, 19), sample.id.len);
     }

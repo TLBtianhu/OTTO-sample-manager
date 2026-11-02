@@ -18,8 +18,11 @@ test {
     _ = @import("reconcile.zig");
     _ = @import("diagnostics.zig");
     _ = @import("store_test.zig");
+    _ = @import("store_rebuild_test.zig");
     _ = @import("library_binary.zig");
     _ = @import("library_binary_test.zig");
+    _ = @import("library_migration_test.zig");
+    _ = @import("sample_location.zig");
     _ = @import("cache_test.zig");
     _ = @import("annotations.zig");
     _ = @import("annotations_test.zig");

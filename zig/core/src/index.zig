@@ -49,8 +49,11 @@
 //!     用路径哈希表要么丢掉重复路径、要么多一层「下标失效」的维护。按 2000 条素材、
 //!     每批几十条事件的量级，线性扫描是微秒级；真到了十万条再换索引。
 //!   * 同一路径在 `Library` 里出现多次时，`locate` 只认第一条。
-//!   * 本模块不维护分组 / 目录的双向关系（那是 `Library` + `reconcile` 的事），
-//!     新建样本的 `folder_id` 是 null、`group_ids` 为空。
+//!   * **本模块只是事件收集器，不是完整业务快照**：created 的 `folder_id` 暂为 null、
+//!     `group_ids` 为空；`query.*` 仍只读 `Library` 旧快照。需要查询或写盘前，调用
+//!     `store_rebuild.rebuild`，统一补齐目录缓存并闭合既有分组关系。
+//!   * created 的根归属使用 `sample_location.inferFromLibrary`：最长已有根优先，
+//!     无匹配才退到父目录；`renamed` 另走 `updateBorrowed` 保留原根。
 //!   * OOM 时 `apply` 可能已经应用了前面几条事件：视图保持一致（没有悬空字符串），
 //!     但这一批不完整，调用方应把错误当作「需要重建」的信号。
 
@@ -58,6 +61,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const rescan = @import("rescan.zig");
 const store = @import("store.zig");
+const sample_location = @import("sample_location.zig");
 
 /// 一条文件变更事件。
 ///
@@ -371,11 +375,14 @@ pub const Index = struct {
         try self.items.ensureUnusedCapacity(self.allocator, 1);
         try self.owned.ensureUnusedCapacity(self.allocator, 2);
 
+        const location = sample_location.inferFromLibrary(owned_path, self.library.samples);
         self.items.appendAssumeCapacity(.{
             .id = sample_id,
             .file_name = model.fileNameFromPath(owned_path),
             .file_ext = model.fileExtFromPath(owned_path),
             .file_path = owned_path,
+            .root_path = @intCast(location.root_path.len),
+            .relative_path = @intCast(owned_path.len - location.relative_path.len),
             // 与 store 的口径一致：没写 originalId 的样本，original_id 等于 id。
             .original_id = sample_id,
             .imported_at = 0,
@@ -398,6 +405,7 @@ pub const Index = struct {
 
         const old_path = sample.file_path;
         sample.file_path = owned_path;
+        sample_location.updateBorrowed(sample);
         sample.file_name = model.fileNameFromPath(owned_path);
         sample.file_ext = model.fileExtFromPath(owned_path);
         self.ownString(owned_path);
@@ -456,6 +464,7 @@ pub const Index = struct {
         const sample = &self.items.items[position];
         const old_path = sample.file_path;
         sample.file_path = new_path;
+        sample_location.updateBorrowed(sample);
         sample.file_name = model.fileNameFromPath(new_path);
         sample.file_ext = model.fileExtFromPath(new_path);
         self.ownString(new_path);

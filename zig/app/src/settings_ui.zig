@@ -381,6 +381,19 @@ pub const Panel = struct {
         }
     }
 
+    /// 库树展开状态变化后立刻持久化；浏览模式仍由 save 拒绝写盘。
+    pub fn saveViewState(self: *Panel) void {
+        self.save();
+    }
+
+    /// 正常关闭时记录最后的窗口尺寸；每次关闭最多写一次。
+    pub fn recordWindowClose(self: *Panel, window: *nanoui.Window) void {
+        const frame = window.frame();
+        self.settings.layout.width = @intFromFloat(@round(@max(200, frame.width)));
+        self.settings.layout.height = @intFromFloat(@round(@max(150, frame.height)));
+        self.save();
+    }
+
     fn save(self: *Panel) void {
         // 浏览模式（`--browse` / 位置参数给的是目录）：只读，不写设置文件。
         // 用户"只是看一眼一个目录"，不该让这次运行留下任何持久化痕迹。
