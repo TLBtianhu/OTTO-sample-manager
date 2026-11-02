@@ -64,7 +64,7 @@ param(
   [string]$Samples = 'C:\src\otto-testkit\samples',
   # 默认取 dist 里最新的 setup.exe；显式给了就必须存在。
   [string]$Version = '',
-  # 第 8 步要装的"另一个版本"；默认取比 $Version 小的最新一个。
+  # 第 8 步要装的"另一个 v2 版本"；默认取比 $Version 小的最新一个。
   [string]$OldVersion = '',
   # 反向对照（只在证明"断言会红"时用）：第 9 步覆盖安装之前把 library.otto 改名，
   # 数据层断言必须红、整次运行必须 exit 1。正常验收不要带这个开关。
@@ -646,26 +646,24 @@ function Invoke-OverwriteUpgrade {
     ($seedRun.Code -eq 0) -and ($seedLine -eq ('otto-lite {0} (installed)' -f $FromVersion))) (
       '输出了 “{0}”' -f $seedLine)
 
-  # ---- 起点数据也必须由旧版生成：新版 v2 库/设置 → 旧版 → 新版不算迁移验收 ----
-  # 第 6 步已经由新版写过数据；这里在临时用户目录里清掉库，让旧版重新导入，
-  # 并用旧版设置面板写回无 version 的平铺 settings.json。后面的字节不变断言
-  # 仍然针对“安装器本身”；新进程读取这份 v1 数据由 --library-info 验收。
+  # ---- 起点数据必须由旧版生成：验证 v2 旧库 → v2 新版的数据保留 ----
+  # 第 6 步已经由新版写过数据；这里在临时用户目录里清掉库，让旧版重新导入并写回设置。
+  # 后面的字节不变断言针对“安装器本身”；新进程读取同一份 v2 数据由 --library-info 验收。
   if (Test-Path -LiteralPath $libraryPath) { Remove-Item -LiteralPath $libraryPath -Force }
   $seedImport = Invoke-Native -ExePath $installedExe -ExeArguments ('--import-into "{0}"' -f $script:importSrc) -WorkDir $programDir -EnvMap (Get-ChildEnv)
-  Add-Check '升级起点由旧版重新导入 library.otto' (
+  Add-Check '升级起点由旧版重新导入 v2 library.otto' (
     ($seedImport.Code -eq 0) -and (Test-Path -LiteralPath $libraryPath -PathType Leaf)) (
       'exit={0}；{1}' -f $seedImport.Code, $seedImport.Text.Trim())
-  $seedShot = Join-Path $script:shotsDir 'upgrade-seed-v1-settings.png'
+  $seedShot = Join-Path $script:shotsDir 'upgrade-seed-v2-settings.png'
   $seedPanelArgs = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $seedShot, $script:panelScript
   $seedPanel = Invoke-Native -ExePath $installedExe -ExeArguments $seedPanelArgs -WorkDir $programDir -EnvMap (Get-ChildEnv)
   Add-Check '升级起点由旧版设置面板写回 settings.json' ($seedPanel.Code -eq 0) (
     'exit={0}；{1}' -f $seedPanel.Code, $seedPanel.Seconds)
-  $legacyBytes = [IO.File]::ReadAllBytes($libraryPath)
-  $legacySettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-  $legacyHasVersion = @($legacySettings.PSObject.Properties | Where-Object { $_.Name -eq 'version' }).Count -gt 0
-  Add-Check '升级起点确为 OTTOLIB v1 + 无 version 的旧设置' (
-    ($legacyBytes.Length -ge 10) -and ([BitConverter]::ToUInt16($legacyBytes, 8) -eq 1) -and (-not $legacyHasVersion)) (
-      'library.version={0}；settings.version present={1}' -f [BitConverter]::ToUInt16($legacyBytes, 8), $legacyHasVersion)
+  $seedBytes = [IO.File]::ReadAllBytes($libraryPath)
+  $seedSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+  Add-Check '升级起点确为 OTTOLIB v2 + settings v2' (
+    ($seedBytes.Length -ge 10) -and ([BitConverter]::ToUInt16($seedBytes, 8) -eq 2) -and ([int]$seedSettings.version -eq 2)) (
+      'library.version={0}；settings.version={1}' -f [BitConverter]::ToUInt16($seedBytes, 8), $seedSettings.version)
 
   # ---- 便携副本：program 旁边的兄弟目录，带自己的 data\ ----
   # 便携版不是"另一份安装"，它是用户从发布页下的 zip 解出来的一坨：数据跟程序走。
@@ -793,7 +791,7 @@ function Invoke-OverwriteUpgrade {
     if (@($dataDiff.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f (@($dataDiff.Changed) -join '、')) }
   }
 
-  # 数据不但要"字节还在"，还要"新版本真能读"：0.40.0 打开 0.39.0 时代留下的那份库。
+  # 数据不但要"字节还在"，还要"新版本真能读"：覆盖升级前的 v2 库升级后条数不变。
   $wantSamples = 0
   if ($script:importCount -gt 0) { $wantSamples = [int]$script:importCount }
   $infoRun = Invoke-Native -ExePath $installedExe -ExeArguments ('--library-info "{0}"' -f $libraryPath) -EnvMap (Get-ChildEnv)

@@ -154,12 +154,15 @@ test "四个具名损坏错误：BadMagic / UnknownVersion / Truncated / Checksu
         try std.testing.expectError(error.BadMagic, binary.decode(allocator, broken));
     }
 
-    // 版本未知
+    // v1 与未来版本都未知：只接受 v2，绝不退成空库
     {
         const broken = try allocator.dupe(u8, valid);
         defer allocator.free(broken);
-        std.mem.writeInt(u16, broken[8..10], 99, .little);
-        try std.testing.expectError(error.UnknownVersion, binary.decode(allocator, broken));
+        for ([_]u16{ 1, 99 }) |version| {
+            std.mem.writeInt(u16, broken[8..10], version, .little);
+            patchChecksum(broken);
+            try std.testing.expectError(error.UnknownVersion, binary.decode(allocator, broken));
+        }
     }
 
     // 截断一半 / 截掉 CRC 尾

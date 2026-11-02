@@ -35,7 +35,7 @@ zig build test
 | `src/diagnostics.zig` | `LoadError` 与 `LoadReport`（修复 / 丢弃计数） |
 | `src/reconcile.zig` | 旧数据修复：目录归属、扁平目录、目录树、分组双向关系、排序重建 |
 | `src/store.zig` | `Library`、`load` / `loadFile`，解析 map 形式的样本 / 分组 / 目录并装配索引 |
-| `src/library_binary.zig` | `OTTOLIB` v1/v2 解码、v2 编码：版本化头、定长字段、字符串长度与数量上限、尾部 CRC32，全部校验且绝不 panic（不碰 I/O） |
+| `src/library_binary.zig` | `OTTOLIB` 只解码 v2、只编码 v2：版本化头、定长字段、字符串长度与数量上限、尾部 CRC32，全部校验且绝不 panic（不碰 I/O） |
 | `src/store_rebuild.zig` | 把 `Index` 的事件收集结果重建为带目录/分组关系、可查询的 `Library` 业务快照 |
 | `src/query.zig` | 目录递归过滤、分组过滤、文件名子串过滤、排序、子树枚举 |
 | `src/annotations.zig` | 以 `StableKey`（身份优先）为键的注释表：`AnnotationTable` / `resolve` 旧库迁移 |
@@ -48,7 +48,7 @@ zig build test
 | `fixtures/*.json` | 全部为手工构造的合成数据，**不含任何真实用户数据** |
 | `fixtures/fixtures.zig` | 以 `@embedFile` 暴露 fixture 文本 |
 
-单文件均小于 600 行；`zig build test` 当前为 **93 个测试**。
+单文件均小于 600 行；`zig build test` 当前为 **90 个测试**。
 
 ## 公共 API 草图
 
@@ -376,7 +376,7 @@ Index    事件流上滚动的工作视图（单线程）
 
 ## 测试覆盖
 
-`zig build test` 共 93 个测试，其中：
+`zig build test` 共 90 个测试，其中：
 
 - `legacy_v1.json`：没有 `folderId` / `groupIds` 的旧数据补默认值、路径推导、扁平目录归位；
 - `dangling_refs.json`：目录 / 分组 / 父目录 / 排序表里的悬空引用全部清理并计数；

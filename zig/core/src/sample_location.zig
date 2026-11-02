@@ -1,8 +1,8 @@
 //! 素材的导入根与根内相对路径：纯字符串规则，不读盘。
 //!
-//! v1 没有这两个字段。迁移时优先采用旧 folderId 指向的目录；目录确实包住
-//! file_path 时，根就是该目录，余下部分就是相对路径。否则只能诚实退到
-//! “父目录 + 文件名”：v1 没存更早的导入根，不能凭路径形状虚构一层。
+//! 缺失这两个字段时，优先采用 folderId 指向的目录；目录确实包住 file_path 时，
+//! 根就是该目录，余下部分就是相对路径。否则退到“父目录 + 文件名”，不凭路径
+//! 形状虚构更早的导入根。
 const std = @import("std");
 const model = @import("model.zig");
 
@@ -129,7 +129,7 @@ pub fn setBorrowed(sample: *model.Sample, root: []const u8, relative: []const u8
     _ = assign(sample, fallback.root_path, fallback.relative_path);
 }
 
-/// 给缺失位置字段的旧样本补值；已有完整 v2 值原样保留。
+/// 给缺失位置字段的样本补值；已有完整 v2 值原样保留。
 /// 字符串不再重复分配，样本数、id 与分组均不改变。
 pub fn backfill(
     allocator: std.mem.Allocator,
@@ -150,7 +150,7 @@ pub fn updateBorrowed(sample: *model.Sample) void {
     setBorrowed(sample, location.root_path, location.relative_path);
 }
 
-test "v1 目录根可推出多层相对路径；不包路径时不假装是它" {
+test "目录根可推出多层相对路径；不包路径时不假装是它" {
     const location = infer("D:/packs/鼓/四层/Kick.wav", "D:/packs");
     try std.testing.expectEqualStrings("D:/packs", location.root_path);
     try std.testing.expectEqualStrings("鼓/四层/Kick.wav", location.relative_path);

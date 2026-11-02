@@ -1,4 +1,4 @@
-//! 自有二进制库快照：`OTTOLIB` v2 的编码（**不碰 I/O**，解码仍读 v1）。
+//! 自有二进制库快照：`OTTOLIB` v2 的编码（**不碰 I/O**，解码只接受 v2）。
 //!
 //! 为什么不是 SQLite（ROADMAP M3）：10k 量级的库完全装得进内存，查询本来就在
 //! 内存里做；为了持久化引入 sqlite3.dll 或自己实现 SQLite 文件格式都不划算。
@@ -14,8 +14,8 @@
 //! ```text
 //! 偏移  长度  字段
 //! 0     8     magic = "OTTOLIB\0"
-//! 8     2     version = 2（解码同时接受 v1）
-//! 10    2     flags（v1 必须为 0；将来变了就升 version）
+//! 8     2     version = 2（其它版本一律报 UnknownVersion）
+//! 10    2     flags（必须为 0；将来变了就升 version）
 //! 12    4     sample_count
 //! 16    4     group_count
 //! 20    4     folder_count
@@ -37,7 +37,7 @@
 //!          memory_optimization_mode / enable_chinese_pinyin_fuzzy_search 各 u8
 //! samples[sample_count]
 //!   字符串 id / file_name / file_ext / file_path
-//!   v2 新增字符串 root_path / relative_path（v1 解码后由旧目录或完整路径补出）
+//!   字符串 root_path / relative_path（导入根与根内相对路径）
 //!   u8 has_folder + 可选字符串 folder_id
 //!   字符串 original_id
 //!   u8 flags（bit0 is_copy，bit1 pending_metadata）

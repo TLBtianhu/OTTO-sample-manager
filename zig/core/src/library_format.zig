@@ -1,4 +1,4 @@
-//! `OTTOLIB` v1/v2 的共享常量 / 错误集合 / magic 判断。
+//! `OTTOLIB` v2 的共享常量 / 错误集合 / magic 判断。
 //!
 //! 编码（`library_binary.zig`）与解码（`library_binary_decode.zig`）都从这里取
 //! magic、版本号、上限和错误集合，避免两份常量漂移。本文件不碰 I/O，也不 import
@@ -8,7 +8,6 @@ const std = @import("std");
 
 pub const magic = "OTTOLIB\x00";
 pub const format_version: u16 = 2;
-pub const oldest_readable_version: u16 = 1;
 
 pub const header_size: usize = magic.len + 2 + 2 + 5 * 4 + 4;
 pub const crc_size: usize = 4;

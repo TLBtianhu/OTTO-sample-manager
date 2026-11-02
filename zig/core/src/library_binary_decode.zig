@@ -1,4 +1,4 @@
-//! `OTTOLIB` v1/v2 的解码：头校验、CRC、逐条记录、索引装配与引用闭合校验。
+//! `OTTOLIB` v2 的解码：头校验、CRC、逐条记录、索引装配与引用闭合校验。
 //!
 //! 编码在 `library_binary.zig`，共享常量在 `library_format.zig`。本文件与编码器
 //! 一样**不碰 I/O**：输入是一段已读入内存的字节，所有分配都在返回 `Library` 的
@@ -120,7 +120,7 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
     _ = try decoder.take(magic.len);
 
     const version = try decoder.readU16();
-    if (version < format.oldest_readable_version or version > format_version) return error.UnknownVersion;
+    if (version != format_version) return error.UnknownVersion;
     const flags = try decoder.readU16();
     if (flags != 0) return error.Corrupt;
 
@@ -162,7 +162,7 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
 
     var index: u32 = 0;
     while (index < sample_count) : (index += 1) {
-        try samples.append(allocator, try readSample(&decoder, version));
+        try samples.append(allocator, try readSample(&decoder));
     }
     index = 0;
     while (index < group_count) : (index += 1) {
@@ -284,13 +284,13 @@ fn readSettings(decoder: *Decoder) Error!model.Settings {
     return settings;
 }
 
-fn readSample(decoder: *Decoder, version: u16) Error!model.Sample {
+fn readSample(decoder: *Decoder) Error!model.Sample {
     const id = try decoder.readString();
     const file_name = try decoder.readString();
     const file_ext = try decoder.readString();
     const file_path = try decoder.readString();
-    const root_path = if (version >= 2) try decoder.readString() else "";
-    const relative_path = if (version >= 2) try decoder.readString() else "";
+    const root_path = try decoder.readString();
+    const relative_path = try decoder.readString();
     const has_folder = try decoder.readU8();
     if (has_folder > 1) return error.Corrupt;
     const folder_id: ?[]const u8 = if (has_folder == 1) try decoder.readString() else null;
@@ -331,7 +331,7 @@ fn readSample(decoder: *Decoder, version: u16) Error!model.Sample {
         .identity = identity,
         .pending_metadata = (flags & 2) != 0,
     };
-    if (version >= 2 and (root_path.len > 0 or relative_path.len > 0) and
+    if ((root_path.len > 0 or relative_path.len > 0) and
         !sample_location.assign(&result, root_path, relative_path)) return error.Corrupt;
     return result;
 }
