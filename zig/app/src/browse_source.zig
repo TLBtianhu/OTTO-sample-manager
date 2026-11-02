@@ -24,6 +24,7 @@
 const std = @import("std");
 const browse_dir = @import("otto_browse_dir");
 const types = @import("browse_types.zig");
+const path_store_mod = @import("browse_path_store.zig");
 
 const Entry = types.Entry;
 const Batch = types.Batch;
@@ -45,6 +46,8 @@ const Pause = struct {
 
 pub const Source = struct {
     allocator: std.mem.Allocator,
+    /// Entry.path / Pending.path 专用；可与消费线程并发，不能用于普通对象。
+    path_store: *path_store_mod.Store,
     io: std.Io,
     /// 被枚举目录的绝对路径。生产线程拥有；导航时在 beginPage 原子换代。
     root: []u8,
@@ -80,11 +83,12 @@ pub const Source = struct {
     };
 
     /// 起线程并立刻排第一趟枚举。返回的对象在堆上（线程持有它的指针）。
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, root: []const u8, page_limit: usize) InitError!*Source {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, root: []const u8, page_limit: usize, path_store: *path_store_mod.Store) InitError!*Source {
         const self = try allocator.create(Source);
         errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
+            .path_store = path_store,
             .io = io,
             .root = try allocator.dupe(u8, root),
             .page_limit = @max(1, @min(page_limit, types.hard_limit)),
@@ -119,7 +123,7 @@ pub const Source = struct {
         self.queue = .empty;
         self.lock.release();
         for (leftover.items) |node| {
-            types.freeEntries(self.allocator, node.items);
+            types.freeEntries(self.path_store.allocator(), node.items);
             if (node.items.len > 0) self.allocator.free(node.items);
             self.allocator.destroy(node);
         }
@@ -261,7 +265,7 @@ pub const Source = struct {
         while (page_rows < limit) {
             if (self.stop.load(.acquire) or self.epoch.load(.acquire) != epoch) {
                 // 有人要求重来 / 进程要退出：这一页作废（已发布的批次消费侧按 epoch 丢）。
-                types.freeEntries(self.allocator, batch.items);
+                types.freeEntries(self.path_store.allocator(), batch.items);
                 batch.deinit(self.allocator);
                 return;
             }
@@ -279,7 +283,7 @@ pub const Source = struct {
                     .is_directory = pending.is_directory,
                     .is_reparse_point = pending.is_reparse_point,
                 }) catch {
-                    self.allocator.free(pending.path);
+                    self.path_store.allocator().free(pending.path);
                     join_failures += 1;
                     continue;
                 };
@@ -303,7 +307,7 @@ pub const Source = struct {
                 break;
             }
 
-            const path = types.joinPath(self.allocator, self.root, entry.name) catch {
+            const path = self.path_store.join(self.root, entry.name) catch {
                 join_failures += 1;
                 continue;
             };
@@ -314,7 +318,7 @@ pub const Source = struct {
                 .is_directory = entry.isDirectory(),
                 .is_reparse_point = entry.isReparsePoint(),
             }) catch {
-                self.allocator.free(path);
+                self.path_store.allocator().free(path);
                 join_failures += 1;
                 continue;
             };
@@ -361,7 +365,7 @@ pub const Source = struct {
                 return;
             };
             const entry = next orelse return;
-            const path = types.joinPath(self.allocator, self.root, entry.name) catch {
+            const path = self.path_store.join(self.root, entry.name) catch {
                 skipped.* += 1;
                 continue;
             };
@@ -428,7 +432,7 @@ pub const Source = struct {
     /// 把一批行交给消费侧（所有权转移：条目数组 + 每条 path）。
     fn publishRows(self: *Source, epoch: u32, append: bool, batch: *std.ArrayListUnmanaged(Entry)) void {
         const items = batch.toOwnedSlice(self.allocator) catch {
-            types.freeEntries(self.allocator, batch.items);
+            types.freeEntries(self.path_store.allocator(), batch.items);
             batch.clearRetainingCapacity();
             return;
         };
@@ -463,7 +467,7 @@ pub const Source = struct {
 
     fn publish(self: *Source, batch: Batch) void {
         const node = self.allocator.create(Batch) catch {
-            types.freeEntries(self.allocator, batch.items);
+            types.freeEntries(self.path_store.allocator(), batch.items);
             if (batch.items.len > 0) self.allocator.free(batch.items);
             return;
         };
@@ -471,7 +475,7 @@ pub const Source = struct {
         self.lock.acquire();
         self.queue.append(self.allocator, node) catch {
             self.lock.release();
-            types.freeEntries(self.allocator, node.items);
+            types.freeEntries(self.path_store.allocator(), node.items);
             if (node.items.len > 0) self.allocator.free(node.items);
             self.allocator.destroy(node);
             return;
@@ -485,7 +489,7 @@ pub const Source = struct {
     }
 
     fn freePending(self: *Source) void {
-        if (self.pending) |pending| self.allocator.free(pending.path);
+        if (self.pending) |pending| self.path_store.allocator().free(pending.path);
         self.pending = null;
     }
 };

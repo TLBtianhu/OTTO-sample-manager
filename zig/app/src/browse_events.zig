@@ -37,26 +37,26 @@ pub fn apply(session: *browse.Session, event: watch.Event, report: *types.Report
 }
 
 fn eventCreated(session: *browse.Session, relative: []const u8, report: *types.Report) error{OutOfMemory}!bool {
-    const full = try types.joinPath(session.allocator, session.root, relative);
+    const full = try session.path_store.join(session.root, relative);
 
     if (indexOfPath(session, full)) |index| {
         // 重复事件（枚举期间已经收过这条）：只刷新大小/时间。
-        session.allocator.free(full);
+        session.pathAllocator().free(full);
         return refreshStat(session, index);
     }
 
     // 新条目：stat 一次决定它是文件还是目录（监听也会报子目录创建）。
     const stat = std.Io.Dir.cwd().statFile(session.io, full, .{}) catch {
-        session.allocator.free(full);
+        session.pathAllocator().free(full);
         session.skipped +|= 1;
         return false;
     };
     if (stat.kind != .directory and stat.kind != .file) {
-        session.allocator.free(full);
+        session.pathAllocator().free(full);
         return false;
     }
 
-    errdefer session.allocator.free(full);
+    errdefer session.pathAllocator().free(full);
     // 先给去重表留好位置：两条 append 之间失败会留下一条没人释放的条目。
     try session.event_paths.ensureUnusedCapacity(session.allocator, 1);
     try session.entries.append(session.allocator, .{
@@ -73,8 +73,8 @@ fn eventCreated(session: *browse.Session, relative: []const u8, report: *types.R
 }
 
 fn eventRemoved(session: *browse.Session, relative: []const u8, report: *types.Report) error{OutOfMemory}!bool {
-    const full = try types.joinPath(session.allocator, session.root, relative);
-    defer session.allocator.free(full);
+    const full = try session.path_store.join(session.root, relative);
+    defer session.pathAllocator().free(full);
 
     const index = indexOfPath(session, full) orelse return false;
     // 选中/光标那一行被删：留成墓碑（"已删除"），选中项由 `restore` 移到相邻行。
@@ -101,8 +101,8 @@ fn eventRemoved(session: *browse.Session, relative: []const u8, report: *types.R
 }
 
 fn eventModified(session: *browse.Session, relative: []const u8, report: *types.Report) error{OutOfMemory}!bool {
-    const full = try types.joinPath(session.allocator, session.root, relative);
-    defer session.allocator.free(full);
+    const full = try session.path_store.join(session.root, relative);
+    defer session.pathAllocator().free(full);
 
     const index = indexOfPath(session, full) orelse return false;
     if (!refreshStat(session, index)) return false;
@@ -116,8 +116,8 @@ fn eventRenamed(
     new_relative: []const u8,
     report: *types.Report,
 ) error{OutOfMemory}!bool {
-    const old_full = try types.joinPath(session.allocator, session.root, old_relative);
-    defer session.allocator.free(old_full);
+    const old_full = try session.path_store.join(session.root, old_relative);
+    defer session.pathAllocator().free(old_full);
 
     const index = indexOfPath(session, old_full) orelse {
         // 旧路径没在视图里（枚举前就改了名）：按新文件处理。
@@ -125,24 +125,24 @@ fn eventRenamed(
     };
     if (session.entries.items[index].deleted) return false;
 
-    const new_full = try types.joinPath(session.allocator, session.root, new_relative);
+    const new_full = try session.path_store.join(session.root, new_relative);
     const entry = &session.entries.items[index];
     const stat = std.Io.Dir.cwd().statFile(session.io, new_full, .{}) catch {
         // 新名字已经不可读（又被删了）：这一行按删除处理。
-        session.allocator.free(new_full);
+        session.pathAllocator().free(new_full);
         removeAt(session, index);
         report.removed += 1;
         return true;
     };
     if (stat.kind != .directory and stat.kind != .file) {
-        session.allocator.free(new_full);
+        session.pathAllocator().free(new_full);
         removeAt(session, index);
         report.removed += 1;
         return true;
     }
     const was_event_row = forgetEventPath(session, entry.path);
     if (was_event_row) try session.event_paths.ensureUnusedCapacity(session.allocator, 1);
-    session.allocator.free(entry.path);
+    session.pathAllocator().free(entry.path);
     entry.path = new_full;
     entry.size = stat.size;
     entry.mtime = types.mtimeMs(stat);
@@ -179,7 +179,7 @@ fn removeAt(session: *browse.Session, index: usize) void {
     const entry = session.entries.orderedRemove(index);
     if (entry.deleted) session.tombstones -|= 1;
     _ = forgetEventPath(session, entry.path);
-    session.allocator.free(entry.path);
+    session.pathAllocator().free(entry.path);
 }
 
 /// 这条路径是"监听事件先加进来的"吗？是就从去重表里摘掉（返回 true）。

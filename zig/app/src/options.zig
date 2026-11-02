@@ -89,6 +89,8 @@ pub const Options = struct {
     browse_limit: usize = browse_types.default_limit,
     /// `--pages=<N>`：`--browse-probe` 在首批之后最多再点几次「加载更多」。
     browse_pages: u32 = 0,
+    /// 反向对照：关闭紧凑路径块，恢复逐条路径堆分配。
+    browse_legacy_paths: bool = false,
     /// `--force-rescan`：`--browse-watch-probe` 在跑完首批后强制一次全量重扫。
     browse_force_rescan: bool = false,
     /// `--rescan-pause-ms=<N>`：配合 `--force-rescan`——重扫枚举到一半时暂停 N ms，
@@ -546,6 +548,7 @@ test "分页/重扫/消失参数：默认值与两种写法；越界的页大小
     try testing.expectEqual(@as(usize, 50_000), plain.browse_limit);
     try testing.expectEqual(@as(u32, 0), plain.browse_pages);
     try testing.expect(!plain.browse_force_rescan);
+    try testing.expect(!plain.browse_legacy_paths);
     try testing.expect(plain.browse_vanish_seconds == null);
 
     const spaced = try parse(&[_][]const u8{
@@ -560,9 +563,10 @@ test "分页/重扫/消失参数：默认值与两种写法；越界的页大小
     try testing.expectEqual(@as(?f64, 1.5), spaced.browse_vanish_seconds);
 
     const joined = try parse(&[_][]const u8{
-        "otto-lite",              "--browse-limit=200000",  "--pages=1", "--rescan-pause-ms=0",
-        "--copy-during-rescan=1", "--vanish-then-return=0",
+        "otto-lite",              "--browse-limit=200000",  "--pages=1",             "--rescan-pause-ms=0",
+        "--copy-during-rescan=1", "--vanish-then-return=0", "--browse-legacy-paths",
     });
+    try testing.expect(joined.browse_legacy_paths);
     try testing.expectEqual(@as(usize, 200_000), joined.browse_limit);
     try testing.expectEqual(@as(?f64, 0), joined.browse_vanish_seconds);
 
