@@ -8,6 +8,8 @@
 //!
 //! 顺序就是依赖顺序，不要重排：
 //!   * 行来源先开（库打不开 = 一行具名错误 + 退出 1；浏览目录打不开 = exit 2）；
+//!     普通启动的库加载跑在**工作线程**上，与 `App.create`（第一个 HWND）重叠
+//!     （见 `LibraryLoad`）；`--mem-probe` 与浏览模式仍是顺序读；
 //!   * `Live` 借用库（`Index` 不复制样本）；浏览模式给一个空库 + `Live.initIdle`，
 //!     只为了让 `main.State` 与「导入文件夹」的状态机有类型正确的对象（那个按钮在
 //!     浏览模式下不显示，浏览模式也绝不写库）；
@@ -69,6 +71,117 @@ pub const Boot = struct {
     }
 };
 
+/// 库加载在工作线程上的那一段：普通启动把它与 `App.create`（进程里第一个
+/// HWND，本机 55–67 ms 的 win32k 一次性成本）重叠，省掉读文件 + JSON 解码的
+/// 5–6 ms（`PERF.md` §12.5 记的就是这一条）。
+///
+/// 为什么能重叠：`App.create` 只认字体目录 / 字体索引缓存 / 上屏方式，与库内容
+/// 无关；第一个读 `library.samples` 的是 `Live.init`，所以把 `live` 排到 join
+/// 之后即可。join 在 `boot` 返回**之前**，`main` 拿到的 `Live` 一定是加载完的
+/// 视图——窗口还没建，所以不存在"先画空列表再跳变"。
+///
+/// 为什么不给 `--mem-probe` 用：它的六时刻表要**归因**——"载入库"那一行必须只
+/// 含库的页。重叠之后库的 ~8 MiB 会落在 `app` 那一行，两个阶段就分不开了。
+/// 探针只量内存、不量启动时间，所以那里保留顺序读（`probe.active`）。
+///
+/// 线程起不来（内存 / 句柄上限）就在调用线程里同步读完：重叠是优化，不是正确性。
+const LibraryLoad = struct {
+    thread: ?std.Thread = null,
+    job: Job = .{},
+
+    const Job = struct {
+        io: std.Io = undefined,
+        gpa: std.mem.Allocator = undefined,
+        path: []const u8 = "",
+        target: *core.store.Library = undefined,
+        /// 工作线程写、主线程在 `join` 之后读，所以不需要锁。
+        opened: ?library_io.Opened = null,
+        failure: ?library_io.LoadError = null,
+        /// 工作线程自己量的加载耗时（`setup.library` 的 `worker_ms=`）。
+        ms: f64 = 0,
+    };
+
+    /// `overlap = false` 时在调用线程里同步读完（探针与浏览模式）。
+    fn begin(
+        self: *LibraryLoad,
+        init: std.process.Init,
+        path: []const u8,
+        target: *core.store.Library,
+        overlap: bool,
+    ) void {
+        self.job = .{ .io = init.io, .gpa = init.gpa, .path = path, .target = target };
+        // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：只做一次读文件 + 解码。
+        if (overlap) {
+            self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, loadMain, .{&self.job}) catch null;
+        }
+        if (self.thread == null) loadMain(&self.job);
+    }
+
+    /// 等线程结束，并把结果落到 `library`。失败按"打开库失败"退出 1（与改动前
+    /// 完全相同的一句话、同一个退出码）。
+    fn adopt(self: *LibraryLoad) void {
+        self.join();
+        const job = &self.job;
+        if (job.failure) |err| {
+            // 存在但读不了 / 损坏：一行具名错误 + 退出 1（"不存在"已在 open 里变成空库）。
+            std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ job.path, @errorName(err) });
+            std.process.exit(1);
+        }
+        const opened = job.opened orelse return;
+        job.opened = null;
+        // 文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态。
+        if (opened.empty) std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{job.path});
+        job.target.* = opened.library;
+    }
+
+    fn join(self: *LibraryLoad) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+    }
+
+    /// 出错返回时收线程（它拿着 `library` 的指针）。已经 join 过就是空操作。
+    fn abandon(self: *LibraryLoad) void {
+        self.join();
+        if (self.job.opened) |opened| {
+            var library = opened.library;
+            library.deinit();
+            self.job.opened = null;
+        }
+    }
+};
+
+/// 工作线程体：只读库、只写 `job`，不打印（日志与退出语义留给 `adopt`，
+/// 免得和主线程的 `otto-trace` 行交错）。
+fn loadMain(job: *LibraryLoad.Job) void {
+    const started = trace.now();
+    job.opened = library_io.openWith(job.io, job.gpa, job.path) catch |err| {
+        job.failure = err;
+        return;
+    };
+    job.ms = (trace.now() - started) * 1000;
+}
+
+/// 建 `Live`（库的视图 + watcher）。浏览模式 = 空库 + `initIdle`。
+/// 单独成函数是因为它在两条启动顺序里位置不同（见 `boot` 里的注释）。
+fn makeLive(
+    init: std.process.Init,
+    library: *core.store.Library,
+    root: []const u8,
+    browse: bool,
+    force_watch: bool,
+) !*live_mod.Live {
+    const live = try init.gpa.create(live_mod.Live);
+    errdefer init.gpa.destroy(live);
+    if (browse) {
+        live.* = try live_mod.Live.initIdle(init.gpa, init.io, library);
+    } else {
+        live.* = try live_mod.Live.init(init.gpa, init.io, library, root, force_watch);
+    }
+    return live;
+}
+
 /// 按运行形态把一切建起来。`allocator` 是 `init.arena`（只放路径字符串、不释放）。
 ///
 /// 失败时按已建成的部分逆序回收（`errdefer` 与本函数里各 `try` 的先后一一对应），
@@ -85,21 +198,22 @@ pub fn boot(
     const library = try init.gpa.create(core.store.Library);
     errdefer init.gpa.destroy(library);
 
+    // 库加载：普通启动放到**工作线程**里，与后面的 `App.create`（进程里第一个
+    // HWND，本机 55–67 ms 的 win32k 一次性成本）重叠；`--mem-probe` 与浏览模式
+    // 保持顺序读（原因见 `LibraryLoad`）。线程拿着 `library` 的指针，所以下面
+    // 紧跟一条"出错先 join、再释放库"的 errdefer。
+    var load: LibraryLoad = .{};
     var browse_session: ?*browse_mod.Session = null;
     var library_path: []const u8 = default_library_path;
+    var overlap = false;
     switch (target) {
         .library => |requested| {
             // 空串 = 调用方没给位置参数（`browse_target` 用它表示"用形态默认值"）。
             const path = if (requested.len > 0) requested else default_library_path;
-            const opened = library_io.open(init, init.gpa, path) catch |err| {
-                // 存在但读不了 / 损坏：一行具名错误 + 退出 1（"不存在"已在 open 里变成空库）。
-                std.debug.print("otto-lite: 打开库失败 file={s} error={s}\n", .{ path, @errorName(err) });
-                std.process.exit(1);
-            };
-            // 文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态。
-            library.* = opened.library;
-            if (opened.empty) std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{path});
             library_path = path;
+            // 探针的"六时刻"要能把库的页归到 `library` 那一行：它不重叠。
+            overlap = !probe.active;
+            load.begin(init, path, library, overlap);
         },
         .browse => |dir| {
             // 浏览模式：**没有库文件**。内存里一个空库只为 `Import` 的类型；
@@ -121,22 +235,27 @@ pub fn boot(
         library.deinit();
         init.gpa.destroy(library);
     }
+    // 加载线程拿着 `library` 的指针：出错返回时它必须比释放库先收掉。
+    // LIFO：本行声明在"释放库"那条之后，所以先执行。
+    errdefer load.abandon();
     errdefer if (browse_session) |session| session.deinit();
-    trace.mark("setup.library");
-    probe.mark("library", .{});
+    if (!overlap) {
+        load.adopt();
+        trace.mark("setup.library");
+        probe.mark("library", .{});
+    }
 
     const root = try mode_mod.watchRoot(allocator, init.io, options.watch_dir, library_path);
-    const live = try init.gpa.create(live_mod.Live);
-    errdefer init.gpa.destroy(live);
-    if (browse_session != null) {
-        live.* = try live_mod.Live.initIdle(init.gpa, init.io, library);
-    } else {
-        live.* = try live_mod.Live.init(init.gpa, init.io, library, root, options.watch_dir != null);
-    }
-    trace.mark("setup.live");
-    errdefer {
+    // `live` 的位置随启动顺序走：探针/浏览在库就绪后立刻建（六时刻表原样：
+    // 库→live→…）；普通启动要等库加载 join（在 `App.create` 之后）才建。
+    var live_store: ?*live_mod.Live = null;
+    errdefer if (live_store) |live| {
         live.deinit();
         init.gpa.destroy(live);
+    };
+    if (!overlap) {
+        live_store = try makeLive(init, library, root, browse_session != null, options.watch_dir != null);
+        trace.mark("setup.live");
     }
 
     // 设置：三种形态都写各自的数据目录（dev 在 %LOCALAPPDATA%\OTTO\dev），
@@ -182,6 +301,17 @@ pub fn boot(
     if (probe.active) app.flags.hidden = true;
     probe.mark("app", .{});
     errdefer app.destroy();
+
+    // 库加载线程到这儿一定跑完了：`App.create` 那 55–67 ms 已经把它盖住。
+    // join 之后才建 `Live`（它要读样本），所以列表从第一帧起就是完整内容——
+    // 不存在"先画空列表再跳变"。
+    if (overlap) {
+        load.adopt();
+        trace.markf("setup.library", "worker_ms={d:.2} overlapped=1", .{load.job.ms});
+        live_store = try makeLive(init, library, root, false, options.watch_dir != null);
+        trace.mark("setup.live");
+    }
+    const live = live_store.?;
 
     return .{
         .gpa = init.gpa,
