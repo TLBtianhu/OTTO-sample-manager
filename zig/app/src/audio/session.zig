@@ -49,6 +49,8 @@ pub fn build(
     allocator: std.mem.Allocator,
     decoded: *Decoded,
 ) player.Error!preview.AudioSession {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const peaks_started = std.Io.Clock.Timestamp.now(io, .awake);
     const peaks = try peaks_mod.compute(
         allocator,
         decoded.pcm,
@@ -58,6 +60,8 @@ pub fn build(
         peaks_mod.default_buckets,
     );
     errdefer peaks.deinit(allocator);
+    const peaks_ms = @as(f64, @floatFromInt(peaks_started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
+    const wave_started = std.Io.Clock.Timestamp.now(io, .awake);
     const bitmap = try waveform.render(
         allocator,
         peaks,
@@ -66,6 +70,8 @@ pub fn build(
         waveform.default_color,
     );
     errdefer bitmap.deinit(allocator);
+    const wave_ms = @as(f64, @floatFromInt(wave_started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
+    const player_started = std.Io.Clock.Timestamp.now(io, .awake);
 
     const created = try player.Player.create(
         allocator,
@@ -75,6 +81,7 @@ pub fn build(
         decoded.bits,
         decoded.format == .float,
     );
+    const player_ms = @as(f64, @floatFromInt(player_started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
     const session: preview.AudioSession = .{
         .pcm = decoded.pcm,
         .sample_rate = decoded.sample_rate,
@@ -85,7 +92,14 @@ pub fn build(
         .player = created,
         .peaks = peaks,
         .waveform = bitmap,
+        // 非渐进会话的第一版就是最终版：完成列数 = 整条宽度（空 peaks 为 0）。
+        // 视图把它放进图像缓存键，和渐进会话用同一套规则。
+        .waveform_version = waveform.completeColumns(peaks.len(), bitmap.width, peaks.len()),
     };
+    std.debug.print(
+        "otto-lite: audio-phase peaks_ms={d:.2} waveform_ms={d:.2} player_ms={d:.2}\n",
+        .{ peaks_ms, wave_ms, player_ms },
+    );
     // 所有权已经交给会话；`Decoded.deinit` 之后只释放空切片。
     decoded.pcm = &.{};
     return session;

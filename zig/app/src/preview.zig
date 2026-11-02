@@ -61,6 +61,10 @@
 //!     算出的波形峰值（`peaks`）与渲染好的位图（`waveform`），以及一个
 //!     `audio/player.zig` 的 `Player`（设备句柄 + 播放线程）。`AudioSession.deinit`
 //!     负责停播、join、释放全部四样；`Outcome.deinit` 已经带 allocator，调用方不用改；
+//!   * `audio.progress`（非 null 时）指向后台渐进式解码器：它**临时**拥有还没交出来
+//!     的 PCM / 峰值 / Player，`pump`/`waitComplete` 完成时把所有权移进会话，
+//!     `deinit` 先 cancel（join 线程）再 destroy。契约层只认识 `AudioProgress` 的
+//!     vtable，不认识 `zig_audio` 或线程实现（实现见 `audio/progressive.zig`）；
 //!   * `frames` 本阶段仍是占位，不持有任何系统句柄或内存；
 //!     `Outcome.deinit` 仍会走它的 `deinit`，将来接上会话时不需要改调用方；
 //!   * `Registry.open` **不复制** `sample`：调用期间它必须有效。`preview_panel`
@@ -149,9 +153,43 @@ pub const Bitmap = struct {
     }
 };
 
-/// 一张"没有图"的位图：零尺寸、空像素、不拥有任何内存。会话没有波形时用它，
+/// "没有图"的位图：零尺寸、空像素、不拥有任何内存。会话没有波形时用它，
 /// 视图因此可以照常画（`width == 0` 时直接跳过），不用额外判空指针。
 pub const emptyBitmap: Bitmap = .{ .pixels = &.{}, .width = 0, .height = 0, .stride = 0 };
+
+/// 后台解码的**最小接口**：`AudioSession` 只知道"有个东西在继续解码、可以问它
+/// 进度、可以取消"，不认识 `zig_audio`、不认识线程、不认识 `audio/progressive.zig`。
+///
+/// 为什么用 vtable 而不是直接放一个 `*progress.Engine`：契约层（本文件）不能
+/// import 实现层（progressive 要 import 本文件拿 `AudioSession`），否则就成了
+/// 循环依赖。带函数指针的 `ctx + vtable` 让两边都只依赖本文件。
+///
+/// 线程约定（实现方必须遵守）：
+///   * `pump` / `wait` / `cancel` / `requestPlay` 只由 **UI 线程**调用；
+///   * `pump` 把新完成的峰值画进 `session.waveform`，完成时把最终的 PCM / 峰值 /
+///     Player 移进 `session`（所有权一次性转移），并返回"画面变了没有"；
+///   * `deinit` 先 `cancel`（join 后台线程）再 `destroy`，所以这里看不到活线程。
+pub const AudioProgress = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// UI 线程：把进度画进会话。返回 true = 画面（或播放可用性）变了。
+        pump: *const fn (ctx: *anyopaque, session: *AudioSession) bool,
+        /// 阻塞到后台解码结束，然后把最终结果交给会话（`--preview` / 测试用）。
+        wait: *const fn (ctx: *anyopaque, session: *AudioSession) void,
+        /// 请求停止并 join。幂等；不释放引擎。
+        cancel: *const fn (ctx: *anyopaque) void,
+        /// 释放引擎（以及它还没交出去的东西）。必须已 cancel/wait。
+        destroy: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) void,
+        /// 已经解出的 PCM 字节数（UI 的"PCM N 字节"用；未交出去时读原子量）。
+        decodedBytes: *const fn (ctx: *anyopaque) usize,
+        /// 还在解吗？`false` = 已结束（成功/失败/取消都算结束）。
+        decoding: *const fn (ctx: *anyopaque) bool,
+        /// 用户按了播放但 Player 还没建好：记下意图，完成时由 `pump` 补播。
+        requestPlay: *const fn (ctx: *anyopaque) void,
+    };
+};
 
 /// 音频会话：**能播的声音**，不是一个空壳。
 ///
@@ -161,8 +199,11 @@ pub const emptyBitmap: Bitmap = .{ .pixels = &.{}, .width = 0, .height = 0, .str
 /// 所有权：
 ///   * `pcm` 用创建这个 Outcome 的 allocator 分配，`deinit(allocator)` 释放；
 ///   * `peaks`（每桶一对 min/max）与 `waveform`（由 peaks 渲染的 BGRA 位图）
-///     同样由 `open` 的 allocator 分配，`deinit` 一并释放。两者在 `open` 里算一次
-///     **存起来**：播放时每帧重画只读它们，不重新解码、不重新算峰值；
+///     同样由 `open` 的 allocator 分配，`deinit` 一并释放。非渐进会话在 `open`
+///     里算一次**存起来**：播放时每帧重画只读它们，不重新解码、不重新算峰值；
+///   * 渐进式会话（`progress != null`）先只有前缀峰值和第一版位图；后台线程解完
+///     之后，`pump`/`waitComplete` 把最终 PCM / 峰值 / Player 移进来，`pcm` 与
+///     `peaks` 到这时才是完整的；
 ///   * `player` 由 `Player.create` 分配，`Player.deinit` 释放（内部停播 + join）；
 ///   * `position_ms` 是 UI 线程最后一次读到的快照；跨线程的真值在 Player 的
 ///     `std.atomic.Value(u64)` 里。UI **只读** `positionMs()`，不碰播放线程。
@@ -181,10 +222,21 @@ pub const AudioSession = struct {
     /// 由 `peaks` 渲染的 BGRA 位图（`audio/waveform.zig`）。视图把它当图片画，
     /// 不认识它是怎么来的；空位图（`width == 0`）表示"没有波形"。
     waveform: Bitmap = emptyBitmap,
+    /// 波形位图的**内容版本**：位图只在整列完成时才重画，这个数就是当时完成的
+    /// 列数（单调不减）。视图把它放进图像缓存键，图集才会重新上传像素；同一版本
+    /// 的像素永远相同（列的内容只依赖已定稿的桶）。
+    waveform_version: u32 = 0,
+    /// 非 null = 后台还在解码：峰值会继续长出来，播放要等 Player 建好。
+    progress: ?AudioProgress = null,
 
     pub fn play(self: *AudioSession) !void {
-        const player = self.player orelse return error.NoAudioPlayer;
-        try player.play();
+        if (self.player) |player| return player.play();
+        // Player 还没建好（渐进式解码中）：记下意图，完成时补播，不打扰用户。
+        if (self.progress) |progress| {
+            progress.vtable.requestPlay(progress.ctx);
+            return;
+        }
+        return error.NoAudioPlayer;
     }
 
     /// 停播；位置保留在最后播到的地方（不是归零）。
@@ -208,6 +260,37 @@ pub const AudioSession = struct {
         return self.duration_ms;
     }
 
+    /// 已经解出的 PCM 字节数（渐进式解码中会增长；完成后等于 `pcm.len`）。
+    pub fn pcmBytes(self: *const AudioSession) usize {
+        if (self.pcm.len != 0) return self.pcm.len;
+        const progress = self.progress orelse return 0;
+        return progress.vtable.decodedBytes(progress.ctx);
+    }
+
+    /// 后台还在解码吗？视图用它显示"解码中"，不自己猜。
+    pub fn isDecoding(self: *const AudioSession) bool {
+        const progress = self.progress orelse return false;
+        return progress.vtable.decoding(progress.ctx);
+    }
+
+    /// UI 线程每拍调一次：有新完成的波形就重画一版，全部完成时接手最终结果。
+    /// 返回 true = 画面变了，调用方应重画。没有后台解码时是无操作。
+    pub fn pump(self: *AudioSession) bool {
+        const progress = self.progress orelse return false;
+        return progress.vtable.pump(progress.ctx, self);
+    }
+
+    /// 等后台解码结束并接手结果（无头命令 / 测试；正常 UI 用 `pump`）。
+    pub fn waitComplete(self: *AudioSession) void {
+        if (self.progress) |progress| progress.vtable.wait(progress.ctx, self);
+    }
+
+    /// 打断后台解码并 join（不释放引擎；`deinit` 会释放）。切换选中行时由
+    /// `AudioSession.deinit` 调用，保证同一时刻只有一个解码任务在跑。
+    pub fn cancelDecode(self: *AudioSession) void {
+        if (self.progress) |progress| progress.vtable.cancel(progress.ctx);
+    }
+
     /// 把播放头设到 `ms`，钳到 `[0, duration]`。
     ///
     /// 正在播时由 Player 丢弃端点缓冲后从新位置继续；没在播（或没有播放设备）
@@ -226,6 +309,12 @@ pub const AudioSession = struct {
     /// 停播 → join 播放线程 → 释放 Player、波形位图、峰值、PCM。
     /// 必须与 `open` 用同一个 allocator。
     pub fn deinit(self: *AudioSession, allocator: std.mem.Allocator) void {
+        // 先打断后台解码并 join：它可能还在写 PCM / 峰值，不能先释放这些内存。
+        if (self.progress) |progress| {
+            progress.vtable.cancel(progress.ctx);
+            progress.vtable.destroy(progress.ctx, allocator);
+            self.progress = null;
+        }
         if (self.player) |player| {
             player.stop();
             player.deinit();

@@ -55,6 +55,14 @@
 //! 里，`open` 时还不知道）用压缩大小 × 12 估初值（上限 64 MiB），只影响 realloc
 //! 次数，正确性由增量检查与最终上限兜住。
 //!
+//! ## 两种用法：整段一次解 / 分块解
+//!
+//! `decode()` 是"读到 EOF 再交整段"的便捷入口（`--play-test`、测试、渐进路径
+//! 的总帧数未知时）。渐进式预览需要**边解边看**，所以同一个循环被拆成 `Stream`：
+//! `init` 开流 → 反复 `step(&chunk)`（每块 ≤8192 个 i16，下混并追加进 PCM）→
+//! `finish` 终检并交出所有权。两条路径共用同一个容器识别、下混、512 MiB 上限与
+//! 流式 Reader，不会因为"预览要渐进"而分叉出第二套解码器。
+//!
 //! ## 错误 → 四态（与 `preview.zig` 的规则逐字对应）
 //!
 //!   * `FileNotFound`                                  → `file_missing`
@@ -94,7 +102,7 @@ const estimate_cap_bytes: u64 = 64 * 1024 * 1024;
 
 /// 一次 `read` 的样本数（不是帧数）。8192 个 i16 = 16 KiB，足够摊薄调用开销，
 /// 又不会在栈上留一大块。库保证 `out.len >= channels` 即可。
-const chunk_samples: usize = 8192;
+pub const chunk_samples: usize = 8192;
 
 /// 解码失败的全集：文件读取（`audio_file`）+ 库（`zig_audio`）+ 本层的三个语义
 /// 错误。两个错误集合里有同名项（OutOfMemory / Truncated）是允许的。
@@ -122,105 +130,191 @@ pub fn decode(
     path: []const u8,
     options: Options,
 ) Error!session_mod.Decoded {
-    // 64 KiB 句柄适配器：库按需拉取，压缩文件不再整份搬进内存。
-    var file_reader: file_reader_mod.FileReader = undefined;
-    try file_reader.init(allocator, path);
-    defer file_reader.deinit();
-
-    var decoder = try zig_audio.open(allocator, file_reader.interface());
-    defer decoder.deinit();
-
-    const info = decoder.info;
-    if (options.expected_format) |expected| {
-        if (info.format != expected) {
-            std.debug.print(
-                "otto-lite: zig-audio 容器不匹配 file={s} expected={s} actual={s}（按 unsupported 谢绝）\n",
-                .{ path, @tagName(expected), @tagName(info.format) },
-            );
-            return error.UnexpectedFormat;
-        }
-    }
-    if (info.sample_rate == 0) return error.Corrupt;
-    if (info.channels == 0) return error.Corrupt;
-
-    const source_channels: usize = info.channels;
-    // 播放器只接受 1–2 声道：>2 时逐块走与其它音频 provider 共用的下混。
-    const out_channels: u16 = if (source_channels > 2) 2 else info.channels;
-    const out_block_bytes: usize = @as(usize, out_channels) * 2;
-
-    var pcm: std.ArrayList(u8) = .empty;
-    errdefer pcm.deinit(allocator);
-    try reservePcm(allocator, &pcm, info.total_frames, file_reader.compressedBytes(), out_block_bytes);
-
-    var chunk: [chunk_samples]i16 = undefined;
+    var stream: Stream = undefined;
+    try stream.init(allocator, path, options);
+    defer stream.deinit();
     while (true) {
+        if (try stream.step(&chunk_scratch) == 0) break; // 解码到 EOF
+    }
+    return stream.finish();
+}
+
+/// `step` 的调用方缓冲。模块级 `threadlocal` 而不是函数局部：8192 个 i16 是 16 KiB，
+/// 渐进式解码线程与 `decode()` 都可能用，放线程局部既不用栈也不用堆。
+threadlocal var chunk_scratch: [chunk_samples]i16 = undefined;
+
+/// 一个"已经打开、还没读完"的解码会话。`decode()` 与渐进式预览共用它：
+///
+///   * `init` 只做开流与格式校验（容器识别、声道/采样率、PCM 上限预留）；
+///   * `step` 解一块（≤ `chunk_samples` 个 i16），下混、追加进 `pcm`，返回本次
+///     新增的**帧数**（0 = EOF）。渐进式预览在每次 `step` 后把新增字节喂给峰值
+///     合并器，峰值因此与解码同步长出来；
+///   * `finish` 做终检（空流、整帧、时长）并打印那一行流式证据，把 PCM 的所有权
+///     交给 `Decoded`；之后本结构只剩解码器与文件句柄，`deinit` 照常释放。
+///
+/// 为什么必须是"先 init 再 step"而不是返回一个值：`FileReader.reader.buffer` 指向
+/// 自己的字段，`zig_audio` 的容器解码器也借用这个 Reader 指针。本结构**不能搬家**，
+/// 调用方必须在稳定地址上 `init`（栈上 `var` 或堆上的字段）。
+pub const Stream = struct {
+    allocator: std.mem.Allocator,
+    /// 借用：调用方保证在 `finish` 之前有效（渐进式引擎自己持有一份拷贝）。
+    path: []const u8 = "",
+    file_reader: file_reader_mod.FileReader = undefined,
+    file_opened: bool = false,
+    decoder: zig_audio.Decoder = undefined,
+    pcm: std.ArrayList(u8) = .empty,
+    sample_rate: u32 = 0,
+    source_channels: usize = 0,
+    channels: u16 = 0,
+    out_block_bytes: usize = 0,
+    frames: u64 = 0,
+    /// 开流时容器声明/估算的总帧数；`null` = 读到流尾才知道（MP3 无 Xing、Vorbis、Opus）。
+    container_frames: ?u64 = null,
+    opened: bool = false,
+    stats_out: ?*file_reader_mod.Stats = null,
+
+    pub fn init(
+        self: *Stream,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        options: Options,
+    ) Error!void {
+        self.* = .{ .allocator = allocator, .path = path, .stats_out = options.stats_out };
+        errdefer self.deinit();
+
+        // 64 KiB 句柄适配器：库按需拉取，压缩文件不再整份搬进内存。
+        try self.file_reader.init(allocator, path);
+        self.file_opened = true;
+        self.decoder = try zig_audio.open(allocator, self.file_reader.interface());
+        self.opened = true;
+
+        const info = self.decoder.info;
+        if (options.expected_format) |expected| {
+            if (info.format != expected) {
+                std.debug.print(
+                    "otto-lite: zig-audio 容器不匹配 file={s} expected={s} actual={s}（按 unsupported 谢绝）\n",
+                    .{ path, @tagName(expected), @tagName(info.format) },
+                );
+                return error.UnexpectedFormat;
+            }
+        }
+        if (info.sample_rate == 0) return error.Corrupt;
+        if (info.channels == 0) return error.Corrupt;
+
+        self.sample_rate = info.sample_rate;
+        self.source_channels = info.channels;
+        // 播放器只接受 1–2 声道：>2 时逐块走与其它音频 provider 共用的下混。
+        self.channels = if (self.source_channels > 2) 2 else info.channels;
+        self.out_block_bytes = @as(usize, self.channels) * 2;
+        self.container_frames = info.total_frames;
+        try reservePcm(
+            allocator,
+            &self.pcm,
+            info.total_frames,
+            self.file_reader.compressedBytes(),
+            self.out_block_bytes,
+        );
+    }
+
+    /// 释放解码器、文件句柄与（还没交出去的）PCM。`finish` 成功之后 PCM 已为空，
+    /// 这里只剩解码器的内部状态要放。
+    pub fn deinit(self: *Stream) void {
+        if (self.opened) {
+            self.decoder.deinit();
+            self.opened = false;
+        }
+        if (self.file_opened) {
+            self.file_reader.deinit();
+            self.file_opened = false;
+        }
+        self.pcm.deinit(self.allocator);
+        self.pcm = .empty;
+        self.frames = 0;
+    }
+
+    /// 容器**现在**声明的总帧数：开流时已知（WAV/FLAC/AIFF），MP3 的 Xing 头要读
+    /// 第一帧之后才有；Vorbis / Opus 要到流尾。渐进式预览用它决定能不能按固定桶
+    /// 边界合并（null → 不做渐进，见 `audio/progressive.zig`）。
+    pub fn declaredFrames(self: *const Stream) ?u64 {
+        return self.decoder.info.total_frames;
+    }
+
+    /// 解一块：追加到 `pcm`，返回新增的**帧数**（0 = EOF）。多声道在这里下混。
+    /// 错误与 `zig_audio`/IO 的错误集一致；`errdefer` 在调用方，半截 PCM 不会被
+    /// 当成成功交出去。
+    pub fn step(self: *Stream, out: []i16) Error!u64 {
         // 这一行是"读到一半才不支持"的唯一出口：Opus 的多帧包（TOC code 3）在
         // `open` 成功之后由 `read` 返回 `error.Unsupported`，与开流阶段的同名错误值
-        // 汇合，交给 `reason` 映射成 `unsupported`（谢绝）。`errdefer` 保证此时已经
-        // 解出来的半截 PCM 被释放，不会有半个 `Decoded` 逃出去。
-        const got = try decoder.read(&chunk);
-        if (got == 0) break;
+        // 汇合，交给 `reason` 映射成 `unsupported`（谢绝）。
+        const got = try self.decoder.read(out);
+        if (got == 0) return 0;
         // 小端 i16 的字节就是内存里的那两字节（Windows x86_64 是 LE）。
         // 库承诺按整帧交付；`got` 不是声道数的整数倍说明流坏了。
-        if (got % source_channels != 0) return error.Corrupt;
+        if (got % self.source_channels != 0) return error.Corrupt;
 
-        if (source_channels <= 2) {
-            try pcm.appendSlice(allocator, std.mem.sliceAsBytes(chunk[0..got]));
+        if (self.source_channels <= 2) {
+            try self.pcm.appendSlice(self.allocator, std.mem.sliceAsBytes(out[0..got]));
         } else {
             // 逐块下混：不攒整段多声道 PCM，多出来的只有最终双声道输出。
-            const frames = got / source_channels;
-            const dst = try pcm.addManyAsSlice(allocator, frames * 4);
-            downmix.pcm16Into(dst, std.mem.sliceAsBytes(chunk[0..got]), info.channels);
+            const frames = got / self.source_channels;
+            const dst = try self.pcm.addManyAsSlice(self.allocator, frames * 4);
+            downmix.pcm16Into(dst, std.mem.sliceAsBytes(out[0..got]), self.decoder.info.channels);
         }
-        if (pcm.items.len > max_pcm_bytes) return error.TooLarge;
+        if (self.pcm.items.len > max_pcm_bytes) return error.TooLarge;
+        self.frames = @intCast(self.pcm.items.len / self.out_block_bytes);
+        return got / self.source_channels;
     }
 
-    if (pcm.items.len == 0) return error.Empty;
-    // 库承诺 `read` 只按整帧交付；下混后也必须是整帧。
-    if (pcm.items.len % out_block_bytes != 0) return error.Corrupt;
+    /// 终检 + 把 PCM 交出去。所有权转移之后 `self.pcm` 为空，`deinit` 不会重复释放。
+    pub fn finish(self: *Stream) Error!session_mod.Decoded {
+        if (self.pcm.items.len == 0) return error.Empty;
+        // 库承诺 `read` 只按整帧交付；下混后也必须是整帧。
+        if (self.pcm.items.len % self.out_block_bytes != 0) return error.Corrupt;
 
-    const frames: u64 = @intCast(pcm.items.len / out_block_bytes);
-    const pcm_bytes = try pcm.toOwnedSlice(allocator);
+        const info = self.decoder.info;
+        const frames: u64 = @intCast(self.pcm.items.len / self.out_block_bytes);
+        const pcm_bytes = try self.pcm.toOwnedSlice(self.allocator);
 
-    // 流式证据：compressed 是压缩文件大小（与峰值无关），peak_buf 是适配器唯一的
-    // 常驻缓冲；reads/avg_read 证明是分块读而不是一次预读。
-    // `container_frames` / `eof_frames` 走 `{?d}`：null 是"容器没写长度"，不是错误。
-    // 两者不同正是 Vorbis：开流时 null，读完最后一页后库才把 granule 填进 `info`。
-    const stats = file_reader.stats();
-    if (options.stats_out) |out| out.* = stats;
-    const avg_read = if (stats.reads == 0) 0 else stats.bytes / stats.reads;
-    std.debug.print(
-        "otto-lite: zig-audio decode file={s} container={s} compressed={d} pcm={d} peak_buf={d} reads={d} avg_read={d} rate={d} ch={d} src_ch={d} bits=16 frames={d} duration={d}ms source_bits={d} container_frames={?d} eof_frames={?d}\n",
-        .{
-            path,
-            @tagName(info.format),
-            file_reader.compressedBytes(),
-            pcm_bytes.len,
-            file_reader_mod.buffer_size,
-            stats.reads,
-            avg_read,
-            info.sample_rate,
-            out_channels,
-            info.channels,
-            frames,
-            frames * 1000 / info.sample_rate,
-            info.bits_per_sample,
-            info.total_frames,
-            decoder.info.total_frames,
-        },
-    );
+        // 流式证据：compressed 是压缩文件大小（与峰值无关），peak_buf 是适配器唯一的
+        // 常驻缓冲；reads/avg_read 证明是分块读而不是一次预读。
+        // `container_frames` / `eof_frames` 走 `{?d}`：null 是"容器没写长度"，不是错误。
+        // 两者不同正是 Vorbis：开流时 null，读完最后一页后库才把 granule 填进 `info`。
+        const stats = self.file_reader.stats();
+        if (self.stats_out) |out| out.* = stats;
+        const avg_read = if (stats.reads == 0) 0 else stats.bytes / stats.reads;
+        std.debug.print(
+            "otto-lite: zig-audio decode file={s} container={s} compressed={d} pcm={d} peak_buf={d} reads={d} avg_read={d} rate={d} ch={d} src_ch={d} bits=16 frames={d} duration={d}ms source_bits={d} container_frames={?d} eof_frames={?d}\n",
+            .{
+                self.path,
+                @tagName(info.format),
+                self.file_reader.compressedBytes(),
+                pcm_bytes.len,
+                file_reader_mod.buffer_size,
+                stats.reads,
+                avg_read,
+                info.sample_rate,
+                self.channels,
+                info.channels,
+                frames,
+                frames * 1000 / info.sample_rate,
+                info.bits_per_sample,
+                self.container_frames,
+                info.total_frames,
+            },
+        );
 
-    return .{
-        .pcm = pcm_bytes,
-        .sample_rate = info.sample_rate,
-        .channels = out_channels,
-        .bits = 16,
-        .format = .pcm,
-        .frames = frames,
-        // 毫秒向下取整：1 帧 @ 44.1 kHz 是 0 ms，不冒充 1 ms。
-        .duration_ms = frames * 1000 / info.sample_rate,
-    };
-}
+        return .{
+            .pcm = pcm_bytes,
+            .sample_rate = info.sample_rate,
+            .channels = self.channels,
+            .bits = 16,
+            .format = .pcm,
+            .frames = frames,
+            // 毫秒向下取整：1 帧 @ 44.1 kHz 是 0 ms，不冒充 1 ms。
+            .duration_ms = frames * 1000 / info.sample_rate,
+        };
+    }
+};
 
 /// 初始容量：有声明值就精确预留（超限是确定的 `TooLarge`）；没有就按压缩大小
 /// 估算，估算只决定一次分配的大小，不参与上限判断。
