@@ -24,13 +24,13 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const settings_store = @import("settings_store.zig");
+const responsive_layout = @import("responsive_layout.zig");
 const thumbs_mod = @import("thumbs.zig");
 const update_ui = @import("update_ui.zig");
 const win_window = @import("otto_win_window");
 const ui = nanoui.ui;
 
 const panel_width: f32 = 332;
-const panel_x: f32 = 24;
 const panel_y: f32 = 64;
 
 pub const Options = struct {
@@ -261,7 +261,8 @@ pub const Panel = struct {
         const shade = ui.div(c).fixed().sizeFull().bg(ui.Color.black.alpha(0.32)).layer(1);
         const shade_it = shade.interaction();
 
-        const host = ui.div(c).fixed().offset(panel_x, panel_y).w(panel_width).layer(1);
+        const available_width = @min(panel_width, @max(200, c.size.w - 24));
+        const host = ui.div(c).fixed().offset((c.size.w - available_width) / 2, if (c.size.h < 560) 12 else panel_y).w(available_width).layer(1);
         // 卡片自己的空白也要挡住遮罩的点击：只有卡片外面的点击才关闭面板。
         _ = host.interaction();
         ui.card(c, .{ .width = .fill, .gap = 10 });
@@ -389,8 +390,8 @@ pub const Panel = struct {
     /// 正常关闭时记录最后的窗口尺寸；每次关闭最多写一次。
     pub fn recordWindowClose(self: *Panel, window: *nanoui.Window) void {
         const frame = window.frame();
-        self.settings.layout.width = @intFromFloat(@round(@max(200, frame.width)));
-        self.settings.layout.height = @intFromFloat(@round(@max(150, frame.height)));
+        self.settings.layout.width = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_width)), frame.width)));
+        self.settings.layout.height = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_height)), frame.height)));
         self.save();
     }
 

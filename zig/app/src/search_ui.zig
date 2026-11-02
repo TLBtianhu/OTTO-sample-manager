@@ -280,6 +280,9 @@ pub const Search = struct {
         if (self.counts.items.len == 0) return;
         const bar = ui.div(c).row().wFull().itemsCenter().px(12).pb(6).gap(6);
         defer bar.end();
+        // 后缀太多时在自己的容器里横向滚动，不把列表或点击目标压坏。
+        c.node(bar.index).style.scroll_x = true;
+        c.node(bar.index).style.scroll_bar = false;
 
         if (chip(c, "全部", self.counts.total, !self.exts.active())) {
             self.exts.clear();
@@ -300,7 +303,7 @@ pub const Search = struct {
     fn chip(c: *ui.Context, label: []const u8, count: usize, selected: bool) bool {
         const it = ui.pressable(c, .{
             .direction = .row,
-            .height = .{ .px = 20 },
+            .height = .{ .px = 24 },
             .padding = .xy(8, 0),
             .radius = 10,
             .align_items = .center,

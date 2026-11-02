@@ -1075,7 +1075,7 @@ if ($script:elevated) {
 
 $script:setupPath = ''
 $script:oldSetupPath = ''
-$script:version = ''
+$script:testVersion = ''
 $script:oldVersion = ''
 $script:zigOutBefore = @()
 $script:dataBeforeUninstall = @()
@@ -1091,10 +1091,10 @@ try {
     throw '前置条件不满足，测试无法开始'
   }
 
-  $versions = Get-DistVersions
-  if ($Version) { $script:version = $Version } else { $script:version = $versions[0] }
-  $script:setupPath = Get-SetupPath $script:version
-  Write-Host ('被测版本：{0}' -f $script:version)
+  $versions = @(Get-DistVersions)
+  if ($Version) { $script:testVersion = $Version } else { $script:testVersion = $versions[0] }
+  $script:setupPath = Get-SetupPath $script:testVersion
+  Write-Host ('被测版本：{0}' -f $script:testVersion)
 
   # 第 10 步的基线：必须在任何安装 / 运行之前取。
   if (Test-Path -LiteralPath $script:zigOutBin) {
@@ -1199,7 +1199,7 @@ try {
     Add-Check '（提权会话）卸载项写进了 HKLM' $regOk $key
     if ($regOk) {
       $displayVersion = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).DisplayVersion
-      Add-Check '（提权会话）DisplayVersion 与被测版本一致' ($displayVersion -eq $script:version) ('{0}' -f $displayVersion)
+      Add-Check '（提权会话）DisplayVersion 与被测版本一致' ($displayVersion -eq $script:testVersion) ('{0}' -f $displayVersion)
     }
   } else {
     Add-Skip '（提权会话）卸载项写进了 HKLM' '非提权：NSIS 的 HKLM 写入被兼容层静默跳过，Program Files 与注册表零写入'
@@ -1213,7 +1213,7 @@ try {
   $installedExe = Join-Path $script:programDir 'otto-lite.exe'
   $versionRun = Invoke-Native -ExePath $installedExe -ExeArguments '--version' -WorkDir $script:programDir -EnvMap (Get-ChildEnv)
   $versionLine = $versionRun.Out.Trim()
-  $expectedLine = 'otto-lite {0} (installed)' -f $script:version
+  $expectedLine = 'otto-lite {0} (installed)' -f $script:testVersion
   Add-Check '--version 退出码 0' ($versionRun.Code -eq 0) ('exit={0}；{1} s' -f $versionRun.Code, $versionRun.Seconds)
   Add-Check '形态是 installed 且版本一致' ($versionLine -eq $expectedLine) ('输出了 “{0}”' -f $versionLine)
   Add-Check '--version 不创建用户数据目录（第一次启动不该凭空造状态）' (-not (Test-Path -LiteralPath $script:ottoData)) (
@@ -1354,7 +1354,7 @@ try {
   # 8. 装另一个版本
   # -------------------------------------------------------------------------
   Start-Step 8 '装另一个版本：旧数据被沿用'
-  $candidates = @($versions | Where-Object { [version]$_ -lt [version]$script:version })
+  $candidates = @($versions | Where-Object { [version]$_ -lt [version]$script:testVersion })
   if ($OldVersion) { $script:oldVersion = $OldVersion } elseif ($candidates.Count -gt 0) { $script:oldVersion = $candidates[0] }
   if (-not $script:oldVersion) {
     Add-Skip '装另一个（更旧的）版本' 'zig\dist 里没有比被测版本更旧的 setup.exe'
@@ -1412,7 +1412,7 @@ try {
     Add-Skip '覆盖式升级' '没有更旧的版本可以当升级起点（zig\dist 只有一个版本）'
     Complete-Step
   } else {
-    Invoke-OverwriteUpgrade -FromVersion $script:oldVersion -ToVersion $script:version
+    Invoke-OverwriteUpgrade -FromVersion $script:oldVersion -ToVersion $script:testVersion
   }
 
   # -------------------------------------------------------------------------
@@ -1541,12 +1541,12 @@ if ($ok) {
   # 机器可读的一行：health.ps1 的 -Fresh 只认这一行。前缀与字段名是 ASCII；
   # 只有 FAIL 行的 names= 里可能出现中文断言名。
   Write-Host ('fresh-user: PASS steps={0}/{1} checks={2}/{3} skip={4} version={5} old={6} rollback={7} sec={8:N1}' -f
-    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $skipped.Count, $script:version, $oldLabel, $script:rollbackPolicy, $script:clock.Elapsed.TotalSeconds)
-  Write-Host ('被测版本 {0}{1}；回滚副本策略 {2}' -f $script:version, $(if ($script:oldVersion) { '；另一个版本 ' + $script:oldVersion } else { '' }), $script:rollbackPolicy)
+    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $skipped.Count, $script:testVersion, $oldLabel, $script:rollbackPolicy, $script:clock.Elapsed.TotalSeconds)
+  Write-Host ('被测版本 {0}{1}；回滚副本策略 {2}' -f $script:testVersion, $(if ($script:oldVersion) { '；另一个版本 ' + $script:oldVersion } else { '' }), $script:rollbackPolicy)
   exit 0
 } else {
   Write-Host ('全新用户测试失败：{0} 项断言红了' -f $failed.Count) -ForegroundColor Red
   Write-Host ('fresh-user: FAIL steps={0}/{1} checks={2}/{3} failed={4} names={5} version={6} old={7} rollback={8} sec={9:N1}' -f
-    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $failed.Count, $failedLabel, $script:version, $oldLabel, $script:rollbackPolicy, $script:clock.Elapsed.TotalSeconds)
+    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $failed.Count, $failedLabel, $script:testVersion, $oldLabel, $script:rollbackPolicy, $script:clock.Elapsed.TotalSeconds)
   exit 1
 }

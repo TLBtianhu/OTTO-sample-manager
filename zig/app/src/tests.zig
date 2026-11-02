@@ -54,6 +54,8 @@ test {
     _ = @import("filter.zig");
     _ = @import("library_tree.zig");
     _ = @import("settings_v2.zig");
+    // 容器驱动重排：轨道分配、断点约束、让位顺序、懒重算与 200 次性能。
+    _ = @import("responsive_layout_test.zig");
     _ = @import("transport.zig");
     _ = @import("options.zig");
     _ = @import("options_test.zig");

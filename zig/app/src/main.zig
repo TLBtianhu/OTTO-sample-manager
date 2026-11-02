@@ -1,13 +1,7 @@
 //! OTTO Lite：用 nanoui 的 Windows CPU 后端把 `zig/core` 的资料库画成 380×700 列表，
 //! 用 `zig/ports` 的文件监听让列表跟着磁盘变、用系统缩略图给每行左侧配一张小图。
 //!
-//!   otto-lite [library.json] [--watch <dir>] [--select=0,1]
-//!   otto-lite --version | --convert <in> <out> | --library-info <file>
-//!   otto-lite --demo <dir> | --demo-rescan <dir> | --demo-thumbs <dir> | --demo-transport
-//!   otto-lite --preview <file> | --play-test <file> | --copy-now <file>
-//!   otto-lite --import <folder> [--library <file>] --save <out.otto>
-//!   otto-lite --check-update <url>     （无窗口更新检查，见 `update_ui.zig`）
-//!   每条自检的用途见 `commands.zig`；都**不开窗**、不抢焦点；更新检查默认不联网。
+//!   命令行与各自检入口见 `commands.zig`；都不开窗、不弹窗、不抢焦点。
 //!
 //! 本文件只留三件事：**参数分派**（`options` + `commands`）、**生命周期**
 //! （`tick` / `refresh` / 重载 / 拖拽定时器）、**`State` 组装**。其余在各枝：
@@ -48,6 +42,7 @@ const options_mod = @import("options.zig");
 const preview_panel = @import("preview_panel.zig");
 const row_probe = @import("row_probe.zig");
 const row_ui = @import("row_ui.zig");
+const responsive_layout = @import("responsive_layout.zig");
 const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
 const settings_ui = @import("settings_ui.zig");
@@ -102,6 +97,8 @@ pub const State = struct {
     prefetch: thumbs_prefetch.Scheduler = .{},
     /// 行就绪探针：每帧建过的行 + 有没有画出图；`--bench-scroll` 数 ready/visited。
     row_probe: row_probe.RowProbe = .{},
+    layout: responsive_layout.Cache = .{},
+    overflow_open: bool = false,
     /// 缩略图的排队/取图情况，数字变了才打印一行（见 `thumbs_report.zig`）。
     reporter: thumbs_report.Reporter = .{},
     /// 按下时的行与位置（只记一次；松手/离开后清掉）。
@@ -121,6 +118,7 @@ pub const State = struct {
         s.thumbs.beginFrame();
         s.rows_with_image = 0;
         s.row_probe.begin();
+        const layout_plan = s.layout.update(c.size.w, c.size.h);
         // 拖放循环里窗口仍可能收到 WM_PAINT：这一帧只按现有状态重画，不处理输入、
         // 不调用任何口岸。`Transport.execute` 返回后 `busy` 才落回 false。
         const busy = s.transport.busy;
@@ -190,8 +188,14 @@ pub const State = struct {
             .import_failed = s.import.phase == .failed,
             .update_status = s.update.status(&update_buffer),
             .update_action_label = s.update.actionLabel(&update_action_buffer),
+            .compact = layout_plan.profile == .compact_with_overflow,
+            .overflow_open = s.overflow_open,
         });
         if (!busy) {
+            if (header_action.overflow_clicked) {
+                s.overflow_open = !s.overflow_open;
+                c.changed = true;
+            }
             if (header_action.check_clicked) s.update.begin();
             if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
             if (header_action.settings_clicked) s.settings.openPanel(c);
@@ -264,7 +268,7 @@ pub const State = struct {
         // `tick` 接手。事实摘要的时长与列表行同一条 `duration_trust.display`。
         const preview_sample = row_ui.previewRow(s);
         s.preview.sync(preview_sample, row_ui.previewDuration(s, preview_sample));
-        s.preview.draw(c);
+        s.preview.draw(c, layout_plan.preview_height);
 
         s.reporter.report(s.thumbs, s.rows_with_image);
         // 设置面板是最后一层：遮罩 + 卡片覆盖列表，点击优先级由树序保证。
@@ -559,6 +563,8 @@ fn run(init: std.process.Init) !void {
         .title = title,
         .width = @floatFromInt(state.settings.settings.layout.width),
         .height = @floatFromInt(state.settings.settings.layout.height),
+        .min_width = @floatFromInt(responsive_layout.min_window_width),
+        .min_height = @floatFromInt(responsive_layout.min_window_height),
         .on_close = .{ .ctx = &state, .func = State.onWindowClose },
         // 设置验收的脚本要真 HWND，但仍然绝不激活（`WS_EX_NOACTIVATE` + `SW_SHOWNOACTIVATE`）。
         .non_activating = options.settings_probe or options.drop_probe != null or options.set_opacity != null,

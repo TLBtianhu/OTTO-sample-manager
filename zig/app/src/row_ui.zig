@@ -36,70 +36,95 @@ const flash_ticks: u32 = 10;
 /// 下标（选择/预览/拖拽用）。返回 pressable 的 Interaction 给 `rowInput`。
 pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core.model.Sample) ui.Interaction {
     const selected = s.selection.isSelected(index);
-    // 光标行：过滤后选择会被清空，但光标还要停在一个样本上（预览也跟着它）；选中底色更重。
     const is_cursor = s.selection.cursor == index;
+    const plan = &s.layout.plan.row;
     const style: ui.Style = .{
         .direction = .row,
         .width = .fill,
         .height = .{ .px = 44 },
         .padding = .xy(12, 0),
-        .gap = 10,
+        .gap = 8,
         .align_items = .center,
-        // 选中底色：主题强调色的低透明度版本；未选中交给 hover 动画。
         .background = if (selected) c.theme.accent.alpha(0.16) else if (is_cursor) c.theme.accent.alpha(0.07) else null,
     };
-    // 选中行悬停时加深底色而不是换成 surface_hover——否则刚点过的行看起来像没选中。
     const hover_color = if (selected) c.theme.accent.alpha(0.26) else if (is_cursor) c.theme.accent.alpha(0.14) else c.theme.surface_hover;
     const it = ui.pressable(c, style, hover_color);
     defer ui.end(c);
 
     const is_directory = State.isDirectory(s, index);
+    const is_deleted = State.isDeleted(s, index);
     const is_link = if (s.browse) |session|
         index < session.entries.items.len and session.entries.items[index].is_reparse_point
     else
         false;
+    // 前导槽也占求解器分给它的 32px；链接标记移到格式列，绝不挤名称。
+    const thumb_box = ui.div(c).w(32).h(32).itemsCenter().justifyCenter();
     const drew_image = if (is_directory) blk: {
         ui.icon(c, "folder", .{ .size = 28, .color = c.theme.accent });
-        if (is_link) ui.text(c, "↗", .{ .size = 10, .color = c.theme.accent });
         break :blk false;
     } else row_thumb.draw(c, s.thumbs, sample);
+    thumb_box.end();
     if (drew_image) s.rows_with_image += 1;
-    // 验收探针：这一帧这一行画的是真图还是占位。`--bench-scroll` 用它数
-    // "滚动经过的行里，图标已就绪的比例"（见 `row_probe.zig`）。
     s.row_probe.add(index, drew_image);
-    // 行号是**过滤结果里的位置**（第 1 行是当前列表的第一行），不是样本下标。
-    ui.textf(c, .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
-    // 名字是唯一可截断的：后缀用次要色贴在名字后面，长名字先被省略号吃掉，后缀永远完整。
-    ui.text(c, sample.file_name, .{ .size = 13, .truncate = .ellipsis });
-    const ext = filter.trimExt(sample.file_ext);
-    if (ext.len > 0) ui.textf(c, .{ .size = 11, .color = c.theme.muted }, ".{s}", .{ext});
-    // 这一行文件已经被删掉（浏览模式的墓碑）：明确标"已删除"，并且不再去读它的
-    // 时长——那个文件已经不在了，读一次只会失败一次。选中项此时已经移到相邻行。
-    if (State.isDeleted(s, index)) {
-        ui.text(c, "已删除", .{ .size = 11, .color = c.theme.danger });
-        return it;
-    }
-    if (is_directory) {
-        ui.text(c, if (is_link) "目录·链接" else "目录", .{ .size = 10, .color = c.theme.accent });
-        return it;
-    }
-    // 估算时长必须显示成 `≈40.9s`：这个数是从文件大小 / 比特率推出来的，不是
-    // 容器声明的。`duration_trust.display` 对库里已有的时长只判 MP3 的估算位（读
-    // 一次头部并缓存）；对旧库 `duration <= 0` 的条目先问 `resolve`——就地补出
-    // 时长，不写回库文件。`display` 内部命中缓存时不碰磁盘。
-    var duration_buffer: [32]u8 = undefined;
-    const shown = s.duration_trust.display(sample);
-    ui.textf(c, .{ .size = 11 }, "{s}", .{
-        duration_text.format(shown.seconds, shown.estimated, &duration_buffer),
-    });
-    // 视频行再写一格分辨率（`640×360`）。没有画面尺寸时这段不出现：音频行的
-    // 输出与没有本功能时逐字节一致。颜色用次要色，和时长区分开。
-    if (shown.width) |width| {
-        if (shown.height) |height| {
-            ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "{d}×{d}", .{ width, height });
+    cellf(c, @floatFromInt(plan.ordinal.w), .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
+
+    const shown = if (!is_directory and !is_deleted) s.duration_trust.display(sample) else null;
+    for (plan.columns[0..plan.column_count]) |column| {
+        const width: f32 = @floatFromInt(column.rect.w);
+        switch (column.kind) {
+            .name => {
+                // 辅助列消失前，名称始终保持求解器给出的最小可读宽度。
+                const text = if (plan.visible(.format)) sample.file_name else sample.displayName();
+                cell(c, width, text, .{ .size = 13, .truncate = .ellipsis });
+            },
+            .duration => {
+                if (is_deleted) {
+                    cell(c, width, "已删除", .{ .size = 11, .color = c.theme.danger, .truncate = .ellipsis });
+                } else if (shown) |value| {
+                    var buffer: [32]u8 = undefined;
+                    cellf(c, width, .{ .size = 11, .truncate = .ellipsis }, "{s}", .{duration_text.format(value.seconds, value.estimated, &buffer)});
+                } else {
+                    cell(c, width, "—", .{ .size = 11, .color = c.theme.muted });
+                }
+            },
+            .format => {
+                if (is_directory) {
+                    cell(c, width, if (is_link) "目录·链接" else "目录", .{ .size = 10, .color = c.theme.accent, .truncate = .ellipsis });
+                } else {
+                    const ext = filter.trimExt(sample.file_ext);
+                    cellf(c, width, .{ .size = 11, .color = c.theme.muted, .truncate = .ellipsis }, "{s}", .{if (ext.len > 0) ext else "—"});
+                }
+            },
+            .sample_rate => {
+                if (sample.sample_rate == 0 or is_directory) {
+                    cell(c, width, "—", .{ .size = 11, .color = c.theme.muted });
+                } else {
+                    const khz: f32 = @as(f32, @floatFromInt(sample.sample_rate)) / 1000;
+                    cellf(c, width, .{ .size = 11, .color = c.theme.muted }, "{d:.1} kHz", .{khz});
+                }
+            },
+            .size => {
+                if (is_directory) {
+                    cell(c, width, "—", .{ .size = 11, .color = c.theme.muted });
+                } else {
+                    var buffer: [32]u8 = undefined;
+                    cellf(c, width, .{ .size = 11, .color = c.theme.muted }, "{s}", .{sample_facts.formatSize(sample.file_size, &buffer)});
+                }
+            },
         }
     }
     return it;
+}
+
+/// 固定宽文本格：截断只发生在格内，不让 nanoui 的 flex shrink 决定让位顺序。
+fn cell(c: *ui.Context, width: f32, text: []const u8, style: ui.TextStyle) void {
+    const box = ui.div(c).row().w(width).h(24).itemsCenter().clip();
+    defer box.end();
+    ui.text(c, text, style);
+}
+
+fn cellf(c: *ui.Context, width: f32, style: ui.TextStyle, comptime fmt: []const u8, args: anytype) void {
+    cell(c, width, c.print(fmt, args), style);
 }
 
 /// 预览区事实要显示的时长：与 `drawRow` 走同一条 `duration_trust.display`，

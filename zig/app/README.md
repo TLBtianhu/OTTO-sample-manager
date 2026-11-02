@@ -173,11 +173,14 @@ zig-out/bin/otto-lite.exe --demo-thumbs <dir> --no-isolation
 
 ## Preview and selection
 
-The strip below the list (150 points) has three parts:
+The strip below the list uses `56 px` when the list container is narrower than
+480 points, otherwise `clamp(56, 25% of container height, 180)`. At full height
+it has three parts (the compact strip keeps only a small slot and one outcome row):
 
 - **the preview area** (left slot + outcome text), driven only by the registry;
 - **the facts footer** (name / size / duration / extension, then the path), taken
-  straight from the `Sample` and always shown, even when there is no preview;
+  straight from the `Sample` at full height; compact mode yields this auxiliary
+  footer first, even when there is no preview;
 - the registry decides the preview, not the view:
 
 ```
