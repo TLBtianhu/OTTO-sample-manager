@@ -1,5 +1,9 @@
 //! 查询层：按目录（含子目录递归）、按分组、按文件名子串过滤。
 //!
+//! 输入只能是 `store.Library` 业务快照。`index.Index` 只是事件收集器，重建前
+//! 不承诺目录/分组关系完整；在 created 后需要查询时，先用 `store_rebuild.rebuild`
+//! 生成新快照，再调用本模块。不要把收集器的临时关系状态当成另一个查询真源。
+//!
 //! 与现有 UI 的行为对齐：
 //! * 目录过滤使用 `folder.sample_ids` + `child_folder_ids` 递归（src/store/sampleStore.ts 的
 //!   descendantSampleIdsByFolder），而不是只读 sample.folderId；

@@ -39,6 +39,8 @@ pub const Snapshot = struct {
         copy.file_path = path;
         copy.file_name = name;
         copy.file_ext = ext;
+        copy.root_path = 0;
+        copy.relative_path = core.model.no_relative_path;
         return .{ .generation = generation, .sample = copy, .owned = .{ path, name, ext } };
     }
 

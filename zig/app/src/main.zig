@@ -40,6 +40,7 @@ const duration_trust = @import("duration_trust.zig");
 const empty_state = @import("empty_state.zig");
 const import_ui = @import("import_ui.zig");
 const list_header = @import("list_header.zig");
+const library_tree_ui = @import("library_tree_ui.zig");
 const live_mod = @import("live.zig");
 const mem_probe = @import("mem_probe.zig");
 const opacity_probe = @import("opacity_probe.zig");
@@ -178,7 +179,7 @@ pub const State = struct {
         var ext_buffer: [128]u8 = undefined;
         const header_action = list_header.draw(c, .{
             .total = s.samples.len,
-            .matched = s.search.len(),
+            .matched = s.search.matchCount(),
             .selected = s.selection.count(),
             .ext_filter = s.search.extSummary(&ext_buffer),
             .flash_left = s.flash_left,
@@ -218,6 +219,14 @@ pub const State = struct {
         var last_row: usize = 0;
         var built_rows: usize = 0;
         while (rows.next()) |row| {
+            if (s.search.folderAt(row)) |folder| {
+                const it = library_tree_ui.draw(c, folder);
+                if (!busy and it.clicked and s.search.toggleFolder(row)) {
+                    s.settings.saveViewState();
+                    c.changed = true;
+                }
+                continue;
+            }
             const index = s.search.sampleAt(row) orelse continue;
             const it = row_ui.drawRow(s, c, row, index, s.samples[index]);
             if (!busy) row_ui.rowInput(s, c, index, it);
@@ -406,6 +415,12 @@ pub const State = struct {
         return session.isDirectory(index);
     }
 
+    fn onWindowClose(ctx: *anyopaque, window: *nanoui.Window) void {
+        const s: *State = @ptrCast(@alignCast(ctx));
+        if (s.window == window) s.window = null;
+        s.settings.recordWindowClose(window);
+    }
+
     /// 帧外（定时器）执行一次待拖拽。进入前把计划从 `Transport` 摘下来。
     /// `pub` 是因为 `row_ui.armDrag` 要拿它当定时器回调（跨文件引用声明）。
     pub fn dragTimer(ctx: ?*anyopaque) callconv(.c) void {
@@ -509,6 +524,9 @@ fn run(init: std.process.Init) !void {
         .prefetch = .{ .enabled = !options.no_prefetch, .last_try_s = trace.now() },
     };
     trace.mark("setup.state");
+    if (state.browse == null) state.search.setLibraryTree(&state.settings.settings.view.expanded_folders);
+    if (options.bench_scroll != null) state.search.expandAll(state.samples) catch {};
+    state.settings.settings.view.mode = if (state.browse == null) .library else .browse;
     defer state.import.deinit();
     defer state.update.deinit();
     defer state.settings.deinit();
@@ -539,8 +557,9 @@ fn run(init: std.process.Init) !void {
     startup_dx.mark(.create_window);
     state.window = try boot.app.newWindow(.{
         .title = title,
-        .width = 380,
-        .height = 700,
+        .width = @floatFromInt(state.settings.settings.layout.width),
+        .height = @floatFromInt(state.settings.settings.layout.height),
+        .on_close = .{ .ctx = &state, .func = State.onWindowClose },
         // 设置验收的脚本要真 HWND，但仍然绝不激活（`WS_EX_NOACTIVATE` + `SW_SHOWNOACTIVATE`）。
         .non_activating = options.settings_probe or options.drop_probe != null or options.set_opacity != null,
         .content = .{ .view = .init(&state, State.view) },
@@ -568,4 +587,6 @@ fn run(init: std.process.Init) !void {
     // 探针：D3D、8/50/100 张缩略图、空闲 10 秒，打完表就退出（不 join 工作线程）。
     if (probe.active) probe.finish(state.window.?, boot.thumbs);
     try boot.app.run();
+    // 离屏快照也走正常关闭顺序；正常 GUI 关闭时回调已把 state.window 清空。
+    if (state.window) |window| window.destroyNow();
 }

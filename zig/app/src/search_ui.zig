@@ -20,6 +20,8 @@ const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const filter = @import("filter.zig");
 const selection_mod = @import("selection.zig");
+const library_tree = @import("library_tree.zig");
+const settings_v2 = @import("settings_v2.zig");
 const ui = nanoui.ui;
 
 /// 占位文字。空查询时它就是"没有过滤条件"的说明。
@@ -50,6 +52,13 @@ pub const Search = struct {
     /// 文本框。字节由 nanoui 的 `TextBuffer` 自己管，`deinit` 释放。
     buffer: ui.TextBuffer = .{},
     rows: filter.Rows,
+    /// 仅库模式启用；浏览模式永远不绑定，所以仍是原来的平铺目录视图。
+    tree: library_tree.Tree,
+    tree_enabled: bool = false,
+    tree_stale: bool = true,
+    expanded: ?*settings_v2.ExpandedFolders = null,
+    /// 当前可见样本的顺序（文件夹行不在内），供光标回落使用。
+    sample_order: std.ArrayListUnmanaged(usize) = .empty,
     /// 后缀多选（chip 行）；与文本框的查询是 AND。
     exts: filter.ExtFilter,
     /// 当前库的后缀计数（chip 上的数字），库变化时重算。
@@ -72,6 +81,7 @@ pub const Search = struct {
         return .{
             .allocator = allocator,
             .rows = filter.Rows.init(allocator),
+            .tree = library_tree.Tree.init(allocator),
             .exts = filter.ExtFilter.init(allocator),
             .counts = filter.ExtCounts.init(allocator),
         };
@@ -80,23 +90,51 @@ pub const Search = struct {
     pub fn deinit(self: *Search) void {
         self.buffer.deinit();
         self.rows.deinit();
+        self.tree.deinit();
+        self.sample_order.deinit(self.allocator);
         self.exts.deinit();
         self.counts.deinit();
         self.applied.deinit(self.allocator);
         self.* = undefined;
     }
 
-    /// 当前过滤结果的行数（= 列表行数）。
+    pub fn setLibraryTree(self: *Search, expanded: *settings_v2.ExpandedFolders) void {
+        self.expanded = expanded;
+        self.tree.setExpanded(expanded);
+        self.tree_enabled = true;
+        self.tree_stale = true;
+    }
+
+    pub fn usingTree(self: *const Search) bool {
+        return self.tree_enabled and self.buffer.text().len == 0 and !self.exts.active();
+    }
+
+    /// 当前过滤结果的行数（树模式含可见文件夹行）。
     pub fn len(self: *const Search) usize {
-        return self.rows.len();
+        return if (self.usingTree()) self.tree.len() else self.rows.len();
+    }
+
+    /// 表头的“命中”只数素材，不把组织用文件夹行算成素材。
+    pub fn matchCount(self: *const Search) usize {
+        return if (self.usingTree()) self.counts.total else self.rows.len();
     }
 
     pub fn sampleAt(self: *const Search, row: usize) ?usize {
+        if (self.usingTree()) {
+            const item = self.tree.rowAt(row) orelse return null;
+            return item.sample_index;
+        }
         return self.rows.sampleAt(row);
     }
 
+    pub fn folderAt(self: *const Search, row: usize) ?library_tree.Row {
+        if (!self.usingTree()) return null;
+        const item = self.tree.rowAt(row) orelse return null;
+        return if (item.kind == .folder) item else null;
+    }
+
     pub fn rowOfSample(self: *const Search, sample_index: usize) ?usize {
-        return self.rows.rowOfSample(sample_index);
+        return if (self.usingTree()) self.tree.rowOfSample(sample_index) else self.rows.rowOfSample(sample_index);
     }
 
     /// 表头/空状态的筛选说明（`png` 或 `png、jpg`）；没有后缀筛选返回 null。
@@ -105,9 +143,44 @@ pub const Search = struct {
         return self.exts.summary(buffer);
     }
 
+    /// 基准/验收需要真实的长列表负载时展开全部节点；不改变普通启动的默认收起。
+    pub fn expandAll(self: *Search, samples: []const core.model.Sample) !void {
+        if (!self.usingTree()) return;
+        if (self.tree_stale) try self.tree.rebuild(samples);
+        self.tree_stale = false;
+        const expanded = self.expanded orelse return;
+        for (self.tree.nodes.items) |node| {
+            if (node.kind == .folder) try expanded.set(node.path, true);
+        }
+        try self.tree.rebuild(samples);
+        try self.syncSampleOrder();
+    }
+
+    pub fn toggleFolder(self: *Search, row: usize) bool {
+        if (!self.usingTree()) return false;
+        const folder = self.folderAt(row) orelse return false;
+        const expanded = self.expanded orelse return false;
+        _ = expanded.toggle(folder.path) catch return false;
+        self.tree.rebuild(self.tree.samples) catch return false;
+        self.syncSampleOrder() catch return false;
+        return true;
+    }
+
+    fn syncSampleOrder(self: *Search) error{OutOfMemory}!void {
+        self.sample_order.clearRetainingCapacity();
+        if (self.usingTree()) {
+            for (self.tree.rows.items) |row| {
+                if (row.sample_index) |index| try self.sample_order.append(self.allocator, index);
+            }
+        } else {
+            try self.sample_order.appendSlice(self.allocator, self.rows.items);
+        }
+    }
+
     /// 库变了：下一次 `frame` 重新过滤。不能只看样本数——改名不改数量。
     pub fn markStale(self: *Search) void {
         self.stale = true;
+        self.tree_stale = true;
     }
 
     /// Shift+点击：只选过滤列表里两端之间的**可见行**。
@@ -124,11 +197,11 @@ pub const Search = struct {
             selection.click(target, .{});
             return;
         };
-        const anchor_row = self.rows.rowOfSample(anchor) orelse {
+        const anchor_row = self.rowOfSample(anchor) orelse {
             selection.click(target, .{});
             return;
         };
-        const target_row = self.rows.rowOfSample(target) orelse return;
+        const target_row = self.rowOfSample(target) orelse return;
         const lo = @min(anchor_row, target_row);
         const hi = @max(anchor_row, target_row);
 
@@ -137,13 +210,18 @@ pub const Search = struct {
             selection.click(target, .{ .shift = true });
             return;
         };
-        for (list, 0..) |*slot, offset| {
-            slot.* = self.rows.sampleAt(lo + offset) orelse {
-                selection.click(target, .{ .shift = true });
-                return;
-            };
+        var used: usize = 0;
+        var display_row = lo;
+        while (display_row <= hi) : (display_row += 1) {
+            const sample = self.sampleAt(display_row) orelse continue;
+            list[used] = sample;
+            used += 1;
         }
-        selection.selectList(anchor, target, list);
+        if (used == 0) {
+            selection.click(target, .{});
+            return;
+        }
+        selection.selectList(anchor, target, list[0..used]);
     }
 
     /// 这一帧的全部工作。`samples` 必须与选择表当前的长度一致。
@@ -367,16 +445,16 @@ pub const Search = struct {
         selection: *selection_mod.Selection,
         step: filter.Move,
     ) void {
-        const current = if (selection.cursor) |cursor| self.rows.rowOfSample(cursor) else null;
-        const row = filter.moveRow(self.rows.len(), current, step) orelse return;
-        const sample = self.rows.sampleAt(row) orelse return;
+        const current = if (selection.cursor) |cursor| samplePosition(self.sample_order.items, cursor) else null;
+        const next = filter.moveRow(self.sample_order.items.len, current, step) orelse return;
+        const sample = self.sample_order.items[next];
         // 防御：`tick` 可能刚让样本数组变短，而行映射要到本帧后面才重建。
         if (sample >= samples.len) return;
         selection.selectOnly(sample);
         c.changed = true;
         std.debug.print(
             "otto-lite: cursor row={d}/{d} sample={d} name={s}\n",
-            .{ row + 1, self.rows.len(), sample, samples[sample].file_name },
+            .{ (self.rowOfSample(sample) orelse 0) + 1, self.len(), sample, samples[sample].file_name },
         );
     }
 
@@ -399,10 +477,22 @@ pub const Search = struct {
 
         // 先换行映射、再换查询副本：副本失败时下一帧还会重试（多重建一次，
         // 不会留下"查询看起来没变、映射还是旧的"的半状态）。
-        self.rows.rebuildWithExt(samples, needle, if (self.exts.active()) &self.exts else null) catch |err| {
-            std.debug.print("otto-lite: 搜索过滤失败（{s}），保留上一帧结果\n", .{@errorName(err)});
-            return null;
-        };
+        if (library_changed) self.tree_stale = true;
+        if (self.usingTree()) {
+            if (self.tree_stale) {
+                self.tree.rebuild(samples) catch |err| {
+                    std.debug.print("otto-lite: 库树构建失败（{s}），保留上一帧结果\n", .{@errorName(err)});
+                    return null;
+                };
+                self.tree_stale = false;
+            }
+        } else {
+            self.rows.rebuildWithExt(samples, needle, if (self.exts.active()) &self.exts else null) catch |err| {
+                std.debug.print("otto-lite: 搜索过滤失败（{s}），保留上一帧结果\n", .{@errorName(err)});
+                return null;
+            };
+        }
+        self.syncSampleOrder() catch return null;
         self.applied.resize(self.allocator, needle.len) catch |err| {
             std.debug.print("otto-lite: 搜索查询复制失败（{s}），下一帧重试\n", .{@errorName(err)});
             return null;
@@ -418,7 +508,7 @@ pub const Search = struct {
         const exts = self.extSummary(&ext_buffer);
         std.debug.print(
             "otto-lite: filter=\"{s}\"{s}{s} matched={d}/{d}\n",
-            .{ needle, if (exts != null) " exts=" else "", exts orelse "", self.rows.len(), samples.len },
+            .{ needle, if (exts != null) " exts=" else "", exts orelse "", self.matchCount(), samples.len },
         );
         if (first) return null;
         return if (query_changed or ext_changed) .query else .library;
@@ -427,13 +517,13 @@ pub const Search = struct {
     /// 库变了但查询没变：选中集合保留；只有光标样本被过滤掉了才回落。
     fn keepCursorVisible(self: *Search, selection: *selection_mod.Selection) void {
         const previous = selection.cursor orelse return;
-        if (self.rows.rowOfSample(previous) != null) return;
-        selection.cursor = filter.cursorSample(self.rows.items, previous);
+        if (self.rowOfSample(previous) != null) return;
+        selection.cursor = filter.cursorSample(self.sample_order.items, previous);
         if (selection.cursor) |sample| {
-            const row = self.rows.rowOfSample(sample) orelse 0;
+            const row = self.rowOfSample(sample) orelse 0;
             std.debug.print(
                 "otto-lite: cursor fell back row={d}/{d} sample={d}\n",
-                .{ row + 1, self.rows.len(), sample },
+                .{ row + 1, self.len(), sample },
             );
         } else {
             std.debug.print("otto-lite: cursor none（0 命中）\n", .{});
@@ -444,17 +534,24 @@ pub const Search = struct {
     /// 就回落到第 0 行，0 命中则没有光标。
     fn resyncCursor(self: *Search, selection: *selection_mod.Selection) void {
         const previous = selection.cursor;
-        const kept_row = if (previous) |sample| self.rows.rowOfSample(sample) else null;
+        const kept_row = if (previous) |sample| self.rowOfSample(sample) else null;
         selection.clearBits();
-        selection.cursor = filter.cursorSample(self.rows.items, previous);
+        selection.cursor = filter.cursorSample(self.sample_order.items, previous);
         if (selection.cursor) |sample| {
             const row = kept_row orelse 0;
             std.debug.print(
                 "otto-lite: cursor kept={} row={d}/{d} sample={d}\n",
-                .{ kept_row != null, row + 1, self.rows.len(), sample },
+                .{ kept_row != null, row + 1, self.len(), sample },
             );
         } else {
             std.debug.print("otto-lite: cursor none（0 命中）\n", .{});
         }
     }
 };
+
+fn samplePosition(items: []const usize, sample: usize) ?usize {
+    for (items, 0..) |item, index| {
+        if (item == sample) return index;
+    }
+    return null;
+}

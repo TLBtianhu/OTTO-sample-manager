@@ -4,7 +4,8 @@
 //!   * model       —— Sample / SampleGroup / SampleFolder / Settings 强类型，
 //!                    以及文件身份（FileIdentity / StableKey）
 //!   * store       —— 从 electron-store JSON 加载并修复旧数据
-//!   * library_binary —— OTTOLIB v1 二进制快照的编码 / 解码（纯内存，不碰 I/O）
+//!   * store_rebuild —— 把 Index 收集结果重建为可查询的 Library 业务快照
+//!   * library_binary —— OTTOLIB v1/v2 读取、v2 二进制快照编码（纯内存，不碰 I/O）
 //!   * query       —— 目录递归 / 分组 / 文件名子串查询
 //!   * annotations —— 以身份为键的用户注释表（分组 / 标签 / 评分）与旧库迁移
 //!   * cache       —— 统一字节预算缓存（预算 / LRU / pin / 软配额 / 统计）
@@ -17,7 +18,9 @@
 const std = @import("std");
 
 pub const model = @import("model.zig");
+pub const sample_location = @import("sample_location.zig");
 pub const store = @import("store.zig");
+pub const store_rebuild = @import("store_rebuild.zig");
 pub const library_binary = @import("library_binary.zig");
 pub const query = @import("query.zig");
 pub const cache = @import("cache.zig");

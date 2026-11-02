@@ -20,6 +20,7 @@ const diagnostics = @import("diagnostics.zig");
 const json = @import("json.zig");
 const reconcile = @import("reconcile.zig");
 const settings = @import("settings.zig");
+const sample_location = @import("sample_location.zig");
 
 pub const LoadError = diagnostics.LoadError;
 pub const LoadReport = diagnostics.LoadReport;
@@ -114,7 +115,7 @@ pub fn empty(backing: std.mem.Allocator) error{OutOfMemory}!Library {
 
 /// 深拷贝一条样本：id / 名称 / 扩展名 / 路径 / 目录 / 原始 id / 分组 id 全部进
 /// `allocator`（库的 arena），标量字段直接复制。
-fn cloneSample(allocator: std.mem.Allocator, sample: model.Sample) error{OutOfMemory}!model.Sample {
+pub fn cloneSample(allocator: std.mem.Allocator, sample: model.Sample) error{OutOfMemory}!model.Sample {
     var copy = sample;
     copy.id = try allocator.dupe(u8, sample.id);
     copy.file_name = try allocator.dupe(u8, sample.file_name);
@@ -220,6 +221,7 @@ pub fn load(backing: std.mem.Allocator, text: []const u8) LoadError!Library {
     const sample_slice = try samples.toOwnedSlice(allocator);
     const group_slice = try groups.toOwnedSlice(allocator);
     const folder_slice = try folders.toOwnedSlice(allocator);
+    try sample_location.backfill(allocator, sample_slice, folder_slice);
 
     return .{
         .arena = arena,
@@ -370,7 +372,7 @@ fn parseSample(
 ) error{OutOfMemory}!model.Sample {
     const file_path = json.string(object, "filePath", "");
     const group_ids = try json.dedupeStrings(allocator, try json.readStringList(allocator, object, "groupIds"));
-    return .{
+    var result = model.Sample{
         .id = sample_id,
         .file_name = json.optionalString(object, "fileName") orelse model.fileNameFromPath(file_path),
         .file_ext = json.optionalString(object, "fileExt") orelse model.fileExtFromPath(file_path),
@@ -387,6 +389,12 @@ fn parseSample(
         .imported_at = json.int64(object, "importedAt", 0),
         .identity = parseIdentity(object),
     };
+    _ = sample_location.assign(
+        &result,
+        json.optionalString(object, "rootPath") orelse "",
+        json.optionalString(object, "relativePath") orelse "",
+    );
+    return result;
 }
 
 /// 读取可选的文件身份：`{"identity": {"volumeSerial": 123, "fileIndex": 456}}`。

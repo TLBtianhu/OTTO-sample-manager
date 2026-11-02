@@ -52,6 +52,8 @@ test {
     _ = @import("audio/coarse.zig");
     _ = @import("selection.zig");
     _ = @import("filter.zig");
+    _ = @import("library_tree.zig");
+    _ = @import("settings_v2.zig");
     _ = @import("transport.zig");
     _ = @import("options.zig");
     _ = @import("options_test.zig");

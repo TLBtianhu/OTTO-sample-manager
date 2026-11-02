@@ -129,6 +129,8 @@ pub const StableKeyContext = struct {
     }
 };
 
+pub const no_relative_path = std.math.maxInt(u32);
+
 /// 一个采样（对应 TS `Sample`）。
 pub const Sample = struct {
     /// 唯一 id。electron-store 里 samples 是 id -> 对象的 map；
@@ -140,6 +142,11 @@ pub const Sample = struct {
     file_ext: []const u8,
     /// 完整路径，也是现有应用的唯一性依据。
     file_path: []const u8,
+    /// 导入根在 file_path 前缀中的字节长度；0 = 未记录。用边界而非重复字符串，
+    /// 让 10 万行浏览投影只为这两项多付 8 字节。rootPath() 还原切片。
+    root_path: u32 = 0,
+    /// 根内相对路径在 file_path 中的起始偏移；relativePath() 还原切片。
+    relative_path: u32 = no_relative_path,
     /// 所属目录；旧数据没有 folderId 时为 null。
     folder_id: ?[]const u8 = null,
     /// 复制链的原始 id；缺失时等于 id。
@@ -184,6 +191,18 @@ pub const Sample = struct {
 
     pub fn displayName(self: Sample) []const u8 {
         return if (self.file_name.len > 0) self.file_name else self.file_path;
+    }
+
+    /// 导入根绝对路径，借用 file_path 的前缀。
+    pub fn rootPath(self: Sample) []const u8 {
+        if (self.root_path == 0 or self.root_path > self.file_path.len) return "";
+        return self.file_path[0..self.root_path];
+    }
+
+    /// 根内相对路径，借用 file_path 的后缀（含文件名）。
+    pub fn relativePath(self: Sample) []const u8 {
+        if (self.relative_path == no_relative_path or self.relative_path >= self.file_path.len) return "";
+        return self.file_path[self.relative_path..];
     }
 };
 

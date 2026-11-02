@@ -646,6 +646,27 @@ function Invoke-OverwriteUpgrade {
     ($seedRun.Code -eq 0) -and ($seedLine -eq ('otto-lite {0} (installed)' -f $FromVersion))) (
       '输出了 “{0}”' -f $seedLine)
 
+  # ---- 起点数据也必须由旧版生成：新版 v2 库/设置 → 旧版 → 新版不算迁移验收 ----
+  # 第 6 步已经由新版写过数据；这里在临时用户目录里清掉库，让旧版重新导入，
+  # 并用旧版设置面板写回无 version 的平铺 settings.json。后面的字节不变断言
+  # 仍然针对“安装器本身”；新进程读取这份 v1 数据由 --library-info 验收。
+  if (Test-Path -LiteralPath $libraryPath) { Remove-Item -LiteralPath $libraryPath -Force }
+  $seedImport = Invoke-Native -ExePath $installedExe -ExeArguments ('--import-into "{0}"' -f $script:importSrc) -WorkDir $programDir -EnvMap (Get-ChildEnv)
+  Add-Check '升级起点由旧版重新导入 library.otto' (
+    ($seedImport.Code -eq 0) -and (Test-Path -LiteralPath $libraryPath -PathType Leaf)) (
+      'exit={0}；{1}' -f $seedImport.Code, $seedImport.Text.Trim())
+  $seedShot = Join-Path $script:shotsDir 'upgrade-seed-v1-settings.png'
+  $seedPanelArgs = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $seedShot, $script:panelScript
+  $seedPanel = Invoke-Native -ExePath $installedExe -ExeArguments $seedPanelArgs -WorkDir $programDir -EnvMap (Get-ChildEnv)
+  Add-Check '升级起点由旧版设置面板写回 settings.json' ($seedPanel.Code -eq 0) (
+    'exit={0}；{1}' -f $seedPanel.Code, $seedPanel.Seconds)
+  $legacyBytes = [IO.File]::ReadAllBytes($libraryPath)
+  $legacySettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+  $legacyHasVersion = @($legacySettings.PSObject.Properties | Where-Object { $_.Name -eq 'version' }).Count -gt 0
+  Add-Check '升级起点确为 OTTOLIB v1 + 无 version 的旧设置' (
+    ($legacyBytes.Length -ge 10) -and ([BitConverter]::ToUInt16($legacyBytes, 8) -eq 1) -and (-not $legacyHasVersion)) (
+      'library.version={0}；settings.version present={1}' -f [BitConverter]::ToUInt16($legacyBytes, 8), $legacyHasVersion)
+
   # ---- 便携副本：program 旁边的兄弟目录，带自己的 data\ ----
   # 便携版不是"另一份安装"，它是用户从发布页下的 zip 解出来的一坨：数据跟程序走。
   # 安装版升级器如果按注册表/安装目录乱认领，最容易误伤的就是它旁边这一份。
@@ -1218,6 +1239,12 @@ try {
   $settingsPath = Join-Path $script:ottoData 'settings.json'
   $settings = Test-SettingsFile -Path $settingsPath
   Add-Check 'settings.json 存在且可解析（五个字段 + opacity=153）' $settings.Ok $settings.Detail
+  $settingsV2 = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+  Add-Check '新版设置写 v2：version + view.expanded_folders + layout 尺寸' (
+    ([int]$settingsV2.version -eq 2) -and ($null -ne $settingsV2.view) -and
+    ($null -ne $settingsV2.view.expanded_folders) -and
+    ([int]$settingsV2.layout.width -eq 380) -and ([int]$settingsV2.layout.height -eq 700)) (
+      'version={0}；layout={1}x{2}' -f $settingsV2.version, $settingsV2.layout.width, $settingsV2.layout.height)
   $cacheDir = Join-Path $script:ottoData 'cache\thumbs'
   Add-Check 'cache\thumbs 也建在 %APPDATA%\OTTO 下' (Test-Path -LiteralPath $cacheDir -PathType Container) $cacheDir
   $dataNextToExe = Test-Path -LiteralPath (Join-Path $script:programDir 'data')

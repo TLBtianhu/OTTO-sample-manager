@@ -94,7 +94,7 @@ pub fn loadWith(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Load
     return core.store.load(allocator, bytes);
 }
 
-/// 把库原子地写成 OTTOLIB v1。返回写出的字节数。失败时目标文件保持原样。
+/// 把库原子地写成 OTTOLIB v2。返回写出的字节数。失败时目标文件保持原样。
 pub fn save(
     init: std.process.Init,
     allocator: std.mem.Allocator,

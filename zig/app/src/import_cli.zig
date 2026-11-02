@@ -50,7 +50,7 @@ pub const Options = struct {
     /// 底库（`.otto` 或旧 JSON，按 magic 判断）。null = 没给：这时如果 `save_path`
     /// 已经存在就复用它（同一条命令重跑得到 `added=0`），否则新建空库。
     library_path: ?[]const u8 = null,
-    /// 输出库（OTTOLIB v1，原子写）。缺省是错误：这条命令没有别的产物。
+    /// 输出库（OTTOLIB v2，原子写）。缺省是错误：这条命令没有别的产物。
     save_path: ?[]const u8 = null,
     /// 测试用：不打摘要行。
     quiet: bool = false,
@@ -222,12 +222,13 @@ pub fn buildSample(
     metadata: ?probe_mod.Metadata,
     id: []const u8,
     imported_at: i64,
+    root_path: []const u8,
 ) core.model.Sample {
     const display_name = if (fact.ext.len > 0 and fact.ext.len < fact.name.len)
         fact.name[0 .. fact.name.len - fact.ext.len]
     else
         fact.name;
-    return .{
+    var result = core.model.Sample{
         .id = id,
         .file_name = display_name,
         .file_ext = fact.ext,
@@ -242,6 +243,8 @@ pub fn buildSample(
         .identity = if (fact.identity) |identity| toCoreIdentity(identity) else null,
         .pending_metadata = metadata == null,
     };
+    core.sample_location.setBorrowed(&result, root_path, core.sample_location.within(root_path, fact.path) orelse fact.name);
+    return result;
 }
 
 /// 命令行入口：跑流水线，成功时把摘要打到 stdout，返回退出码 0/1。
@@ -373,7 +376,7 @@ pub fn importRun(
             continue;
         };
         const id = try uniqueSampleId(temp, fact.path, &dedupe);
-        try incoming.append(temp, buildSample(fact, metadata, id, imported_at));
+        try incoming.append(temp, buildSample(fact, metadata, id, imported_at, scan.root));
         try dedupe.accept(temp, fact, id);
     }
 

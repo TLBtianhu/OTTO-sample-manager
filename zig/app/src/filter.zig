@@ -83,14 +83,19 @@ fn matchIndices(
     needle: []const u8,
     exts: ?*const ExtFilter,
 ) error{OutOfMemory}![]usize {
-    // 没有后缀条件时仍走 core 的那一条匹配，保证搜索语义只有一份实现。
-    if (exts == null) return core.query.matchingIndices(backing, samples, needle);
-
+    // 库允许多个导入根覆盖同一个文件；呈现层按完整路径只保留第一条。
+    // 匹配仍走 core 的 containsIgnoreCase，搜索语义不分叉。
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(backing);
     var result: std.ArrayListUnmanaged(usize) = .empty;
     errdefer result.deinit(backing);
     for (samples, 0..) |sample, index| {
+        if (seen.contains(sample.file_path)) continue;
+        try seen.put(backing, sample.file_path, {});
         if (!core.query.containsIgnoreCase(sample.file_name, needle)) continue;
-        if (!exts.?.matches(sample.file_ext)) continue;
+        if (exts) |selected| {
+            if (!selected.matches(sample.file_ext)) continue;
+        }
         try result.append(backing, index);
     }
     return result.toOwnedSlice(backing);
@@ -246,7 +251,11 @@ pub const ExtCounts = struct {
             for (next.items) |item| self.allocator.free(item.label);
             next.deinit(self.allocator);
         }
+        var seen = std.StringHashMapUnmanaged(void){};
+        defer seen.deinit(self.allocator);
         for (samples) |sample| {
+            if (seen.contains(sample.file_path)) continue;
+            try seen.put(self.allocator, sample.file_path, {});
             const ext = trimExt(sample.file_ext);
             if (ext.len == 0) continue;
             var found: ?usize = null;
@@ -268,7 +277,7 @@ pub const ExtCounts = struct {
         for (self.items) |item| self.allocator.free(item.label);
         if (self.items.len > 0) self.allocator.free(self.items);
         self.items = owned;
-        self.total = samples.len;
+        self.total = @intCast(seen.count());
     }
 };
 
@@ -379,6 +388,18 @@ test "cursorSample：原样本还在结果里就保持，否则回落第 0 行�
 
     try testing.expectEqual(@as(?usize, null), cursorSample(&.{}, 3));
     try testing.expectEqual(@as(?usize, null), cursorSample(&.{}, null));
+}
+
+test "搜索保持平铺且按完整路径去重：没有文件夹行，同名不同路径不合并" {
+    const samples = [_]core.model.Sample{
+        .{ .id = "a", .file_name = "same", .file_ext = ".wav", .file_path = "D:/a/same.wav" },
+        .{ .id = "covered", .file_name = "same", .file_ext = ".wav", .file_path = "D:/a/same.wav" },
+        .{ .id = "b", .file_name = "same", .file_ext = ".wav", .file_path = "D:/b/same.wav" },
+    };
+    var rows = Rows.init(testing.allocator);
+    defer rows.deinit();
+    try rows.rebuild(&samples, "same");
+    try testing.expectEqualSlices(usize, &.{ 0, 2 }, rows.items);
 }
 
 // ---------------------------------------------------------------------------

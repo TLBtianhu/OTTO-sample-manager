@@ -35,7 +35,8 @@ zig build test
 | `src/diagnostics.zig` | `LoadError` 与 `LoadReport`（修复 / 丢弃计数） |
 | `src/reconcile.zig` | 旧数据修复：目录归属、扁平目录、目录树、分组双向关系、排序重建 |
 | `src/store.zig` | `Library`、`load` / `loadFile`，解析 map 形式的样本 / 分组 / 目录并装配索引 |
-| `src/library_binary.zig` | `OTTOLIB` v1 二进制快照的编码 / 解码：版本化头、定长字段、字符串长度与数量上限、尾部 CRC32，全部校验且绝不 panic（不碰 I/O） |
+| `src/library_binary.zig` | `OTTOLIB` v1/v2 解码、v2 编码：版本化头、定长字段、字符串长度与数量上限、尾部 CRC32，全部校验且绝不 panic（不碰 I/O） |
+| `src/store_rebuild.zig` | 把 `Index` 的事件收集结果重建为带目录/分组关系、可查询的 `Library` 业务快照 |
 | `src/query.zig` | 目录递归过滤、分组过滤、文件名子串过滤、排序、子树枚举 |
 | `src/annotations.zig` | 以 `StableKey`（身份优先）为键的注释表：`AnnotationTable` / `resolve` 旧库迁移 |
 | `src/index.zig` | 可变索引层：在不可变 `Library` 之上滚动应用 created / removed / renamed / modified / overflow |
@@ -47,7 +48,7 @@ zig build test
 | `fixtures/*.json` | 全部为手工构造的合成数据，**不含任何真实用户数据** |
 | `fixtures/fixtures.zig` | 以 `@embedFile` 暴露 fixture 文本 |
 
-单文件均小于 600 行；`zig build test` 当前为 **58 个测试**。
+单文件均小于 600 行；`zig build test` 当前为 **93 个测试**。
 
 ## 公共 API 草图
 
@@ -81,6 +82,10 @@ pub const Sample = struct {
     file_name: []const u8,
     file_ext: []const u8,
     file_path: []const u8,
+    root_path: u32 = 0,                  // 导入根在 file_path 前缀中的字节长度
+    relative_path: u32 = no_relative_path, // 根内相对路径的起始偏移
+    pub fn rootPath(self: Sample) []const u8;
+    pub fn relativePath(self: Sample) []const u8;
     folder_id: ?[]const u8 = null,
     original_id: []const u8 = "",
     is_copy: bool = false,
@@ -270,8 +275,9 @@ identity 未评分（0）时才继承旧 fallback 的评分。`size` / `mtime` �
 
 ## 可变索引层（`Index`）
 
-`Library` 是「加载一次」的不可变真源；`Index` 是它之上的工作视图，把文件监听口岸的
-变更事件按到达顺序滚到样本行上：
+`Library` 是「加载一次」的不可变真源；`Index` 是它之上的**事件收集器**，把文件监听口岸的
+变更事件按到达顺序滚到样本行上。它不是第二个查询真源，也不保证 created 的目录 / 分组关系
+已经闭合；`query.*` 仍只读 `Library` 快照，重建入口是 `store_rebuild.rebuild`。
 
 ```
 Library  加载一次的不可变真源快照（只读）
@@ -351,6 +357,13 @@ Index    事件流上滚动的工作视图（单线程）
 
 ## 查询语义
 
+`query.apply` / `byFolder` / `byGroup` / `byFileName` **只接受 `Library` 业务快照**。
+`Index` 只是事件收集器，重建前不承诺完整业务视图：created 会先出现在 `Index.samples()`，
+但旧 `Library` 的查询结果暂时不变。需要查询或写盘时，调用
+`store_rebuild.rebuild(allocator, old_library, index.samples())` 生成新的独立快照；该函数会
+补齐 created 的目录成员、保留既有分组关系，随后查询与这份新快照一致。created 没有用户
+分组时保持空分组，不凭路径或注释擅自造一个分组。
+
 - **目录过滤**：从目标目录出发沿 `childFolderIds` 递归收集 `sample_ids`（与
   `sampleStore.getFolderDerivedData` 的 `descendantSampleIdsByFolder` 一致）；
   同一 id 在多个目录出现只返回一次。
@@ -363,7 +376,7 @@ Index    事件流上滚动的工作视图（单线程）
 
 ## 测试覆盖
 
-`zig build test` 共 58 个测试，其中：
+`zig build test` 共 93 个测试，其中：
 
 - `legacy_v1.json`：没有 `folderId` / `groupIds` 的旧数据补默认值、路径推导、扁平目录归位；
 - `dangling_refs.json`：目录 / 分组 / 父目录 / 排序表里的悬空引用全部清理并计数；
@@ -377,6 +390,8 @@ Index    事件流上滚动的工作视图（单线程）
   modified 的 `invalidated`（更新前的键）、overflow 脏标记与 `clearDirty` 恢复、
   混合批次计数与顺序、renamed 找不到来源的降级、重复 created、改名覆盖同名目标、
   批内先 modified 后 removed 的键有效期；
+- 收集 / 重建：created 的最长已有根 / 父目录归属、旧快照查询不变、`store_rebuild.rebuild`
+  后目录成员可查询、created 不擅自入组、旧分组与注释保持；
 - 1000 条合成数据：只打印加载耗时，不做性能断言。
 
 ## 性能粗测
@@ -395,10 +410,9 @@ Index    事件流上滚动的工作视图（单线程）
 - **SQLite 持久化**：现在是「读 JSON → 内存模型」，写回与迁移留给后续。
 - **增量更新**：`Index` 已经能在事件流上滚动，但变更不落盘；每次启动仍是全量 `load`，
   没有 diff / 局部重载。
-- **`Index` 与查询 / 目录的接线**：`query.*` 仍只吃 `Library` 快照；created 样本的
-  `folder_id` 为 null，也不会进入 `SampleFolder.sample_ids`，分组 / 目录关系不增量维护。
-- **`mtime` 的加载**：`store.load` 目前不解析 JSON 里的 `mtime`（字段保持 0），
-  `Index` 的 `modified` 能把它更新到视图里，但重启后又会回到 0。
+- **自动重建调度**：`Index` 只负责收集事件；`query.*` 仍只吃 `Library` 快照。
+  需要查询 / 写盘时由调用方显式执行 `store_rebuild.rebuild`，不会由本层擅自决定持久化时机。
+- **JSON 旧路径的 `mtime`**：OTTOLIB 二进制格式已经会保存并恢复 `mtime`；旧 JSON 路径仍不解析 / 不落该字段（如仍存在），所以走 JSON 时依旧回到 0。`Index` 的 `modified` 只更新当前收集视图。
 - **C ABI 查询接口**：静态库目前只导出 `otto_core_version` 冒烟符号，还没有面向
   Electron / Tauri 的句柄式查询 ABI。
 - **目录环修复**：环不会被检测并打断，只保证查询有界。

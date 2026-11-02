@@ -158,7 +158,7 @@ test "四个具名损坏错误：BadMagic / UnknownVersion / Truncated / Checksu
     {
         const broken = try allocator.dupe(u8, valid);
         defer allocator.free(broken);
-        std.mem.writeInt(u16, broken[8..10], 2, .little);
+        std.mem.writeInt(u16, broken[8..10], 99, .little);
         try std.testing.expectError(error.UnknownVersion, binary.decode(allocator, broken));
     }
 
@@ -220,8 +220,8 @@ test "Corrupt：保留位 / 非法判别字节" {
         const broken = try allocator.dupe(u8, valid);
         defer allocator.free(broken);
         var offset = binary.header_size + binary.settings_bytes;
-        // id / file_name / file_ext / file_path 四个字符串
-        for (0..4) |_| {
+        // v2：id / file_name / file_ext / file_path / root_path / relative_path 六个字符串
+        for (0..6) |_| {
             const length = std.mem.readInt(u32, broken[offset..][0..4], .little);
             offset += 4 + length;
         }
