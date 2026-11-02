@@ -1,23 +1,7 @@
-//! 命令行解析的**各族函数**：`options.zig` 的 `parse` 只负责走一遍参数、按族调用这里。
-//!
-//! 为什么按族拆：`options` 有 60 多个带值标志，全家挤在一个 if/else 链里，看一眼
-//! "这个族还有没有漏写的 `=` 写法"要翻三百行。这里按**用户会做的事**分组
-//! （自检 / 预览 / 载入与产出 / 更新 / 基准 / 过滤 / 其余），每组一个函数：
-//! 参数属于本组就消费掉并返回 `true`，否则返回 `false` 交给下一组。
-//!
-//! 约定（`options.zig` 与 `main.zig` 都靠它）：
-//!   * 空格写法（`--flag value`）用 `value()` 取值，到末尾就是 `MissingValue`；
-//!   * `=` 写法（`--flag=value`）直接从 `arg` 的切片上切，不再看下一个参数；
-//!   * `index` 是**调用方的游标**，取走一个值就 +1，`parse` 的 `while` 继续用；
-//!   * 空串是有效值（`--filter=` 表示不过滤），只有"没给"才是 `null`；
-//!   * 本文件不碰文件系统、不猜运行形态（那是 `mode.zig` 的事）。
-//!
-//! `Options` 还是定义在 `options.zig`（其它模块依赖它的字段名），本文件反向 import
-//! 它；Zig 的 `@import` 是惰性解析的，没有初始化循环。反过来，把标志字符串也
-//! **只**写在这边：`options.zig` 里没有第二份 `--demo-rescan` 之类。
-//!
-//! 顺序无关性：每个标志在全表里只出现一次（`eql` 是精确比较，前缀写法都带 `=`），
-//! 所以分到哪一组、组内先后都不改变解析结果。
+//! 命令行各族解析函数；`options.zig` 的 `parse` 只负责依次调用。
+//! 约定：空格写法由 `value()` 推进游标，`--flag=value` 从当前切片取值；
+//! 空串是有效值，只有未提供才是 null。解析不碰文件系统，也不猜运行形态。
+//! `Options` 仍在 options.zig；标志字符串只在本文件出现一次，组间顺序无关。
 
 const std = @import("std");
 const options_mod = @import("options.zig");
@@ -508,6 +492,10 @@ pub fn filter(options: *options_mod.Options, args: anytype, index: *usize, arg: 
 
 /// 不属于上面任何一族的：版本、缩略图隔离、L3 预算、设置面板与不透明度探针。
 pub fn misc(options: *options_mod.Options, args: anytype, index: *usize, arg: []const u8) Error!bool {
+    if (std.mem.eql(u8, arg, "--crash-test")) {
+        options.crash_test = true;
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--version")) {
         options.version_requested = true;
         return true;

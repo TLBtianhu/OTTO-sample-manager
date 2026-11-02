@@ -24,6 +24,8 @@ pub const Convert = struct {
 pub const Options = struct {
     /// 位置参数；`null` = 用形态决定的默认库。
     library_path: ?[]const u8 = null,
+    /// `--crash-test`：仅供验收启动兜底，在参数解析后立即返回具名错误。
+    crash_test: bool = false,
     /// `--version`：打印版本与形态后以 0 退出，不读库、不开窗。
     version_requested: bool = false,
     demo_dir: ?[]const u8 = null,

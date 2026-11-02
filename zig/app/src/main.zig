@@ -50,6 +50,7 @@ const row_ui = @import("row_ui.zig");
 const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
 const settings_ui = @import("settings_ui.zig");
+const startup_dx = @import("startup_dx.zig");
 const thumbs_mod = @import("thumbs.zig");
 const thumbs_prefetch = @import("thumbs_prefetch.zig");
 const thumbs_report = @import("thumbs_report.zig");
@@ -451,7 +452,13 @@ fn hasInteraction(input: anytype) bool {
         input.zoom != 1 or input.pan.x != 0 or input.pan.y != 0;
 }
 
-pub fn main(init: std.process.Init) !void {
+pub const panic = std.debug.FullPanic(startup_dx.panic);
+
+pub fn main(init: std.process.Init) void {
+    startup_dx.run(init, run);
+}
+
+fn run(init: std.process.Init) !void {
     // `--bench` 的子进程用这个时间戳量"main 入口 → 第一帧建完"；普通启动只多一次
     // 单调时钟读取。
     const started = std.Io.Clock.Timestamp.now(init.io, .awake);
@@ -459,6 +466,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     const options = options_mod.parse(args) catch |err| return opacity_probe.parseError(err);
+    // 验收专用：在窗口/库/设置之前走一次真实的顶层错误出口。
+    if (options.crash_test) return error.CrashTestRequested;
     // 所有不开窗的模式（--version / 自检 / 转换 / 查库）都在这里返回；
     // null 才继续走 UI。顺序与实现见 `commands.zig`。
     if (options.isHeadlessCommand()) console_mod.attachParentConsole(); // 仅 CLI，见 console.zig
@@ -478,6 +487,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
     // 库 / Live / 设置 / 缩略图 / 预览条 / 字体与上屏后端：见 `app_boot.zig`。
+    startup_dx.mark(.read_library);
     var boot = try app_boot.boot(init, allocator, options, target, &probe);
     defer boot.deinit();
 
@@ -526,6 +536,7 @@ pub fn main(init: std.process.Init) !void {
         }
         try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe, state.samples, boot.library.arena.queryCapacity());
     }
+    startup_dx.mark(.create_window);
     state.window = try boot.app.newWindow(.{
         .title = title,
         .width = 380,
@@ -534,6 +545,7 @@ pub fn main(init: std.process.Init) !void {
         .non_activating = options.settings_probe or options.drop_probe != null or options.set_opacity != null,
         .content = .{ .view = .init(&state, State.view) },
     });
+    startup_dx.mark(.first_frame);
     // 文件拖入：目录走「导入文件夹」同一条 `Import.start`；`--drop-probe` 时
     // 还会合成一次 WM_DROPFILES（窗口隐藏，见 `drop_ui.zig`）。
     // **浏览模式不装**：拖入 = 导入 = 写库，而浏览模式对磁盘零写入。
