@@ -1,7 +1,18 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // 默认目标必须显式钉在**基线 CPU** 上。
+    // 之前写 `standardTargetOptions(.{})`，默认值是 native —— 也就是说发给用户的
+    // 二进制是按**构建机**的 CPU 特性编译的（本机 Ryzen 9 9955HX / Zen 5，含 AVX512）。
+    // 在老一点的 CPU 上，遇到不认识的指令就是**非法指令、进程当场死掉、没有任何提示**，
+    // 表现正是"双击没反应"。便携版和安装版用的是同一个 exe，所以两个都一样。
+    // x86_64_v2 = SSE4.2，2009 年以后的 x86-64 都有；需要更高特性可用 -Dcpu=... 覆盖。
+    const baseline = std.Target.Query{
+        .cpu_arch = .x86_64,
+        .os_tag = .windows,
+        .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v2 },
+    };
+    const target = b.standardTargetOptions(.{ .default_target = baseline });
     const optimize = b.standardOptimizeOption(.{
         .preferred_optimize_mode = .ReleaseSafe,
     });
