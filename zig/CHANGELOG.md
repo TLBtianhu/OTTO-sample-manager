@@ -14,6 +14,16 @@
 
 
 
+
+## 0.47.0
+
+- **exe 有图标和版本信息了**：`otto-lite.exe` 与 `otto-thumb-host.exe` 现在嵌入 `resources/icon.ico` 与 VERSIONINFO（FileDescription / ProductName / FileVersion 等），版本号仍只从 `build.zig.zon` 取。用 Zig 自带 resinator，不需要 rc.exe。
+- **启动失败会说人话**：顶层错误与 Zig panic 统一兜底——写 `crash.log`（时间/版本/Windows 版本/形态/失败阶段/错误名/exe 路径），并弹 MessageBox 给出"重启或把日志发给开发者"的建议。
+- 正常路径不变：不多窗口、不写日志。
+- 崩溃日志按形态落点：dev `%LOCALAPPDATA%\OTTO\dev`、安装版 `%LOCALAPPDATA%\OTTO`、便携 `<exe>\data`；**绝不写程序目录**。
+- 新增 `zig\startup-dx.ps1` 验收：`--crash-test` 在三种形态下都必须弹窗 + 写日志，脚本自动关窗。
+- **边界写明**：缺 DLL（装载器在进入 main 前失败）、被杀软直接拦截/强杀，这份日志看不到；原生 access violation 不等于 Zig panic，不承诺覆盖所有硬崩溃。
+
 ## 0.46.1
 
 - **发给用户的二进制不再按构建机的 CPU 编译**：`build.zig` 原来用 `standardTargetOptions(.{})`，默认 target 是 native，等于把 Zen 5 / AVX512 的指令带进了安装包。老 CPU 遇到不认识的指令就是**非法指令、进程当场退出、没有任何提示**——表现正是"双击没反应"。
