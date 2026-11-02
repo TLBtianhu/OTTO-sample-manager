@@ -1,0 +1,27 @@
+.{
+    .name = .otto_lite,
+    .version = "0.44.0",
+    .fingerprint = 0x5672452d5e9089f6,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .nanoui = .{ .path = "../vendor/nanoui" },
+        // 纯 Zig 的音频解码库（WAV / FLAC / MP3 / AIFF / Ogg Vorbis / Ogg Opus 的 CELT 层）；
+        // vendor 的规矩见 VENDOR.md。
+        .zig_audio = .{ .path = "../vendor/zig-audio" },
+        .otto_core = .{ .path = "../core" },
+        // zig/ports 是一个 package、五个 module：监听 / 缩略图 / 能力表 / 拖出 / 库文件。
+        // 五个依赖名里 ports 是主入口：`ports_dep.module("otto_watch")` 之类。
+        .ports = .{ .path = "../ports" },
+        .thumb = .{ .path = "../ports" },
+        // 缩略图隔离的客户端模块；同一个包里的 helper exe 也从这里拿。
+        .thumb_host = .{ .path = "../ports" },
+        .caps = .{ .path = "../ports" },
+        .drag = .{ .path = "../ports" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "fixtures",
+    },
+}

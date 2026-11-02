@@ -1,0 +1,145 @@
+{
+  "samples": {
+    "s_root": {
+      "id": "s_root",
+      "fileName": "Root Loop",
+      "fileExt": ".wav",
+      "filePath": "D:/lib/Root Loop.wav",
+      "folderId": "f_root",
+      "importedAt": 10,
+      "groupIds": [
+        "g_drums"
+      ]
+    },
+    "s_a": {
+      "id": "s_a",
+      "fileName": "Kick A",
+      "fileExt": ".wav",
+      "filePath": "D:/lib/A/Kick A.wav",
+      "folderId": "f_a",
+      "importedAt": 20,
+      "groupIds": [
+        "g_drums",
+        "g_bass"
+      ]
+    },
+    "s_a1": {
+      "id": "s_a1",
+      "fileName": "Snare A1",
+      "fileExt": ".wav",
+      "filePath": "D:/lib/A/Deep/Snare A1.wav",
+      "folderId": "f_a1",
+      "importedAt": 30
+    },
+    "s_b": {
+      "id": "s_b",
+      "fileName": "Bass B",
+      "fileExt": ".wav",
+      "filePath": "D:/lib/B/Bass B.wav",
+      "folderId": "f_b",
+      "importedAt": 40,
+      "groupIds": [
+        "g_bass"
+      ]
+    },
+    "s_cn": {
+      "id": "s_cn",
+      "fileName": "鼓组 循环 01",
+      "fileExt": ".wav",
+      "filePath": "D:/lib/B/鼓组 循环 01.wav",
+      "folderId": "f_b",
+      "importedAt": 50
+    }
+  },
+  "groups": {
+    "g_drums": {
+      "id": "g_drums",
+      "name": "Drums",
+      "color": "#2563eb",
+      "sampleIds": []
+    },
+    "g_bass": {
+      "id": "g_bass",
+      "name": "Bass",
+      "color": "#16a34a",
+      "sampleIds": []
+    }
+  },
+  "folderState": {
+    "folders": {
+      "f_root": {
+        "id": "f_root",
+        "name": "lib",
+        "path": "D:/lib",
+        "sampleIds": [],
+        "childFolderIds": [
+          "f_a",
+          "f_b"
+        ],
+        "parentId": null,
+        "rootId": "f_root",
+        "depth": 0,
+        "isExpanded": true,
+        "order": 0
+      },
+      "f_a": {
+        "id": "f_a",
+        "name": "A",
+        "path": "D:/lib/A",
+        "sampleIds": [],
+        "childFolderIds": [
+          "f_a1"
+        ],
+        "parentId": "f_root",
+        "rootId": "f_root",
+        "depth": 1,
+        "order": 0
+      },
+      "f_a1": {
+        "id": "f_a1",
+        "name": "Deep",
+        "path": "D:/lib/A/Deep",
+        "sampleIds": [],
+        "childFolderIds": [],
+        "parentId": "f_a",
+        "rootId": "f_root",
+        "depth": 2,
+        "order": 0
+      },
+      "f_b": {
+        "id": "f_b",
+        "name": "B",
+        "path": "D:/lib/B",
+        "sampleIds": [],
+        "childFolderIds": [],
+        "parentId": "f_root",
+        "rootId": "f_root",
+        "depth": 1,
+        "order": 1
+      }
+    },
+    "folderOrder": [
+      "f_root"
+    ]
+  },
+  "groupOrder": [
+    "g_drums",
+    "g_bass"
+  ],
+  "settings": {
+    "windowAlwaysOnTop": false,
+    "windowWidth": 500,
+    "windowHeight": 900
+  },
+  "copySettings": {
+    "enableAutoCopy": false,
+    "keepCopies": true,
+    "melodyneCompatibilityMode": true
+  },
+  "folderSettings": {
+    "expandOnSearch": false,
+    "folderClassificationEnabled": false,
+    "memoryOptimizationMode": true,
+    "enableChinesePinyinFuzzySearch": false
+  }
+}

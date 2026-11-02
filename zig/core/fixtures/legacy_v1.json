@@ -1,0 +1,47 @@
+{
+  "samples": {
+    "legacy_1": {
+      "id": "legacy_1",
+      "fileName": "Kick 01",
+      "fileExt": ".wav",
+      "filePath": "D:/packs/Drums/Kick 01.wav",
+      "originalId": "legacy_1",
+      "isCopy": false,
+      "copyIndex": 0,
+      "duration": 0.8,
+      "sampleRate": 44100,
+      "channels": 1,
+      "fileSize": 70644,
+      "importedAt": 1000
+    },
+    "legacy_2": {
+      "id": "legacy_2",
+      "fileName": "Snare 02",
+      "fileExt": ".wav",
+      "filePath": "D:/packs/Drums/Snare 02.wav",
+      "duration": 0.5,
+      "importedAt": 1001
+    },
+    "legacy_3": {
+      "filePath": "D:/packs/Drums/Hat 03.wav",
+      "importedAt": 1002
+    }
+  },
+  "groups": {
+    "g_old": {
+      "id": "g_old",
+      "name": "Old Group"
+    }
+  },
+  "folderState": {
+    "folders": {
+      "folder_D:/packs/Drums": {
+        "id": "folder_D:/packs/Drums",
+        "path": "D:/packs/Drums"
+      }
+    },
+    "folderOrder": [
+      "folder_D:/packs/Drums"
+    ]
+  }
+}

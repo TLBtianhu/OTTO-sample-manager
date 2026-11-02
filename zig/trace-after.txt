@@ -1,0 +1,36 @@
+﻿.\zig-out\bin\otto-lite.exe : otto-trace process.begin age_ms=9.86
+At line:1 char:291
++ ... _TRACE='1'; .\zig-out\bin\otto-lite.exe .\fixtures\library.json --ben ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (otto-trace process.begin age_ms=9.86:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+otto-trace setup.library d=6.99 t=6.99
+otto-trace setup.live d=0.65 t=7.64
+otto-trace setup.thumbs d=0.75 t=8.39
+otto-trace setup.preview d=0.05 t=8.44
+otto-trace setup.app d=59.22 t=67.66
+otto-trace setup.state d=0.03 t=67.69
+otto-trace setup.window d=0.01 t=67.70
+bench-first-frame: ws_before_frame_mib=20.31
+nanoui-trace tester.text d=67.87 t=67.87
+otto-lite: filter="" matched=2000/2000
+nanoui-trace font.scan.start d=0.67 t=68.54
+nanoui-trace font.scan d=30.19 t=98.73 dirs=1 entries=570 files=372 faces=409 bundled=0 walk_ms=0.74 open_ms=11.05 allo
+c_ms=0.06 header_ms=7.34 parse_ms=0.05 table_ms=6.03 style_ms=6.75 max_end=37102353
+otto-lite: 缩略图 ready=0 本帧画图=0 requested=21 no_handler=0 cached=0 failed=0 pending=21 l3_hit=0 l3_miss=0 l3_write=0 l3_e
+victed=0 l3_bytes=0 l3_corrupt=0
+[thumb-host] helper 启动 pid=18456 size=64（累计 spawn=1）
+nanoui-trace tester.frame d=15.01 t=113.74
+bench-first-frame: frame build_ms=31.35 layout_ms=4.55 paint_ms=9.96 other_ms=0.19 passes=1 nodes=144 instances=251
+bench-first-frame: glyphs sprites=116 rasterized=116 raster_ms=5.62 phases=6
+bench-first-frame: font files=372 faces=409 walk_ms=0.74 open_ms=11.05 alloc_ms=0.06 header_ms=7.34 parse_ms=0.05 table
+_ms=6.03 style_ms=6.75 max_end=37102353 loads=2 load_ms=4.36 fallback=38 fallback_ms=4.18 found=38 layouts=67
+bench-first-frame: qpc_ms=113.76
+bench-first-frame: first_frame_ms=113.75 setup_ms=67.71 frame_ms=46.04 size=380x700 scale=2 ws_mib=70.95
+[thumb-host:18456] 启动 size=64
+[thumb-host:18456] D:/lib/voicebank/1/s_0.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:18456] D:/lib/voicebank/2/s_1.wav -> file_missing（HRESULT=0x80070003）
+[thumb-host:18456] D:/lib/voicebank/3/s_2.wav -> file_missing（HRESULT=0x80070003）
+otto-trace frame.teardown d=49.35 t=117.05 ms=3.29
+[thumb-host:18456] D:/lib/voicebank/4/s_3.wav -> file_missing（HRESULT=0x80070003）

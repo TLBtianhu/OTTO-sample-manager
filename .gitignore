@@ -29,3 +29,11 @@ tools/dnd-research/logs/*.png
 !tools/dnd-research/logs/melodyne-x64-preset-A-20260811-171905.log
 !tools/dnd-research/logs/default-electron-path-20260811-230453.log
 !tools/dnd-research/logs/verified-fix-20260811.log
+zig/keys/*.key
+*.key.enc
+zig/dist/
+
+# 第三方库的构建缓存不属于仓库（vendor 现在是普通文件）
+zig/vendor/**/.zig-cache/
+zig/vendor/**/zig-out/
+zig/vendor/**/zig-pkg/
