@@ -33,10 +33,10 @@
 //!   1. `start` 在工作线程上跑：开流、解前缀、建峰值/位图、起后台线程；
 //!   2. 后台线程独占 `decode.Stream` 与峰值累加器，过一把自旋锁发布
 //!      `decoded_frames` / `complete_buckets`（UI 只读这两个数，不碰解码器）；
-//!   3. 解完时线程 `finish` 出最终 PCM、把峰值交出去（或重算）、建 `Player`，
+//!   3. 解完时线程 `finish` 出最终 PCM、把峰值交出去（或重算），不建 `Player`，
 //!      然后在锁里放好 `finished` 并置 `done`；
 //!   4. UI 线程 `pump`：还没完就按完成列数重画一版；`done` 后 join 并把 PCM /
-//!      峰值 / Player **所有权转移**进 `preview.AudioSession`；
+//!      峰值**所有权转移**进 `preview.AudioSession`；首次播放才另建设备；
 //!   5. 切换选中行时 `AudioSession.deinit` → `cancel`（置标志 + join）→ `destroy`，
 //!      所以同一时刻只有一条解码线程，旧任务不会和新的抢 CPU。
 //!
@@ -49,6 +49,7 @@ const preview = @import("../preview.zig");
 const decode_mod = @import("decode.zig");
 const peaks_mod = @import("peaks.zig");
 const player = @import("player.zig");
+const lazy_player = @import("lazy_player.zig");
 const session_mod = @import("session.zig");
 const waveform = @import("waveform.zig");
 
@@ -178,6 +179,7 @@ pub fn start(
         .channels = channels,
         .bits = 16,
         .duration_ms = total_frames * 1000 / self.stream.sample_rate,
+        .lazy = .{ .allocator = allocator },
         .peaks = .{},
         .waveform = bitmap,
         .waveform_version = waveform.completeColumns(self.count, bitmap.width, self.merger.complete),
@@ -377,10 +379,10 @@ const Engine = struct {
             self.peaks_recomputed = true;
         }
 
-        // Player 在后台建：设备初始化几十毫秒，不该压在第一版波形上。
-        // 失败（没有端点/设备坏了）只是"不能播"，波形仍然是完整的。
+        // 默认把 Player 留到第一次播放；false 仅用于恢复旧行为做反向测量。
+        // 即便 eager 对照中设备失败，也只损失播放，完整波形仍正常交付。
         var created: ?*player.Player = null;
-        if (!self.cancel_flag.load(.acquire)) {
+        if (!lazy_player.enabled and !self.cancel_flag.load(.acquire)) {
             created = player.Player.create(
                 self.allocator,
                 decoded.pcm,
@@ -434,6 +436,7 @@ const Engine = struct {
             session.pcm = fin.pcm;
             session.peaks = fin.peaks;
             session.player = fin.player;
+            if (fin.player != null) session.lazy.state = .ready;
             session.duration_ms = fin.duration_ms;
             // 累加器的所有权现在归会话：摘掉引擎这边的别名，`deinit` 就不会重复释放。
             if (!self.peaks_recomputed) {
@@ -453,12 +456,10 @@ const Engine = struct {
                 session.waveform_version = session.waveform.width;
             }
             if (self.want_play.swap(false, .acquire)) {
-                if (session.player) |created| {
-                    created.play() catch |err| std.debug.print(
-                        "otto-lite: 预览补播失败 file={s} error={s}\n",
-                        .{ self.path, @errorName(err) },
-                    );
-                }
+                session.startPlayback() catch |err| std.debug.print(
+                    "otto-lite: 预览补播失败 file={s} error={s}\n",
+                    .{ self.path, @errorName(err) },
+                );
             }
             std.debug.print(
                 "otto-lite: 渐进波形完成 file={s} frames={d} peaks={d} wave_version={d}\n",
@@ -578,8 +579,8 @@ fn decodingImpl(ctx: *anyopaque) bool {
     return cast(ctx).status.load(.acquire) == .decoding;
 }
 
-fn requestPlayImpl(ctx: *anyopaque) void {
-    cast(ctx).want_play.store(true, .release);
+fn requestPlayImpl(ctx: *anyopaque, wanted: bool) void {
+    cast(ctx).want_play.store(wanted, .release);
 }
 
 const vtable: preview.AudioProgress.VTable = .{

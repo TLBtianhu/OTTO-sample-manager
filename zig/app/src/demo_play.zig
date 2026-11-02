@@ -226,13 +226,20 @@ fn playSession(
     session: *preview.AudioSession,
     seek_at_ms: ?u64,
 ) !u8 {
+    const play_started = std.Io.Clock.Timestamp.now(init.io, .awake);
     session.play() catch |err| {
+        if (err == error.NoAudioEndpoint) {
+            std.debug.print("play-test: no_audio_endpoint\n", .{});
+            return 0;
+        }
         std.debug.print(
             "play-test: FAIL play() 失败（{s} hresult=0x{x:0>8}）\n",
             .{ @errorName(err), @as(u32, @bitCast(player_mod.lastHresult())) },
         );
         return 1;
     };
+    const first_play_ms = @as(f64, @floatFromInt(play_started.untilNow(init.io).raw.nanoseconds)) / 1_000_000.0;
+    std.debug.print("play-test: first_play_ms={d:.2}（含按需 Player 创建）\n", .{first_play_ms});
 
     if (seek_at_ms) |target| return seekRun(init, session, target);
 

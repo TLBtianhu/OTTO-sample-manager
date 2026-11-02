@@ -51,6 +51,7 @@ pub fn draw(
     identity: Identity,
 ) void {
     const playing = session.isPlaying();
+    const starting = session.isStartingAudio();
 
     // 标题与播放键同一行：波形要占 56 点，纵向预算只够四行。
     const header = ui.div(c).row().wFull().itemsCenter().justifyBetween().gap(8);
@@ -61,19 +62,26 @@ pub fn draw(
         session.positionMs(),
         session.durationMs(),
     });
-    const button = ui.button(c, if (playing) "停止" else "播放", .{ .size = 11 });
+    const label = if (starting) "取消" else if (playing) "停止" else if (session.audioError() != null) "重试" else "播放";
+    const button = ui.button(c, label, .{ .size = 11 });
     tools.end();
     header.end();
     if (button.clicked) {
-        if (playing) session.stop() else _ = play(session);
+        if (starting or playing) session.stop() else _ = play(session);
         c.changed = true;
     }
 
-    ui.textf(c, .{ .size = 13 }, "{d} Hz · {d} 声道 · {d} 位", .{
-        session.sample_rate,
-        session.channels,
-        session.bits,
-    });
+    if (starting) {
+        ui.text(c, "正在启动音频…", .{ .size = 13, .color = c.theme.accent });
+    } else if (session.audioError()) |err| {
+        ui.textf(c, .{ .size = 13, .color = c.theme.muted }, "音频启动失败：{s}", .{@errorName(err)});
+    } else {
+        ui.textf(c, .{ .size = 13 }, "{d} Hz · {d} 声道 · {d} 位", .{
+            session.sample_rate,
+            session.channels,
+            session.bits,
+        });
+    }
     ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "时长 {d}.{d:0>3} 秒 · {d} 字节 PCM{s}", .{
         session.duration_ms / 1000,
         session.duration_ms % 1000,
@@ -93,10 +101,10 @@ fn caption(c: *ui.Context, provider: ?[]const u8) void {
     }
 }
 
-/// 播放会话（播放键与 Enter 共用）；失败只打一行日志，不弹窗、不抢焦点。
-/// 返回是否真的开始播放，调用方据此决定要不要重画。
+/// 请求播放；首次 WASAPI 初始化在后台进行，视图显示“正在启动音频…”。
+/// 返回请求是否被接受；设备错误由 `pump` 落地成具名状态与日志。
 pub fn play(session: *preview.AudioSession) bool {
-    session.play() catch |err| {
+    session.startPlayback() catch |err| {
         std.debug.print(
             "otto-lite: 音频播放失败（{s} hresult=0x{x:0>8}）\n",
             .{ @errorName(err), @as(u32, @bitCast(player_mod.lastHresult())) },
@@ -112,7 +120,7 @@ pub fn play(session: *preview.AudioSession) bool {
 pub fn toggle(outcome: *preview.Outcome, name: []const u8) bool {
     switch (outcome.*) {
         .audio => |*session| {
-            if (session.isPlaying()) {
+            if (session.isPlaying() or session.isStartingAudio()) {
                 session.stop();
                 std.debug.print("otto-lite: stop name={s}\n", .{name});
                 return true;
