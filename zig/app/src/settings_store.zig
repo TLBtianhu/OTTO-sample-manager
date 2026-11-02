@@ -34,6 +34,7 @@ const std = @import("std");
 const library_file = @import("otto_library_file");
 const mem_budget = @import("mem_budget.zig");
 const mode_mod = @import("mode.zig");
+const responsive_layout = @import("responsive_layout.zig");
 const settings_v2 = @import("settings_v2.zig");
 
 /// 设置文件的上限。五个字段的 JSON 不到 300 字节；64 KiB 只用来拒绝
@@ -239,8 +240,8 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
             settings.view.expanded_folders.set(path, true) catch {};
         }
     }
-    settings.layout.width = std.math.clamp(parsed.value.layout.width, 200, 16384);
-    settings.layout.height = std.math.clamp(parsed.value.layout.height, 150, 16384);
+    settings.layout.width = std.math.clamp(parsed.value.layout.width, @as(u32, responsive_layout.min_window_width), 16384);
+    settings.layout.height = std.math.clamp(parsed.value.layout.height, @as(u32, responsive_layout.min_window_height), 16384);
     if (parsed.value.update_url) |text| {
         settings.setUpdateUrl(text) catch |err| switch (err) {
             error.UrlTooLong => std.debug.print(

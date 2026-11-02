@@ -174,7 +174,7 @@ pub const Bar = struct {
 
 fn smallPressable(c: *ui.Context) ui.Interaction {
     return ui.pressable(c, .{
-        .height = .{ .px = 18 },
+        .height = .{ .px = 24 },
         .padding = .xy(2, 0),
         .radius = 5,
         .align_items = .center,

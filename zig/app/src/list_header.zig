@@ -38,6 +38,8 @@ pub const Info = struct {
     /// 状态行右侧的按钮文字（available = 「下载」，verified = 「安装 0.3.0」）。
     /// null = 没有按钮。
     update_action_label: ?[]const u8 = null,
+    compact: bool = false,
+    overflow_open: bool = false,
 };
 
 /// 本帧被点到的入口。语义在 `main.zig`：它才有 `update_ui.Update`。
@@ -48,58 +50,56 @@ pub const Action = struct {
     update_clicked: bool = false,
     /// 右上角「设置」被点了。
     settings_clicked: bool = false,
+    overflow_clicked: bool = false,
 };
 
 pub fn draw(c: *ui.Context, info: Info) Action {
-    // 显式 end：`defer header.end()` 会拖到函数返回才关盒，列表会变成表头的
-    // 子节点（行方向），只剩一行能看见。
     const header = ui.div(c).column().wFull().px(12).py(4).gap(2);
     var action: Action = .{};
 
-    // 第一行：计数 + 提示 + 右上角的「检查更新」。
-    const row = ui.div(c).row().wFull().h(22).itemsCenter().gap(8);
-    ui.textf(c, .{ .size = 12 }, "{d} 个素材 · {d} 命中 · {d} 选中", .{
+    // 工具栏始终 32px（24px 行 + 上下 4px）；字体与点击目标不随窗口变。
+    const row = ui.div(c).row().wFull().h(24).itemsCenter().gap(8);
+    ui.textf(c, .{ .size = 12, .truncate = .ellipsis }, "{d} 个素材 · {d} 命中 · {d} 选中", .{
         info.total,
         info.matched,
         info.selected,
     });
-    // 后缀筛选不是"另一个数字"：写明当前只看了哪几种，和命中数对得上。
-    if (info.ext_filter) |exts| {
-        ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 仅 {s}", .{exts});
-    }
-    if (info.import_status) |status| {
-        ui.textf(c, .{
+    // 窄容器的辅助状态同样让位，不能把计数和溢出按钮挤出屏幕。
+    if (!info.compact) {
+        if (info.ext_filter) |exts| ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 仅 {s}", .{exts});
+        if (info.import_status) |status| ui.textf(c, .{
             .size = 11,
             .color = if (info.import_failed) c.theme.danger else c.theme.accent,
         }, "· {s}", .{status});
+        if (info.flash_left > 0) {
+            ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
+        } else if (info.rows_with_image > 0) {
+            ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "· {d} 行有缩略图", .{info.rows_with_image});
+        }
+        if (info.dirty) ui.text(c, "· 有事件丢失，视图可能不完整", .{ .size = 11 });
     }
-    if (info.flash_left > 0) {
-        ui.textf(c, .{ .size = 11, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
-    } else if (info.rows_with_image > 0) {
-        ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "· {d} 行有缩略图", .{info.rows_with_image});
-    }
-    if (info.dirty) ui.text(c, "· 有事件丢失，视图可能不完整", .{ .size = 11 });
-    // 「不显眼」：没有底色、没有边框，只是一段小字 + hover 才出现的浅底。
-    // 380 点宽时计数文字占掉左边，两个小按钮共约 70 点，不会挤到搜索框
-    // （搜索框在上一行，宽度本来就不受表头影响）。
     ui.spacer(c);
-    const check_button = smallPressable(c);
-    ui.text(c, "检查更新", .{ .size = 10, .color = c.theme.muted });
-    ui.end(c);
-    const settings_button = smallPressable(c);
-    ui.text(c, "设置", .{ .size = 10, .color = c.theme.muted });
-    ui.end(c);
+    if (info.compact) {
+        const more = smallPressable(c);
+        ui.text(c, if (info.overflow_open) "收起" else "更多", .{ .size = 10, .color = c.theme.muted });
+        ui.end(c);
+        action.overflow_clicked = more.clicked;
+    } else {
+        merge(&action, secondaryButtons(c));
+    }
     row.end();
-    if (check_button.clicked) action.check_clicked = true;
-    if (settings_button.clicked) action.settings_clicked = true;
 
-    // 第二行：更新结果 + 该做的事。只有检查过（或被点击）才出现，默认什么都不显示。
-    // 文案走 `ui.textf`（c.print 复制进帧 arena）：`update_status` / 按钮文字指向
-    // 调用方的栈缓冲，而 paint 发生在 `view` 返回之后，直接 `ui.text` 会拿到悬垂指针。
+    // <360：次要按钮收进内联溢出菜单；不弹系统窗、不抢焦点，打开才占一行。
+    if (info.compact and info.overflow_open) {
+        const menu = ui.div(c).row().wFull().h(24).itemsCenter().justifyEnd().gap(8);
+        merge(&action, secondaryButtons(c));
+        menu.end();
+    }
+
     if (info.update_status) |status| {
-        const row_status = ui.div(c).row().wFull().h(18).itemsCenter().gap(6);
+        const row_status = ui.div(c).row().wFull().h(24).itemsCenter().gap(6);
         const color = if (info.update_action_label != null) c.theme.accent else c.theme.muted;
-        ui.textf(c, .{ .size = 11, .color = color }, "{s}", .{status});
+        ui.textf(c, .{ .size = 11, .color = color, .truncate = .ellipsis }, "{s}", .{status});
         if (info.update_action_label) |label| {
             const it = smallPressable(c);
             ui.textf(c, .{ .size = 10, .color = c.theme.accent }, "{s}", .{label});
@@ -113,10 +113,29 @@ pub fn draw(c: *ui.Context, info: Info) Action {
     return action;
 }
 
+fn secondaryButtons(c: *ui.Context) Action {
+    var action: Action = .{};
+    const check_button = smallPressable(c);
+    ui.text(c, "检查更新", .{ .size = 10, .color = c.theme.muted });
+    ui.end(c);
+    const settings_button = smallPressable(c);
+    ui.text(c, "设置", .{ .size = 10, .color = c.theme.muted });
+    ui.end(c);
+    action.check_clicked = check_button.clicked;
+    action.settings_clicked = settings_button.clicked;
+    return action;
+}
+
+fn merge(target: *Action, source: Action) void {
+    target.check_clicked = target.check_clicked or source.check_clicked;
+    target.settings_clicked = target.settings_clicked or source.settings_clicked;
+    target.update_clicked = target.update_clicked or source.update_clicked;
+}
+
 /// 小号可点区域：只有 hover 时的浅底，点击面比文字略大一圈。
 fn smallPressable(c: *ui.Context) ui.Interaction {
     return ui.pressable(c, .{
-        .height = .{ .px = 18 },
+        .height = .{ .px = 24 },
         .padding = .xy(3, 0),
         .radius = 6,
         .align_items = .center,

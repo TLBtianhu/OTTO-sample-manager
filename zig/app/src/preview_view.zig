@@ -30,6 +30,7 @@ const slot_side: f32 = 96;
 /// 画整条预览条：上排（图位 + Outcome 内容），下排（两行事实）。
 /// 预览区只由 `Outcome` 驱动；事实直接来自 `Sample`，永远在。
 pub fn draw(panel: *Panel, c: *ui.Context) void {
+    if (panel.height < 150) return drawCompact(panel, c);
     const bar = ui.div(c)
         .wFull()
         .h(panel.height)
@@ -43,7 +44,7 @@ pub fn draw(panel: *Panel, c: *ui.Context) void {
     defer bar.end();
 
     const top = ui.div(c).row().wFull().grow().gap(12).itemsCenter();
-    drawSlot(panel, c);
+    drawSlot(panel, c, slot_side);
 
     const details = ui.div(c).column().grow().gap(2).justifyCenter();
     drawOutcome(panel, c);
@@ -52,6 +53,40 @@ pub fn draw(panel: *Panel, c: *ui.Context) void {
     top.end();
 
     drawFacts(panel, c);
+}
+
+/// 56–149px 的紧凑预览：小图位 + 一条结果，辅助事实先让位，绝不纵向溢出。
+fn drawCompact(panel: *Panel, c: *ui.Context) void {
+    const bar = ui.div(c).row().wFull().h(panel.height).itemsCenter().gap(10).px(12).py(6)
+        .bg(c.theme.surface).border(c.theme.border).borderW(1);
+    defer bar.end();
+    drawSlot(panel, c, 32);
+    const details = ui.div(c).column().grow().justifyCenter().clip();
+    defer details.end();
+    const current = if (panel.current) |*outcome| outcome else {
+        ui.text(c, if (panel.pending) "正在读取预览…" else "选中一行查看预览", .{ .size = 12, .color = c.theme.muted, .truncate = .ellipsis });
+        return;
+    };
+    switch (current.*) {
+        .image => |bitmap| ui.textf(c, .{ .size = 12, .truncate = .ellipsis }, "图像预览 · {d}×{d}", .{ bitmap.width, bitmap.height }),
+        .text => |text| ui.text(c, text, .{ .size = 11, .truncate = .ellipsis }),
+        .audio => |*session| {
+            const line = ui.div(c).row().wFull().itemsCenter().gap(8);
+            ui.text(c, "音频预览", .{ .size = 12, .truncate = .ellipsis });
+            ui.spacer(c);
+            const playing = session.isPlaying();
+            const starting = session.isStartingAudio();
+            const label = if (starting) "取消" else if (playing) "停止" else if (session.audioError() != null) "重试" else "播放";
+            const button = ui.button(c, label, .{ .size = 11 });
+            line.end();
+            if (button.clicked) {
+                if (starting or playing) session.stop() else _ = preview_audio.play(session);
+                c.changed = true;
+            }
+        },
+        .frames => ui.text(c, "帧预览待接入", .{ .size = 12, .truncate = .ellipsis }),
+        .none => |reason| ui.text(c, reasonText(reason), .{ .size = 12, .truncate = .ellipsis }),
+    }
 }
 
 /// 按 `Outcome` 的五个分支画内容；`current == null` 时区分"未选中"与"正在读"。
@@ -117,10 +152,10 @@ fn caption(panel: *Panel, c: *ui.Context, title: []const u8) void {
 }
 
 /// 左边固定图位：按分支给图标，图像分支画真实像素（缩放适应）。
-fn drawSlot(panel: *Panel, c: *ui.Context) void {
+fn drawSlot(panel: *Panel, c: *ui.Context, side: f32) void {
     const slot = ui.div(c)
-        .w(slot_side)
-        .h(slot_side)
+        .w(side)
+        .h(side)
         .rounded(8)
         .itemsCenter()
         .justifyCenter()
@@ -144,10 +179,10 @@ fn drawSlot(panel: *Panel, c: *ui.Context) void {
                     .height = bitmap.height,
                     .stride = bitmap.stride,
                 } },
-                .max_width = slot_side,
-                .max_height = slot_side,
+                .max_width = side,
+                .max_height = side,
                 // 像素就是按请求尺寸取回来的（256px），按 1:1 声明，由 `ui.image`
-                // 缩到 96 点以内：不放大、不失真。
+                // 缩到当前图位以内：不放大、不失真。
                 .scale = 1,
                 .radius = 6,
             });

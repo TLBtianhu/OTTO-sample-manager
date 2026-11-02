@@ -17,7 +17,7 @@ const drives_mod = @import("browse_drives.zig");
 const ui = nanoui.ui;
 
 /// 状态条高度（点）。一行小字，不抢列表的位置。
-pub const banner_height: f32 = 20;
+pub const banner_height: f32 = 24;
 
 /// 本帧被点到的入口。语义在 `main.zig`：它才有 `browse.Session`。
 pub const Action = struct {
@@ -57,7 +57,7 @@ pub fn drawToolbar(
         error_row.end();
     }
 
-    const sorts = ui.div(c).row().wFull().h(20).itemsCenter().px(12).gap(5);
+    const sorts = ui.div(c).row().wFull().h(24).itemsCenter().px(12).gap(5);
     defer sorts.end();
     ui.text(c, "排序", .{ .size = 10, .color = c.theme.muted });
     const keys = [_]browse.SortKey{ .name, .size, .mtime, .type };
@@ -174,7 +174,7 @@ fn pathErrorText(reason: []const u8) []const u8 {
 /// 小号可点区域：只有 hover 时的浅底，点击面比文字略大一圈（与 `list_header` 同款）。
 fn smallPressable(c: *ui.Context) ui.Interaction {
     return ui.pressable(c, .{
-        .height = .{ .px = 18 },
+        .height = .{ .px = 24 },
         .padding = .xy(3, 0),
         .radius = 6,
         .align_items = .center,

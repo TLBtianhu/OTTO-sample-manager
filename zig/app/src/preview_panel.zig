@@ -41,8 +41,8 @@ const Snapshot = @import("preview_snapshot.zig").Snapshot;
 const trace = @import("trace.zig");
 const ui = nanoui.ui;
 
-/// 预览条高度（点）。任务要求 120–160；160 = 96 图位 + 两行事实 + 内边距/间隔，
-/// 再给音频分支的波形（56 点 + 两行格式）留出纵向空间——150 会差 10 点。
+/// 首帧前的默认高度（点）。每帧实际高度由容器求解器给出：
+/// 列表宽 <480 时 56，否则 clamp(56, 25% 容器高, 180)，字体与点击目标不变。
 pub const default_height: f32 = 160;
 
 pub const Options = struct {
@@ -118,7 +118,7 @@ pub const Panel = struct {
 
         self.* = .{
             .allocator = allocator,
-            .height = @max(80, options.height),
+            .height = @max(56, options.height),
             .worker = worker,
         };
         trace.mark("setup.preview");
@@ -314,7 +314,8 @@ pub const Panel = struct {
     }
 
     /// 画整条预览条（实现在 `preview_view.zig`，本文件不认识任何媒体类型）。
-    pub fn draw(self: *Panel, c: *ui.Context) void {
+    pub fn draw(self: *Panel, c: *ui.Context, height: u16) void {
+        self.height = @floatFromInt(height);
         preview_view.draw(self, c);
     }
 
