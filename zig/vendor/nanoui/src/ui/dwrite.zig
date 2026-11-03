@@ -87,6 +87,8 @@ pub const Cache = struct {
     /// normal product path; keeping this explicit makes A/B pixels use the
     /// same face, size, gamma and compositing code.
     rendering_override: ?u32 = null,
+    /// Test/audit override for grid fitting; null keeps DirectWrite's recommendation.
+    grid_override: ?u32 = null,
     cleartype: bool = false,
     aliased: bool = false,
     bgr: bool = false,
@@ -206,15 +208,17 @@ pub const Cache = struct {
         var grid: u32 = 0;
         const hr = f.method(44, *const fn (*Com, f32, f32, f32, ?*const anyopaque, i32, u32, u32, ?*Com, *u32, *u32) callconv(.winapi) i32)(f, size, 96 * scale, 96 * scale, null, 0, 0, 0, self.params, &rendering, &grid);
         if (hr < 0 or rendering == 0 or rendering == 6) rendering = 5;
-        // At small physical ems, Natural's fractional advances and horizontal
-        // smoothing make 13px UI text visibly less crisp than Windows ClearType. GDI
-        // Classic keeps the same face and RGB coverage but grid-fits the stems
-        // and pen positions. Larger text keeps DirectWrite's recommended mode.
+        // At small physical ems, Natural's fractional advances make UI text
+        // less like Windows' grid-fitted ClearType. GDI Natural preserves
+        // horizontal hinting while matching native pen positions more closely.
+        // Coverage is tagged below so this path bypasses Natural's extra
+        // enhanced-contrast correction; larger text keeps the recommended mode.
         if (self.rendering_override) |forced| {
             rendering = forced;
         } else if (size * scale <= 16 and rendering >= 4) {
-            rendering = 2; // DWRITE_RENDERING_MODE_GDI_CLASSIC
+            rendering = 3; // DWRITE_RENDERING_MODE_GDI_NATURAL
         }
+        if (self.grid_override) |forced| grid = forced;
         return .{ .rendering = rendering, .grid = grid };
     }
 
@@ -270,7 +274,9 @@ pub const Cache = struct {
                     const value: f32 = @floatFromInt(v[if (self.bgr) 2 - ch else ch]);
                     self.rgb.items[i * 4 + ch] = @intFromFloat(@round(mean + (value - mean) * self.clear_level));
                 }
-                self.rgb.items[i * 4 + 3] = 255;
+                // 254 selects the native-GDI polarity gamma in both CPU/D3D;
+                // 255 applies DirectWrite Natural's contrast correction.
+                self.rgb.items[i * 4 + 3] = if (m.rendering == 2 or m.rendering == 3) 254 else 255;
             }
         } else {
             for (0..len) |i| self.rgb.items[i * 4 + 3] = 128;

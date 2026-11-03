@@ -14,6 +14,12 @@ const Sample = struct {
     fn empty(_: *Sample, _: *ui.Context) void {}
 };
 
+const LinkedSample = struct {
+    fn view(_: *LinkedSample, c: *ui.Context) void {
+        ui.text(c, "采样管理", .{ .size = 13 });
+    }
+};
+
 fn init(t: *ui.Tester, sample: *Sample, scale: f32, background: ui.Color) !void {
     var theme = ui.Theme.light;
     theme.font = "Segoe UI";
@@ -72,7 +78,7 @@ test "Windows Natural final color pixels match Direct2D at six sizes and five DP
     };
 }
 
-test "Windows small physical ems use GDI Classic and one integer position" {
+test "Windows small physical ems use GDI Natural and one integer position" {
     var sample: Sample = .{};
     var t: ui.Tester = undefined;
     try init(&t, &sample, 1, .white);
@@ -81,8 +87,33 @@ test "Windows small physical ems use GDI Classic and one integer position" {
     const rf = t.text.run_fonts.items[f.id];
     const native = &t.text.atlas.native;
     const face = native.fonts.get(.{ .face = @intFromPtr(rf.font), .simulations = 0 }) orelse return error.MissingNativeFace;
-    try std.testing.expectEqual(@as(u32, 2), native.mode(face, rf.size, t.scale).rendering);
+    try std.testing.expectEqual(@as(u32, 3), native.mode(face, rf.size, t.scale).rendering);
     try std.testing.expectEqual(@as(u8, 1), try native.positions(gpa, rf, t.scale));
+    const sp = t.text.glyph(t.text.layout("T", .{ .size = 13.5 }).glyphs[0], 0, 0) orelse return error.MissingBitmap;
+    const ax: usize = @intFromFloat(@round(sp.uv[0] * @as(f32, @floatFromInt(t.text.atlas.size))));
+    const ay: usize = @intFromFloat(@round(sp.uv[1] * @as(f32, @floatFromInt(t.text.atlas.size))));
+    const tag = t.text.atlas.native_pixels[((ay + 1) * t.text.atlas.size + ax + 1) * 4 + 3];
+    try std.testing.expectEqual(@as(u8, 254), tag);
+}
+
+test "Windows linked UI faces use the base collection face's optical scale" {
+    var sample: LinkedSample = .{};
+    var t: ui.Tester = undefined;
+    var theme = ui.Theme.light;
+    theme.font = "Segoe UI";
+    try t.init(gpa, .init(&sample, LinkedSample.view), .{ .scale = 1, .theme = theme });
+    defer t.deinit();
+    const primary = t.text.font(.{ .size = 13 });
+    var found = false;
+    for (t.text.layout("采样管理", .{ .size = 13 }).glyphs) |glyph| {
+        if (glyph.font == primary.id) continue;
+        const face = t.text.run_faces.items[glyph.font];
+        const scale = t.text.db.linkedScale(face);
+        try std.testing.expect(scale > 1);
+        try std.testing.expectApproxEqAbs(13 * scale, t.text.run_fonts.items[glyph.font].size, 0.0001);
+        found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "Windows grayscale and aliased coverage match native rendering" {

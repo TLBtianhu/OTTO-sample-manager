@@ -30,6 +30,7 @@ const slot_side: f32 = 96;
 /// 画整条预览条：上排（图位 + Outcome 内容），下排（两行事实）。
 /// 预览区只由 `Outcome` 驱动；事实直接来自 `Sample`，永远在。
 pub fn draw(panel: *Panel, c: *ui.Context) void {
+    if (panel.height == 0) return drawTooSmall(c);
     if (panel.height < 150) return drawCompact(panel, c);
     const bar = ui.div(c)
         .wFull()
@@ -53,6 +54,15 @@ pub fn draw(panel: *Panel, c: *ui.Context) void {
     top.end();
 
     drawFacts(panel, c);
+}
+
+/// 空间连 56px 紧凑预览都不够：用明确占位代替被 flex 压成细条的预览。
+/// 不画图位、不画 Outcome；极小的高度只影响这个占位，不会截断预览文字。
+fn drawTooSmall(c: *ui.Context) void {
+    const bar = ui.div(c).row().wFull().h(28).itemsCenter().px(12)
+        .bg(c.theme.surface).border(c.theme.border).borderW(1);
+    defer bar.end();
+    ui.text(c, "窗口太小，预览已隐藏", .{ .size = 10, .color = c.theme.muted, .truncate = .ellipsis });
 }
 
 /// 56–149px 的紧凑预览：小图位 + 一条结果，辅助事实先让位，绝不纵向溢出。

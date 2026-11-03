@@ -1,4 +1,4 @@
-﻿//! The fonts installed: found in the system's font folders once, each
+//! The fonts installed: found in the system's font folders once, each
 //! face known by its family, weight, italics and width, and loaded when
 //! first used. Matching a style picks the family's nearest face; a
 //! character a font lacks is found in the fallback families, then in any
@@ -69,6 +69,8 @@ pub const Face = struct {
     style: font.Style,
     /// A font the app brought (`ui.registerFont`): its bytes, not a file.
     memory: ?[]const u8 = null,
+    /// Cached Windows UI-face scale (base collection face ascent / UI ascent).
+    linked_scale: f32 = 0,
 
     fn read(f: Face, db: *Db) ?Bytes {
         if (f.memory) |m| {
@@ -522,6 +524,31 @@ pub const Db = struct {
     /// The faces loaded so far, by index (for diagnostics).
     pub fn loadedCount(db: *const Db) usize {
         return db.loaded.count();
+    }
+
+    /// Windows' linked "… UI" faces keep the outlines of the base face in
+    /// the same collection, but have smaller UI vertical metrics. Native
+    /// font linking compensates that ratio (YaHei: 2167 / 2080). Returning
+    /// it here lets shaping scale both glyph coverage and advances together.
+    pub fn linkedScale(db: *Db, face: u32) f32 {
+        if (db.faces.items[face].linked_scale != 0) return db.faces.items[face].linked_scale;
+        const linked = db.faces.items[face];
+        const name = linked.style.name();
+        var scale: f32 = 1;
+        if (std.mem.endsWith(u8, name, " UI")) {
+            const base_name = name[0 .. name.len - 3];
+            for (db.faces.items, 0..) |base, base_index| {
+                if (base_index == face or !std.mem.eql(u8, base.path, linked.path)) continue;
+                if (!std.mem.eql(u8, base.style.name(), base_name)) continue;
+                if (base.style.weight != linked.style.weight or base.style.italic != linked.style.italic) continue;
+                const a = db.load(@intCast(base_index)) orelse continue;
+                const b = db.load(face) orelse break;
+                if (a.units_per_em == b.units_per_em and a.ascent > 0 and b.ascent > 0) scale = std.math.clamp(a.ascent / b.ascent, 0.75, 1.5);
+                break;
+            }
+        }
+        db.faces.items[face].linked_scale = scale;
+        return scale;
     }
 
     /// A face that has `cp`, for text its font lacks.

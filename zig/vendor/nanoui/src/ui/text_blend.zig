@@ -16,6 +16,13 @@ pub const Params = struct {
     }
 };
 
+/// GDI+ ClearType has the opposite residual edge gamma for light and dark
+/// foregrounds. These exponents come from the offscreen native comparison;
+/// DirectWrite Natural continues to use Params.coverage instead.
+pub fn gdiCoverage(a: f32, lightness: f32) f32 {
+    return std.math.pow(f32, std.math.clamp(a, 0, 1), if (lightness >= 0.5) 0.78 else 1.28);
+}
+
 pub fn gammaRatios(gamma: f32) [4]f32 {
     const table = [13][4]f32{
         .{ 0, 0, 0, 0 },

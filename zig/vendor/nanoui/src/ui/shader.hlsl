@@ -327,10 +327,14 @@ Pixel glyph_pixel(Varyings v, float clip_cover) {
         float4 native = native_atlas.Load(int3(at, 0));
         float lightness = 0.30 * v.i_color.r + 0.59 * v.i_color.g + 0.11 * v.i_color.b;
         if (native.a > 0.75) {
-            float3 coverage = float3(
-                text_coverage(native.r, v.i_color.r, lightness, true),
-                text_coverage(native.g, v.i_color.g, lightness, true),
-                text_coverage(native.b, v.i_color.b, lightness, true)) * opacity;
+            float gdi_gamma = lightness >= 0.5 ? 0.78 : 1.28;
+            float3 coverage = float3(pow(native.r, gdi_gamma), pow(native.g, gdi_gamma), pow(native.b, gdi_gamma)) * opacity;
+            if (native.a > 0.998) {
+                coverage = float3(
+                    text_coverage(native.r, v.i_color.r, lightness, true),
+                    text_coverage(native.g, v.i_color.g, lightness, true),
+                    text_coverage(native.b, v.i_color.b, lightness, true)) * opacity;
+            }
             Pixel o;
             o.color = float4(v.i_color.rgb * coverage, dot(coverage, float3(1.0, 1.0, 1.0)) / 3.0);
             o.coverage = float4(coverage, o.color.a);

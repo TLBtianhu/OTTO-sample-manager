@@ -6,16 +6,18 @@ const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 
 const Sample = struct {
-    fn view(_: *Sample, c: *ui.Context) void {
-        ui.text(c, "Sample 0001 · 采样管理 13px", .{ .size = 13, .color = .hex(0xf5f5f7) });
+    dark: bool,
+    fn view(self: *Sample, c: *ui.Context) void {
+        ui.text(c, "Sample 0001 · 采样管理 13px", .{ .size = 13, .color = if (self.dark) .hex(0xf5f5f7) else .hex(0x1c1c1e) });
     }
 };
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2 or args.len > 3) return error.ExpectedPngPathAndOptionalMode;
-    var sample: Sample = .{};
-    var theme = ui.Theme.dark_theme;
+    if (args.len < 2 or args.len > 7) return error.ExpectedPngPathModeRawGridFallbackScaleAndTheme;
+    const light = (args.len == 3 and std.mem.eql(u8, args[2], "light")) or (args.len >= 7 and std.mem.eql(u8, args[6], "light"));
+    var sample: Sample = .{ .dark = !light };
+    var theme = if (light) ui.Theme.light else ui.Theme.dark_theme;
     theme.font = "Segoe UI";
     var tester: ui.Tester = undefined;
     try tester.init(init.gpa, .init(&sample, Sample.view), .{
@@ -26,8 +28,11 @@ pub fn main(init: std.process.Init) !void {
         .fonts_dir = "C:\\Windows\\Fonts",
     });
     defer tester.deinit();
-    if (args.len == 3) {
-        tester.text.atlas.native.rendering_override = try std.fmt.parseInt(u32, args[2], 10);
+    if (args.len >= 3 and !light) tester.text.atlas.native.rendering_override = try std.fmt.parseInt(u32, args[2], 10);
+    if (args.len >= 4 and std.mem.eql(u8, args[3], "raw")) tester.text.atlas.native.blending = .{};
+    if (args.len >= 5) tester.text.atlas.native.grid_override = try std.fmt.parseInt(u32, args[4], 10);
+    if (args.len >= 6) tester.text.setFallbackScale(try std.fmt.parseFloat(f32, args[5]));
+    if (args.len >= 3) {
         tester.text.atlas.phase_counts.clearRetainingCapacity();
         tester.text.atlas.reset();
     }
@@ -52,4 +57,9 @@ pub fn main(init: std.process.Init) !void {
             native.failures,
         },
     );
+    const text_layout = tester.text.layout("Sample 0001 · 采样管理 13px", .{ .size = 13 });
+    for (text_layout.glyphs) |glyph| {
+        const family = tester.text.db.faces.items[tester.text.run_faces.items[glyph.font]].style.name();
+        std.debug.print("glyph index={d} id={d} family={s} size={d:.5} x={d:.3}\n", .{ glyph.index, glyph.glyph, family, tester.text.run_fonts.items[glyph.font].size, glyph.x });
+    }
 }
