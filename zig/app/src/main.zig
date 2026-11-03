@@ -78,6 +78,8 @@ pub const State = struct {
     search: search_ui.Search,
     /// 「导入文件夹」：选择框 → 工作线程 `importRun` → 重载（见 `import_ui.zig`）。
     import: import_ui.Import,
+    /// 库窗口的 file URL 拖入；浏览模式不注册目标。
+    drop: drop_ui.Drop = .{},
     /// 「检查更新」：入口 → 工作线程取 feed → 一行提示（`update_ui.zig`）；默认不联网。
     update: update_ui.Update,
     /// 设置面板（置顶 / 不透明度 / 更新源 / 缓存预算，见 `settings_ui.zig`）。
@@ -133,8 +135,9 @@ pub const State = struct {
             }
         }
 
-        ui.column(c, .{ .width = .fill, .height = .fill });
-        defer ui.end(c);
+        const root_box = ui.div(c).sizeFull().column();
+        defer root_box.end();
+        if (s.browse == null) s.drop.accept(c, root_box.index);
 
         if (s.browse) |session| {
             const action = browse_ui.drawToolbar(c, session.info(), &s.address, &s.drives);
@@ -528,6 +531,7 @@ fn run(init: std.process.Init) !void {
         .prefetch = .{ .enabled = !options.no_prefetch, .last_try_s = trace.now() },
     };
     trace.mark("setup.state");
+    state.drop.init(init.io, &state.import);
     if (state.browse == null) state.search.setLibraryTree(&state.settings.settings.view.expanded_folders);
     if (options.bench_scroll != null) state.search.expandAll(state.samples) catch {};
     state.settings.settings.view.mode = if (state.browse == null) .library else .browse;
@@ -572,13 +576,9 @@ fn run(init: std.process.Init) !void {
         .content = .{ .view = .init(&state, State.view) },
     });
     startup_dx.mark(.first_frame);
-    // 文件拖入：目录走「导入文件夹」同一条 `Import.start`；`--drop-probe` 时
-    // 还会合成一次 WM_DROPFILES（窗口隐藏，见 `drop_ui.zig`）。
+    // 文件拖入由根节点的 acceptDrop/dropAt 接收；探针只合成一次隐藏 HDROP。
     // **浏览模式不装**：拖入 = 导入 = 写库，而浏览模式对磁盘零写入。
-    var drop: drop_ui.Drop = .{};
-    if (state.browse == null) {
-        drop.install(init.io, &state.import, options.drop_probe, state.window.?, nanoui.App.after);
-    }
+    if (state.browse == null) state.drop.install(options.drop_probe, state.window.?, nanoui.App.after);
     trace.mark("setup.window");
     probe.mark("window", .{ .window = state.window, .thumbs = boot.thumbs });
     // 窗口状态启动时应用一次：置顶（true 才碰 Win32）+ 不透明度（重启后恢复）。

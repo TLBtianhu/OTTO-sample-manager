@@ -6,6 +6,7 @@ const App = @import("app.zig").App;
 const Surface = @import("surface.zig").Surface;
 const window_types = @import("../window_types.zig");
 const Page = @import("../page_webview2.zig").Page;
+const drop_files = @import("drop_files.zig");
 
 /// The window message a page's queued messages go out on (`Page.flush`):
 /// after the app's own (`WM_APP` onwards, as `fdwatch.zig` allocates them).
@@ -34,7 +35,6 @@ pub const Callback = window_types.Callback(Window);
 pub const ShouldClose = window_types.ShouldClose(Window);
 pub const Options = window_types.Options(Window);
 pub const NativeView = window_types.NativeView;
-pub const DropHandler = window_types.DropHandler;
 
 pub const Frame = struct { x: f64, y: f64, width: f64, height: f64 };
 
@@ -65,9 +65,6 @@ pub const Window = struct {
     /// Window opacity, 0 to 1. Below 1 the surface draws with GDI: see
     /// `setOpacity` for why the GPU path cannot show it.
     opacity: f64 = 1,
-    /// Files dropped on the window (`WM_DROPFILES`); null until a handler is
-    /// set, and the window is not a drop target before that.
-    drop_handler: ?DropHandler = null,
 
     pub fn create(app: *App, options: Options) !*Window {
         const self = try app.gpa.create(Window);
@@ -109,6 +106,7 @@ pub const Window = struct {
         const hwnd = w.CreateWindowExW(ex, class_name, w.wide(&title, options.title), style, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 100, 100, null, null, inst, null) orelse return error.CreateWindow;
         self.hwnd = hwnd;
         _ = w.SetWindowLongPtrW(hwnd, w.GWLP_USERDATA, @bitCast(@intFromPtr(self)));
+        w.DragAcceptFiles(hwnd, 1);
         self.setSize(options.width, options.height);
         if (options.x != null and options.y != null) self.setPosition(options.x.?, options.y.?) else self.center();
         if (options.always_on_top) self.setAlwaysOnTop(true);
@@ -171,43 +169,6 @@ pub const Window = struct {
         return @ptrFromInt(@as(usize, @bitCast(p)));
     }
 
-    /// Files and folders dropped on the window, or none (`null`). Setting one
-    /// registers the window with `DragAcceptFiles`; clearing it unregisters
-    /// it, so windows that never set one stay out of drag-and-drop entirely.
-    /// Windows only; the other platforms have no drop event.
-    pub fn setDropHandler(self: *Window, handler: ?DropHandler) void {
-        self.drop_handler = handler;
-        if (self.hwnd) |h| w.DragAcceptFiles(h, if (handler == null) 0 else 1);
-    }
-
-    /// One `WM_DROPFILES`: read the paths out of the HDROP, then hand them to
-    /// the handler and free the list. The strings live in an arena for the
-    /// duration of the call only.
-    fn dropped(self: *Window, hdrop: w.HDROP) void {
-        defer w.DragFinish(hdrop);
-        const handler = self.drop_handler orelse return;
-        const count = w.DragQueryFileW(hdrop, 0xFFFF_FFFF, null, 0);
-        if (count == 0) return;
-        var arena = std.heap.ArenaAllocator.init(self.app.gpa);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-        const paths = allocator.alloc([]const u8, count) catch return;
-        var n: usize = 0;
-        for (0..count) |i| {
-            const index: u32 = @intCast(i);
-            // With no buffer: the length in UTF-16 units, without the terminator.
-            const len = w.DragQueryFileW(hdrop, index, null, 0);
-            if (len == 0) continue;
-            const units = allocator.alloc(u16, len + 1) catch return;
-            const got = w.DragQueryFileW(hdrop, index, units.ptr, @intCast(units.len));
-            if (got == 0) continue;
-            paths[n] = std.unicode.utf16LeToUtf8Alloc(allocator, units[0..got]) catch continue;
-            n += 1;
-        }
-        if (n == 0) return;
-        handler.onPaths(handler.context, paths[0..n]);
-    }
-
     fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(.winapi) w.LRESULT {
         const self = of(hwnd) orelse return w.DefWindowProcW(hwnd, msg, wp, lp);
         if (msg == w.WM_DESTROY) {
@@ -230,7 +191,7 @@ pub const Window = struct {
         if (msg == w.WM_DROPFILES) {
             // Dropping does not activate the window: nothing here takes the
             // foreground, the focus or the keyboard.
-            if (wp != 0) self.dropped(@ptrFromInt(wp));
+            if (wp != 0) drop_files.handle(self.surface, hwnd, @ptrFromInt(wp));
             return 0;
         }
         if (msg == w.WM_GETMINMAXINFO) {

@@ -267,6 +267,68 @@ pub fn run(
     };
 }
 
+/// Collect only the named files, without walking or importing their siblings.
+/// The same canonicalization, metadata, filtering and identity code as `run`
+/// is used; `Scan.root` is empty because separate files need not share a root.
+pub fn runFiles(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    paths: []const []const u8,
+    options: Options,
+) Error!Scan {
+    if (!supported) return error.Unsupported;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    errdefer arena.deinit();
+    const scratch = arena.allocator();
+    var files: std.ArrayList(FileFact) = .empty;
+    var failures: std.ArrayList(Failure) = .empty;
+    var counts: Counts = .{};
+
+    for (paths) |input| {
+        const path = std.Io.Dir.cwd().realPathFileAlloc(io, input, scratch) catch |err| {
+            try recordFailure(scratch, &failures, &counts, input, @errorName(err));
+            continue;
+        };
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+            try recordFailure(scratch, &failures, &counts, path, @errorName(err));
+            continue;
+        };
+        if (stat.kind != .file) {
+            counts.skipped_other += 1;
+            continue;
+        }
+        const name = baseName(path);
+        const ext = extensionOf(name);
+        if (isTempExtension(ext)) {
+            counts.skipped_temp += 1;
+            continue;
+        }
+        try collectFile(scratch, io, &files, &failures, &counts, path, name, ext, options);
+    }
+
+    // Match directory scans: stable path order and adjacent deduplication.
+    std.mem.sort(FileFact, files.items, {}, lessThanPath);
+    var write: usize = 0;
+    var read: usize = 0;
+    while (read < files.items.len) : (read += 1) {
+        if (write != 0 and std.mem.eql(u8, files.items[write - 1].path, files.items[read].path)) {
+            counts.duplicates += 1;
+            continue;
+        }
+        files.items[write] = files.items[read];
+        write += 1;
+    }
+    files.shrinkRetainingCapacity(write);
+    counts.files = files.items.len;
+    return .{
+        .arena = arena,
+        .root = "",
+        .files = try files.toOwnedSlice(scratch),
+        .failures = try failures.toOwnedSlice(scratch),
+        .counts = counts,
+    };
+}
+
 fn collectFile(
     allocator: std.mem.Allocator,
     io: std.Io,

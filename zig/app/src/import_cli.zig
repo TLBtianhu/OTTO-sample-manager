@@ -352,10 +352,50 @@ pub fn importRun(
     report.skipped_other = scan.counts.skipped_other;
     report.duplicate_scanned = scan.counts.duplicates;
 
-    // 3) 去重索引 + 逐条 probe。
-    var dedupe = try Dedupe.init(temp, &library);
-    var incoming: std.ArrayList(core.model.Sample) = .empty;
+    // 3) 去重 + probe + 合并。单文件拖入也复用这一段；空 scan.root 表示
+    //    每条文件按现有库的最长包含根（没有则父目录）决定归属。
+    try mergeScan(temp, io, &library, &scan, &report);
 
+    // 4) 原子写。
+    //
+    //    首次启动：目标目录（`<dataDir>`）可能还不存在。`writeAtomic` 只写
+    //    同目录的 `.tmp`，不会替调用方建目录——这里建，失败按 save 阶段报具名
+    //    错误（而不是让用户看到"导入失败 FileNotFound"却不知道缺哪个目录）。
+    ensureParentDir(io, save_path) catch |err| {
+        report.failure = .{ .stage = .save, .name = @errorName(err) };
+        report.ms = elapsedMs(io, started);
+        return report;
+    };
+    report.bytes = library_io.saveWith(io, allocator, save_path, &library) catch |err| {
+        report.failure = .{ .stage = .save, .name = @errorName(err) };
+        report.ms = elapsedMs(io, started);
+        return report;
+    };
+
+    report.ms = elapsedMs(io, started);
+    return report;
+}
+
+/// Shared merge half of folder and multi-file imports. A non-empty scan root
+/// preserves the folder tree exactly; an empty root applies the library's
+/// existing longest-root rule, falling back to each file's parent directory.
+pub fn mergeScan(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    library: *core.store.Library,
+    scan: *const scan_mod.Scan,
+    report: *Report,
+) !void {
+    report.scanned = scan.files.len;
+    report.failed = scan.failures.len;
+    report.skipped_hidden = scan.counts.skipped_hidden;
+    report.skipped_temp = scan.counts.skipped_temp;
+    report.skipped_size = scan.counts.skipped_size;
+    report.skipped_other = scan.counts.skipped_other;
+    report.duplicate_scanned = scan.counts.duplicates;
+
+    var dedupe = try Dedupe.init(allocator, library);
+    var incoming: std.ArrayList(core.model.Sample) = .empty;
     const imported_at = std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
     for (scan.files) |fact| {
         switch (dedupe.classify(fact)) {
@@ -369,36 +409,19 @@ pub fn importRun(
             },
             .new => {},
         }
-
-        const metadata = probe_mod.probe(temp, io, fact.path) catch {
-            // 单个文件读不了只记账并继续；根目录/底库/输出才是致命失败。
+        const metadata = probe_mod.probe(allocator, io, fact.path) catch {
             report.failed += 1;
             continue;
         };
-        const id = try uniqueSampleId(temp, fact.path, &dedupe);
-        try incoming.append(temp, buildSample(fact, metadata, id, imported_at, scan.root));
-        try dedupe.accept(temp, fact, id);
+        const id = try uniqueSampleId(allocator, fact.path, &dedupe);
+        const root = if (scan.root.len > 0)
+            scan.root
+        else
+            core.sample_location.inferFromLibrary(fact.path, library.samples).root_path;
+        try incoming.append(allocator, buildSample(fact, metadata, id, imported_at, root));
+        try dedupe.accept(allocator, fact, id);
     }
-
-    // 4) 合并（深拷贝进库的 arena）并原子写。
-    //
-    //    首次启动：目标目录（`<dataDir>`）可能还不存在。`writeAtomic` 只写
-    //    同目录的 `.tmp`，不会替调用方建目录——这里建，失败按 save 阶段报具名
-    //    错误（而不是让用户看到"导入失败 FileNotFound"却不知道缺哪个目录）。
-    ensureParentDir(io, save_path) catch |err| {
-        report.failure = .{ .stage = .save, .name = @errorName(err) };
-        report.ms = elapsedMs(io, started);
-        return report;
-    };
     report.added = try library.appendSamples(incoming.items);
-    report.bytes = library_io.saveWith(io, allocator, save_path, &library) catch |err| {
-        report.failure = .{ .stage = .save, .name = @errorName(err) };
-        report.ms = elapsedMs(io, started);
-        return report;
-    };
-
-    report.ms = elapsedMs(io, started);
-    return report;
 }
 
 /// `--import-into <folder> [--save <file>]`：UI「导入文件夹」按钮的无头入口。
@@ -489,7 +512,7 @@ fn existingLibraryPath(io: std.Io, path: []const u8) ?[]const u8 {
 /// 落盘前建出目标所在目录：首次启动时 `<dataDir>` 还不存在，而 `writeAtomic`
 /// 只写同目录的 `.tmp`（它不替调用方建目录）。只建路径里点名的那一层，不猜
 /// 别的目录；相对文件名（没有目录部分）什么都不做。
-fn ensureParentDir(io: std.Io, path: []const u8) !void {
+pub fn ensureParentDir(io: std.Io, path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return;
     if (parent.len == 0 or std.mem.eql(u8, parent, ".")) return;
     try std.Io.Dir.cwd().createDirPath(io, parent);

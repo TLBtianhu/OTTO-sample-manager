@@ -31,6 +31,7 @@ const std = @import("std");
 const core = @import("otto_core");
 const folder_picker = @import("otto_folder_picker");
 const import_cli = @import("import_cli.zig");
+const import_files = @import("import_files.zig");
 const import_target = @import("import_target.zig");
 const library_io = @import("library_io.zig");
 const live_mod = @import("live.zig");
@@ -42,6 +43,7 @@ pub const button_width: f32 = 92;
 pub const done_ticks: u32 = 10;
 
 pub const Phase = enum { idle, importing, done, failed };
+pub const Source = enum { folder, files };
 
 /// `poll` 的结果：调用方据此决定要不要刷新视图状态。
 pub const Poll = enum { none, reloaded, failed };
@@ -84,6 +86,8 @@ pub const Import = struct {
     phase: Phase = .idle,
     /// 最近一次成功导入的账（`done` 时表头用它的 added）。
     report: import_cli.Report = .{},
+    source: Source = .folder,
+    folder_name: ?[]const u8 = null,
     /// 本次把 JSON 写成了 `.otto`：`done` 先闪「已导入 N 个」，再单独闪一次
     /// 「已转为 OTTOLIB」——两条都完整可见，不挤在 380 点宽的表头里。
     converted: bool = false,
@@ -121,6 +125,7 @@ pub const Import = struct {
         self.thread = null;
         self.allocator.free(self.library_path);
         if (self.save_path) |path| self.allocator.free(path);
+        if (self.folder_name) |name| self.allocator.free(name);
         self.* = undefined;
     }
 
@@ -162,9 +167,17 @@ pub const Import = struct {
         self.start(folder);
     }
 
-    /// 选到目录之后（也算 `--import-into` 在 UI 里的等价物）：起线程跑流水线。
+    /// 选到目录之后走原流程；文件拖入也进同一个工作线程与重载状态机。
     pub fn start(self: *Import, folder: []const u8) void {
-        if (self.phase == .importing) return;
+        self.startPaths(.folder, &.{folder});
+    }
+
+    pub fn startFiles(self: *Import, paths: []const []const u8) void {
+        self.startPaths(.files, paths);
+    }
+
+    fn startPaths(self: *Import, source: Source, paths: []const []const u8) void {
+        if (self.phase == .importing or paths.len == 0) return;
         if (self.save_path) |old| {
             self.allocator.free(old);
             self.save_path = null;
@@ -173,33 +186,42 @@ pub const Import = struct {
             self.fail("导入失败：OutOfMemory", .{});
             return;
         };
-
-        const folder_copy = self.allocator.dupe(u8, folder) catch {
+        const copied = self.allocator.alloc([]u8, paths.len) catch {
             target.deinit(self.allocator);
             self.fail("导入失败：OutOfMemory", .{});
             return;
         };
+        var copied_count: usize = 0;
+        for (paths) |path| {
+            copied[copied_count] = self.allocator.dupe(u8, path) catch {
+                freeCopied(self.allocator, copied, copied_count);
+                target.deinit(self.allocator);
+                self.fail("导入失败：OutOfMemory", .{});
+                return;
+            };
+            copied_count += 1;
+        }
         const base_copy = self.allocator.dupe(u8, self.library_path) catch {
-            self.allocator.free(folder_copy);
+            freeCopied(self.allocator, copied, copied_count);
             target.deinit(self.allocator);
             self.fail("导入失败：OutOfMemory", .{});
             return;
         };
         const job = self.allocator.create(Job) catch {
-            self.allocator.free(folder_copy);
+            freeCopied(self.allocator, copied, copied_count);
             self.allocator.free(base_copy);
             target.deinit(self.allocator);
             self.fail("导入失败：OutOfMemory", .{});
             return;
         };
-        job.* = .{
-            .owner = self,
-            .folder = folder_copy,
-            .base = base_copy,
-            .save = target.path,
-        };
-
+        job.* = .{ .owner = self, .source = source, .paths = copied, .base = base_copy, .save = target.path };
         self.report = .{};
+        self.source = source;
+        if (self.folder_name) |old| self.allocator.free(old);
+        self.folder_name = if (source == .folder)
+            self.allocator.dupe(u8, folderName(paths[0])) catch null
+        else
+            null;
         self.converted = target.converted;
         self.show_conversion = false;
         self.done_left = 0;
@@ -208,9 +230,8 @@ pub const Import = struct {
         self.finished.store(false, .release);
         self.lock.release();
         self.phase = .importing;
-
         self.thread = std.Thread.spawn(.{}, Job.run, .{job}) catch |err| {
-            self.allocator.free(folder_copy);
+            freeCopied(self.allocator, copied, copied_count);
             self.allocator.free(base_copy);
             self.allocator.destroy(job);
             target.deinit(self.allocator);
@@ -282,8 +303,10 @@ pub const Import = struct {
             .failed => self.message[0..self.message_len],
             .done => if (self.show_conversion)
                 "已转为 OTTOLIB"
-            else
-                std.fmt.bufPrint(buffer, "已导入 {d} 个", .{self.report.added}) catch "已导入",
+            else switch (self.source) {
+                .files => std.fmt.bufPrint(buffer, "已导入 {d} 个文件", .{self.report.added}) catch "已导入文件",
+                .folder => std.fmt.bufPrint(buffer, "已导入文件夹 {s}", .{self.folder_name orelse "?"}) catch "已导入文件夹",
+            },
         };
     }
 
@@ -343,6 +366,12 @@ pub const Import = struct {
         return self.live_ptr.*;
     }
 
+    /// 拖放解码或路径核实失败：与流水线错误一样留在表头，不弹窗。
+    pub fn reject(self: *Import, name: []const u8, path: []const u8) void {
+        std.debug.print("otto-lite: 拖入失败 error={s} path={s}\n", .{ name, path });
+        self.fail("拖入失败：{s}；路径：{s}", .{ name, path });
+    }
+
     fn fail(self: *Import, comptime format: []const u8, args: anytype) void {
         self.phase = .failed;
         self.done_left = 0;
@@ -354,18 +383,28 @@ pub const Import = struct {
     /// （`save` 归 `Import.save_path`，不在这里释放）。
     const Job = struct {
         owner: *Import,
-        folder: []u8,
+        source: Source,
+        paths: [][]u8,
         base: []u8,
         save: []u8,
 
         fn run(self: *Job) void {
-            const report = import_cli.importRun(
-                self.owner.allocator,
-                self.owner.io,
-                self.folder,
-                self.base,
-                self.save,
-            ) catch |err| blk: {
+            const report = switch (self.source) {
+                .folder => import_cli.importRun(
+                    self.owner.allocator,
+                    self.owner.io,
+                    self.paths[0],
+                    self.base,
+                    self.save,
+                ),
+                .files => import_files.run(
+                    self.owner.allocator,
+                    self.owner.io,
+                    self.paths,
+                    self.base,
+                    self.save,
+                ),
+            } catch |err| blk: {
                 var failed = import_cli.Report{};
                 failed.failure = .{ .stage = .internal, .name = @errorName(err) };
                 break :blk failed;
@@ -377,15 +416,27 @@ pub const Import = struct {
             self.owner.finished.store(true, .release);
             self.owner.lock.release();
 
-            allocator.free(self.folder);
+            freeCopied(allocator, self.paths, self.paths.len);
             allocator.free(self.base);
             allocator.destroy(self);
         }
     };
 };
 
+fn freeCopied(allocator: std.mem.Allocator, paths: [][]u8, count: usize) void {
+    for (paths[0..count]) |path| allocator.free(path);
+    allocator.free(paths);
+}
+
+fn folderName(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 3 and (path[end - 1] == '\\' or path[end - 1] == '/')) end -= 1;
+    const trimmed = path[0..end];
+    const name = core.model.baseName(trimmed);
+    return if (name.len > 0) name else trimmed;
+}
+
 // ---------------------------------------------------------------------------
-// 测试：状态机与文案（线程/对话框/真实重载由 UI 验收覆盖）
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -421,14 +472,18 @@ test "表头文案：idle 不显示，importing 正在导入，failed 用具名�
     }
 }
 
-test "done 文案：先报条数，转换时再单独闪一次提示" {
+test "done 文案：文件夹具名、多文件报数，转换时单独闪提示" {
     var buffer: [128]u8 = undefined;
     var done = testImport(.done);
     done.report.added = 12;
-    try testing.expectEqualStrings("已导入 12 个", done.status(&buffer).?);
+    done.source = .files;
+    try testing.expectEqualStrings("已导入 12 个文件", done.status(&buffer).?);
+    done.source = .folder;
+    done.folder_name = "素材包";
+    try testing.expectEqualStrings("已导入文件夹 素材包", done.status(&buffer).?);
 
     done.converted = true;
-    try testing.expectEqualStrings("已导入 12 个", done.status(&buffer).?);
+    try testing.expectEqualStrings("已导入文件夹 素材包", done.status(&buffer).?);
     done.show_conversion = true;
     try testing.expectEqualStrings("已转为 OTTOLIB", done.status(&buffer).?);
 }
@@ -512,7 +567,7 @@ test "start → 工作线程 → 重载：库指针、样本和落盘目标都�
     try testing.expect(std.mem.endsWith(u8, import.library_path, ".otto"));
 
     var status_buffer: [128]u8 = undefined;
-    try testing.expectEqualStrings("已导入 1 个", import.status(&status_buffer).?);
+    try testing.expect(std.mem.startsWith(u8, import.status(&status_buffer).?, "已导入文件夹 "));
 
     // JSON 被写成同目录的 library.otto（源 JSON 还在，未被覆盖）。
     _ = try library_tmp.dir.statFile(testing.io, "library.json", .{});

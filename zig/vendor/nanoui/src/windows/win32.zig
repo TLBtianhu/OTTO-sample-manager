@@ -169,6 +169,7 @@ pub extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buf: ?[*]
 pub extern "shell32" fn ShellExecuteW(hwnd: ?HWND, op: ?[*:0]const u16, file: [*:0]const u16, params: ?[*:0]const u16, dir: ?[*:0]const u16, show: i32) callconv(.winapi) ?*anyopaque;
 pub extern "shell32" fn DragAcceptFiles(hwnd: HWND, accept: BOOL) callconv(.winapi) void;
 pub extern "shell32" fn DragQueryFileW(hdrop: HDROP, index: u32, file: ?[*]u16, chars: u32) callconv(.winapi) u32;
+pub extern "shell32" fn DragQueryPoint(hdrop: HDROP, point: *POINT) callconv(.winapi) BOOL;
 pub extern "shell32" fn DragFinish(hdrop: HDROP) callconv(.winapi) void;
 pub extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
 pub extern "comdlg32" fn GetSaveFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
