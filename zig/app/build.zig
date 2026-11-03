@@ -20,6 +20,9 @@ pub fn build(b: *std.Build) void {
     const nanoui_dep = b.dependency("nanoui", .{
         .target = target,
         .optimize = optimize,
+        // OTTO 不用 WebView2 页面（预览全部走自绘）。
+        // 上游 0.10.0 默认要 WebView2 SDK；关掉它，构建不依赖那个 SDK。
+        .webview2 = "none",
     });
     // 纯 Zig 的音频解码库（FLAC）。只用它的 module，不需要库自带的 exe/bench 目标。
     const zig_audio_dep = b.dependency("zig_audio", .{
