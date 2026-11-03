@@ -1,6 +1,7 @@
 //! 库树的文件夹行；样本行仍由 row_ui.zig 负责。
 const nanoui = @import("nanoui");
 const library_tree = @import("library_tree.zig");
+const responsive_layout = @import("responsive_layout.zig");
 const ui = nanoui.ui;
 
 pub fn draw(c: *ui.Context, row: library_tree.Row) ui.Interaction {
@@ -8,7 +9,7 @@ pub fn draw(c: *ui.Context, row: library_tree.Row) ui.Interaction {
     const it = ui.pressable(c, .{
         .direction = .row,
         .width = .fill,
-        .height = .{ .px = 44 },
+        .height = .{ .px = @floatFromInt(responsive_layout.row_height) },
         .padding = .{ .left = indent, .right = 12 },
         .gap = 8,
         .align_items = .center,

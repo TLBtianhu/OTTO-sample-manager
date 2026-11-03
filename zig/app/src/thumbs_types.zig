@@ -148,25 +148,8 @@ pub const Job = struct {
 };
 
 /// 自适应自旋锁：临界区只有查表、拷几十字节、入 / 出队，没有 IO。
-/// 照 `ports/watch.zig` 的做法（Zig 0.17 没有不需要 Io 实例的 std.Thread.Mutex）。
-pub const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    pub fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    pub fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+/// 保留原引用路径，实际实现统一在 app 内部的 `spin_lock.zig`。
+pub const SpinLock = @import("spin_lock.zig").SpinLock;
 
 /// pin 住的一个键。键串是本层复制的：缓存释放条目时不会连带释放它，
 /// 而 `beginFrame` 必须拿着键原文才能 `cache.unpin`。

@@ -48,24 +48,7 @@ pub const debounce_ms: u64 = 500;
 /// 扫描失败后的自动重试间隔。
 pub const retry_ms: u64 = 2_000;
 
-const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+const SpinLock = @import("spin_lock.zig").SpinLock;
 
 /// 扫描结果：要么一份 `Scan`（arena 随结果走），要么一个静态错误名。
 const Outcome = union(enum) {

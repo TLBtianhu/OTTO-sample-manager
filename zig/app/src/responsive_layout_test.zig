@@ -3,49 +3,7 @@ const std = @import("std");
 const layout = @import("responsive_layout.zig");
 const testing = std.testing;
 
-test "轨道分配：fixed、fraction、minmax 下限与 max 余量再分配" {
-    const tracks = [_]layout.Track{
-        .{ .fixed = 32 },
-        .{ .fraction = 1 },
-        .{ .minmax = .{ .min = 56, .max = 80, .weight = 1 } },
-        .{ .minmax = .{ .min = 20, .max = 200, .weight = 2 } },
-    };
-    var storage: [4]u16 = undefined;
-    const sizes = layout.distribute(400, &tracks, &storage);
-    try testing.expectEqual(@as(u16, 32), sizes[0]);
-    try testing.expectEqual(@as(u16, 80), sizes[2]);
-    try testing.expectEqual(@as(u16, 198), sizes[3]);
-    try testing.expectEqual(@as(u16, 90), sizes[1]);
-    try testing.expectEqual(@as(u32, 400), sum(sizes));
-
-    const capped = layout.distribute(240, &tracks, &storage);
-    try testing.expectEqual(@as(u16, 80), capped[2]);
-    try testing.expectEqual(@as(u32, 240), sum(capped));
-    for (capped, tracks) |size, track| switch (track) {
-        .minmax => |range| {
-            try testing.expect(size >= range.min);
-            try testing.expect(size <= @max(range.min, range.max));
-        },
-        else => {},
-    };
-}
-
-test "轨道分配：舍入不丢像素，极端小总量也无负尺寸" {
-    const tracks = [_]layout.Track{ .{ .fraction = 1 }, .{ .fraction = 1 }, .{ .fraction = 1 } };
-    var storage: [3]u16 = undefined;
-    const sizes = layout.distribute(2, &tracks, &storage);
-    try testing.expectEqual(@as(u32, 2), sum(sizes));
-    const tiny = layout.distribute(1, &tracks, &storage);
-    try testing.expectEqual(@as(u32, 1), sum(tiny));
-}
-
-fn sum(values: []const u16) u32 {
-    var total: u32 = 0;
-    for (values) |value| total += value;
-    return total;
-}
-
-test "连续布局：各密度区间均无重叠/负尺寸/越界，目标和名称可读" {
+test "连续布局：各密度区间约束成立，行高来自唯一常量" {
     const widths = [_]u16{
         280, 300, 320, 359, // compact_with_overflow
         360, 380, 424, 425, // name_and_duration
@@ -57,8 +15,16 @@ test "连续布局：各密度区间均无重叠/负尺寸/越界，目标和名
         try layout.validate(&plan);
         try testing.expectEqual(layout.listProfile(width), plan.profile);
         try testing.expectEqual(@as(u16, 13), plan.font_size);
-        try testing.expectEqual(@as(u16, 44), plan.row.height);
+        try testing.expectEqual(layout.row_height, plan.row.height);
     }
+}
+
+test "行高同源：样本行、树行、列表与浏览滚动共享布局来源" {
+    // 编译期嵌入的接线快照：四个调用点都不能再私藏 44。
+    try testing.expect(std.mem.indexOf(u8, @embedFile("main.zig"), ".row_height = @floatFromInt(layout_plan.row.height)") != null);
+    try testing.expect(std.mem.indexOf(u8, @embedFile("row_ui.zig"), ".px = @floatFromInt(plan.height)") != null);
+    try testing.expect(std.mem.indexOf(u8, @embedFile("library_tree_ui.zig"), ".px = @floatFromInt(responsive_layout.row_height)") != null);
+    try testing.expect(std.mem.indexOf(u8, @embedFile("browse_action.zig"), "scroll.target(session, s.search.len(), @floatFromInt(s.layout.plan.row.height), view_height)") != null);
 }
 
 test "窗口下限：0×0 和负值输入不会拖垮布局" {

@@ -48,26 +48,8 @@ pub const Source = enum { folder, files };
 /// `poll` 的结果：调用方据此决定要不要刷新视图状态。
 pub const Poll = enum { none, reloaded, failed };
 
-/// 自旋锁：临界区只有交换一个 `Report` 值。照 `preview_panel.zig` / `thumbs.zig`
-/// 的先例（Zig 0.17 没有不需要 Io 实例的 `std.Thread.Mutex`）。
-const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+/// 自旋锁：临界区只有交换一个 `Report` 值。
+const SpinLock = @import("spin_lock.zig").SpinLock;
 
 /// 一次导入的 UI 状态。对象地址必须稳定（工作线程持有它的指针），所以由
 /// `main.zig` 的 `State` 按值持有，不开堆。

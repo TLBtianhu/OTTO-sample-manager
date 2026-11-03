@@ -41,7 +41,7 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     const style: ui.Style = .{
         .direction = .row,
         .width = .fill,
-        .height = .{ .px = 44 },
+        .height = .{ .px = @floatFromInt(plan.height) },
         .padding = .xy(12, 0),
         .gap = 0,
         .align_items = .center,
