@@ -103,9 +103,11 @@ pub const Window = plat.window.Window;
 pub const WindowOptions = plat.window.Options;
 pub const PageOptions = plat.window.PageOptions;
 pub const Asset = plat.window.Asset;
-/// Typed IPC for pages (macOS for now: pages need a webview).
-pub const Call = if (mac) @import("ipc.zig").Call else void;
-pub const Event = if (mac) @import("ipc.zig").Event else void;
+/// Typed IPC for pages: wherever a webview draws them (macOS, Windows).
+const has_pages = mac or builtin.os.tag == .windows;
+const page_ipc = if (has_pages) @import("ipc.zig").ipc(plat.window.Window, plat.app.App) else struct {};
+pub const Call = if (has_pages) page_ipc.Call else void;
+pub const Event = if (has_pages) page_ipc.Event else void;
 
 pub const menu = plat.menu;
 pub const MenuItem = plat.menu.MenuItem;
@@ -128,6 +130,8 @@ pub const accentColor = plat.desktop.accentColor;
 pub const update = @import("update.zig");
 pub const Updater = update.Updater;
 pub const UpdateOptions = update.Options;
+/// Restarting into an update unseen (`Updater.autoRestart`).
+pub const UpdateAuto = update.Auto;
 /// Runs the event loop for a while (headless tests: replies, processes, timers).
 pub const runFor = @import("platform.zig").runFor;
 
@@ -138,9 +142,13 @@ test {
     _ = tsgen;
     _ = ui;
     _ = kit;
+    // A page's platform-free parts: the asset table, the origin, the bridge.
+    _ = @import("tests_page.zig");
     std.testing.refAllDecls(kit);
     _ = @import("menu_types.zig");
     _ = @import("update.zig");
+    _ = @import("update_auto.zig");
+    _ = @import("basics/kv_file.zig");
     _ = @import("http.zig");
     _ = haptics;
     _ = location;
@@ -178,6 +186,8 @@ test {
             _ = @import("windows/ime.zig");
             _ = @import("windows/tests_ime.zig");
         }
+        // The GTK window's: decorations, the taskbar hint, opacity.
+        if (builtin.os.tag == .linux) _ = @import("linux/tests_window.zig");
         return;
     }
     // Analyze every declaration, used by an example or not.
@@ -191,4 +201,6 @@ test {
     std.testing.refAllDecls(@import("menu.zig").Menu);
     std.testing.refAllDecls(@import("menu.zig").Item);
     std.testing.refAllDecls(@import("tray.zig").Tray);
+    // The window's own: borderless, out of the window cycle, its alpha.
+    _ = @import("tests_window.zig");
 }
