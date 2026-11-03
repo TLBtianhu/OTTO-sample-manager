@@ -119,14 +119,32 @@ fn absDelta(a: u16, b: u16) u16 {
     return if (a > b) a - b else b - a;
 }
 
-test "预览条：360–480 宽连续插值，之后保持 clamp(56,25%高,180)" {
+test "预览条：连续插值、小窗口紧凑预览与不足时明确占位" {
     try testing.expectEqual(@as(u16, 56), layout.solve(360, 700).preview_height);
     try testing.expectEqual(@as(u16, 75), layout.solve(380, 700).preview_height);
     try testing.expectEqual(@as(u16, 174), layout.solve(479, 700).preview_height);
     try testing.expectEqual(@as(u16, 175), layout.solve(480, 700).preview_height);
-    try testing.expectEqual(@as(u16, 56), layout.previewHeight(480, 100));
-    try testing.expectEqual(@as(u16, 105), layout.solve(480, 100).preview_height);
+    try testing.expectEqual(@as(u16, 0), layout.previewHeight(480, 100));
+    try testing.expectEqual(@as(u16, 0), layout.solve(480, 100).preview_height);
     try testing.expectEqual(@as(u16, 180), layout.solve(900, 1200).preview_height);
+    for ([_]layout.Plan{
+        layout.solve(280, 420), layout.solve(300, 400),
+        layout.solve(320, 380), layout.solve(360, 480),
+    }) |plan| {
+        try layout.validate(&plan);
+        try testing.expectEqual(layout.compact_preview_height, plan.preview_height);
+    }
+    for ([_]u16{ 0, 100, 119, 120, 130, 140, 150, 159 }) |height| {
+        const plan = layout.solve(320, height);
+        try layout.validate(&plan);
+        try testing.expectEqual(@as(u16, 0), plan.preview_height);
+    }
+    try testing.expectEqual(layout.compact_preview_height, layout.solve(320, 160).preview_height);
+    for ([_]u16{ 1, 15, 27, 55 }) |height| {
+        var invalid = layout.solve(320, 420);
+        invalid.preview_height = height;
+        try testing.expectError(error.PreviewBounds, layout.validate(&invalid));
+    }
 }
 
 test "懒重算：滚动/刷新/hover 的同尺寸帧不求解，同 profile 不重建列结构" {

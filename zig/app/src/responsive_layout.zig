@@ -11,6 +11,10 @@ pub const min_name_width: u16 = 96;
 pub const row_height: u16 = 44;
 pub const font_size: u16 = 13;
 pub const min_click_target: u16 = 24;
+/// 顶部搜索、后缀 chips 与表头约占 104px；不足 160px 时连 56px
+/// 紧凑预览都放不下。0 是明确的占位状态，不是让 flex 继续压缩预览。
+pub const min_preview_window_height: u16 = 160;
+pub const compact_preview_height: u16 = 56;
 pub const default_window_width: u16 = 380;
 pub const default_window_height: u16 = 700;
 
@@ -169,11 +173,12 @@ pub const Plan = struct {
 };
 
 pub fn previewHeight(container_width: u16, container_height: u16) u16 {
-    const full = std.math.clamp(container_height / 4, 56, 180);
+    if (container_height < min_preview_window_height) return 0;
+    const full = std.math.clamp(container_height / 4, compact_preview_height, 180);
     // 360px 以下保持紧凑预览；到 480px 才完全展开。中间 120px 的
     // 每一像素都只改变少量高度，不再在 480 处从 56 跳到 175。
     const blend: u16 = std.math.clamp(container_width -| 360, 0, 120);
-    return 56 + @as(u16, @intCast((@as(u32, full - 56) * blend) / 120));
+    return compact_preview_height + @as(u16, @intCast((@as(u32, full - compact_preview_height) * blend) / 120));
 }
 
 pub fn solve(container_width: u16, container_height: u16) Plan {
@@ -219,7 +224,7 @@ pub fn solve(container_width: u16, container_height: u16) Plan {
         .height = height,
         .profile = profile,
         .row = row,
-        .preview_height = previewHeight(width, height),
+        .preview_height = previewHeight(width, container_height),
     };
 }
 
@@ -302,7 +307,7 @@ pub fn validate(plan: *const Plan) ValidationError!void {
     if (plan.profile != listProfile(plan.width)) return error.StaleProfile;
     if (plan.font_size != font_size) return error.FontScaled;
     if (plan.row.height < min_click_target or plan.toolbar_target < min_click_target or plan.search_target < min_click_target) return error.TargetTooSmall;
-    if (plan.preview_height < 56 or plan.preview_height > 180 or plan.preview_height > plan.height) return error.PreviewBounds;
+    if (plan.preview_height != 0 and (plan.preview_height < compact_preview_height or plan.preview_height > 180 or plan.preview_height > plan.height)) return error.PreviewBounds;
     if (!plan.row.visible(.name)) return error.MissingName;
     if ((plan.row.width(.name) orelse 0) < min_name_width) return error.NameTooNarrow;
     if (plan.row.container_width != plan.width) return error.OutOfBounds;
