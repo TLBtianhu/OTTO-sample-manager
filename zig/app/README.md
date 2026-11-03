@@ -76,21 +76,26 @@ zig-out/bin/otto-lite.exe --import C:\packs\drums --library old.otto --save kit.
 zig-out/bin/otto-lite.exe old.json --import-into C:\packs\drums
 ```
 
-The UI has the same thing behind a 「导入文件夹」 button next to the search
-field: `IFileOpenDialog` picks a folder, `importRun` runs on a worker thread,
-and the list is reloaded from the file that was just written. A JSON library is
-saved as the sibling `<stem>.otto` and the header flashes 「已转为 OTTOLIB」;
-`.otto` is saved in place. `OTTO_NO_DIALOG=1` makes the picker return
-`error.Cancelled` before COM is touched, so `--nanoui-script` can click the
-button without a real dialog (the real dialog itself needs a human).
+The UI has the same thing behind an 「打开」 button next to the search field.
+It offers 「选择文件…」 (the Explorer `GetOpenFileNameW` dialog, including
+multi-select) and 「选择文件夹…」 (the existing `IFileOpenDialog` folder
+picker). Files enter `Import.startFiles` and stay a flat file batch; one folder
+enters `Import.start` and keeps its folder node and hierarchy. Both run on the
+same worker thread and reload the list from the file that was just written. A
+JSON library is saved as the sibling `<stem>.otto` and the header flashes
+「已转为 OTTOLIB」; `.otto` is saved in place. `OTTO_NO_DIALOG=1` makes either
+picker return `error.Cancelled` before COM/Win32 opens a dialog, so
+`--nanoui-script` can click both choices safely. For a full hidden selection
+test, that guard also enables `OTTO_TEST_OPEN_FILES=one.wav|two.wav` and
+`OTTO_TEST_OPEN_FOLDER=C:\packs\drums`; these fixtures still call the production
+`startFiles` / `start` methods rather than editing a library directly.
 
-Folders can also be dropped on the window (nanoui's `WM_DROPFILES` event,
-`drop_ui.zig`): a dropped folder enters `Import.start` — the same worker
-thread, state machine and reload as the button. Dropped files are ignored with
-one `只接受文件夹` log line; when several folders are dropped, the first is
-imported and the rest are logged. `--drop-probe=<path>` posts a synthetic
-`DROPFILES` (`fWide`) message to a hidden window and exits when the import is
-done, so the whole chain is testable without a mouse.
+Files and folders can also be dropped on the window (nanoui's `WM_DROPFILES`
+event, `drop_ui.zig`) with the same two structures. A reentrant drop is deferred
+between frames without losing its HDROP. `--drop-probe=<path>` synthesizes a
+`DROPFILES` (`fWide`) message while a hidden window is building a frame, waits
+for import and reload, then asserts the received path, sample count and
+file/folder structure before exiting.
 
 The pipeline is scan (L0) → probe (L1, header only) → dedupe → merge → atomic
 write; it never creates a window or touches nanoui:

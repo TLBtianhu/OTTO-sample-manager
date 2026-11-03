@@ -40,6 +40,7 @@ extern "kernel32" fn GlobalLock(mem: *anyopaque) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GlobalUnlock(mem: *anyopaque) callconv(.winapi) i32;
 extern "kernel32" fn GlobalFree(mem: *anyopaque) callconv(.winapi) ?*anyopaque;
 extern "user32" fn PostMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) callconv(.winapi) i32;
+extern "user32" fn SendMessageW(hwnd: HWND, msg: u32, wp: usize, lp: isize) callconv(.winapi) isize;
 extern "shell32" fn DragQueryFileW(hdrop: HDROP, index: u32, file: ?[*]u16, chars: u32) callconv(.winapi) u32;
 extern "shell32" fn DragFinish(hdrop: HDROP) callconv(.winapi) void;
 
@@ -84,6 +85,14 @@ pub fn post(hwnd: HWND, paths: []const []const u8) !void {
     const mem = try build(paths);
     errdefer _ = GlobalFree(mem);
     if (PostMessageW(hwnd, WM_DROPFILES, @intFromPtr(mem), 0) == 0) return error.PostMessageFailed;
+}
+
+/// Reentrant probe delivery: the caller invokes this from a view build, so the
+/// receiver must preserve the HDROP until the posted follow-up can run between
+/// frames. The valid hidden probe HWND handles it synchronously before return.
+pub fn send(hwnd: HWND, paths: []const []const u8) !void {
+    const mem = try build(paths);
+    _ = SendMessageW(hwnd, WM_DROPFILES, @intFromPtr(mem), 0);
 }
 
 // ---------------------------------------------------------------------------

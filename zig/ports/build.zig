@@ -111,14 +111,15 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(caps_library);
 
-    // 文件夹选择口岸：IFileOpenDialog 的"选择文件夹"模式（手写 COM vtable）。
-    // ole32 是 CoInitializeEx / CoCreateInstance / CoTaskMemFree 的落点。
+    // 文件/文件夹选择口岸：IFileOpenDialog + GetOpenFileNameW（手写声明）。
+    // ole32 是 COM 的落点；comdlg32 是多选文件对话框的落点。
     const folder_picker_module = b.addModule("otto_folder_picker", .{
         .root_source_file = b.path("src/folder_picker.zig"),
         .target = target,
         .optimize = optimize,
     });
     folder_picker_module.linkSystemLibrary("ole32", .{});
+    folder_picker_module.linkSystemLibrary("comdlg32", .{});
     const folder_picker_library = b.addLibrary(.{
         .linkage = .static,
         .name = "otto_folder_picker",
@@ -389,6 +390,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     folder_picker_test_module.linkSystemLibrary("ole32", .{});
+    folder_picker_test_module.linkSystemLibrary("comdlg32", .{});
     const run_folder_picker_tests = b.addRunArtifact(b.addTest(.{ .root_module = folder_picker_test_module }));
     run_folder_picker_tests.step.dependOn(&run_wav_header_tests.step);
     test_step.dependOn(&run_folder_picker_tests.step);

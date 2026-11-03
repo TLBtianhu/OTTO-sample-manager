@@ -159,5 +159,7 @@ test "file URL decode: localhost and malformed inputs are explicit" {
     try testing.expectError(error.InvalidPercentEscape, toWindowsPath(testing.allocator, "file:///C:/a%2.txt"));
     try testing.expectError(error.UrlHasQueryOrFragment, toWindowsPath(testing.allocator, "file:///C:/a.txt#x"));
     try testing.expectError(error.InvalidDriveUrl, toWindowsPath(testing.allocator, "file:///relative/a.txt"));
-    try testing.expectError(error.InvalidUncUrl, toWindowsPath(testing.allocator, "file://server/shareless"));
+    // A server followed by a share is a valid UNC root; a server with no
+    // share after the slash is not.
+    try testing.expectError(error.InvalidUncUrl, toWindowsPath(testing.allocator, "file://server/"));
 }

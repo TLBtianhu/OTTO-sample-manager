@@ -35,6 +35,7 @@ const live_mod = @import("live.zig");
 const mem_probe = @import("mem_probe.zig");
 const opacity_probe = @import("opacity_probe.zig");
 const options_mod = @import("options.zig");
+const open_ui = @import("open_ui.zig");
 const preview_panel = @import("preview_panel.zig");
 const row_probe = @import("row_probe.zig");
 const row_ui = @import("row_ui.zig");
@@ -76,10 +77,10 @@ pub const State = struct {
     selection: selection_mod.Selection = .{},
     /// 搜索框 + 过滤行映射 + 键盘导航（见 `search_ui.zig`）。
     search: search_ui.Search,
-    /// 「导入文件夹」：选择框 → 工作线程 `importRun` → 重载（见 `import_ui.zig`）。
     import: import_ui.Import,
     /// 库窗口的 file URL 拖入；浏览模式不注册目标。
     drop: drop_ui.Drop = .{},
+    open_menu: bool = false,
     /// 「检查更新」：入口 → 工作线程取 feed → 一行提示（`update_ui.zig`）；默认不联网。
     update: update_ui.Update,
     /// 设置面板（置顶 / 不透明度 / 更新源 / 缓存预算，见 `settings_ui.zig`）。
@@ -145,8 +146,7 @@ pub const State = struct {
         }
 
         // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧就参与过滤；
-        // 「导入文件夹」按钮和搜索框同一行、宽度固定（见 `search_ui.Trailing`）。
-        // 浏览模式没有这个按钮：那条路不写库，点「导入」会把"看一眼目录"变成一次导入。
+        // 浏览模式没有这个按钮：那条路不写库。
         const import_button: ?search_ui.Trailing = if (s.browse != null) null else .{
             .label = import_ui.button_label,
             .width = import_ui.button_width,
@@ -164,11 +164,12 @@ pub const State = struct {
             if (action.filter_changed) row_ui.noteSelection(s);
             if (action.activate) row_ui.activateCursor(s, c);
             if (action.toggle_play) c.changed = s.preview.togglePlay(row_ui.previewRow(s)) or c.changed;
-            // 模态选择框在 UI 线程上跑；取消不进状态机（见 `import_ui.begin`）。
-            if (action.trailing_clicked) s.import.begin(window_util.nativeHandle(s.window));
+            if (action.trailing_clicked) open_ui.toggle(&s.open_menu, c);
         } else {
             _ = s.search.draw(c, import_button);
         }
+
+        if (!busy and s.browse == null) open_ui.frame(c, &s.open_menu, &s.import, window_util.nativeHandle(s.window));
 
         var status_buffer: [128]u8 = undefined;
         var update_buffer: [160]u8 = undefined;
@@ -245,13 +246,11 @@ pub const State = struct {
         // 库非空但过滤到 0 行：给一段明确文案（不是一片空白）。
         if (!busy and s.samples.len > 0 and s.search.len() == 0) s.search.drawNoMatches(c);
 
-        // 空列表：库模式是「还没有素材 + 导入文件夹」；浏览模式是"这个目录没有文件 /
-        // 正在读取 / 路径不可用"，那条路不导入、也不写库（见 `browse_ui.zig`）。
         const empty_clicked = if (s.browse) |session| blk: {
             if (s.samples.len == 0) browse_ui.drawEmpty(c, session.info());
             break :blk false;
         } else empty_state.draw(c, s.samples.len, s.import.busy());
-        if (!busy and empty_clicked) s.import.begin(window_util.nativeHandle(s.window));
+        if (!busy and empty_clicked) open_ui.toggle(&s.open_menu, c);
 
         if (!busy) {
             if (body_it.clicked) {

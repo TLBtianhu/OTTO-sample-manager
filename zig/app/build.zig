@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "otto_library_file", .module = ports_dep.module("otto_library_file") },
         // L3 缩略图磁盘缓存（M4 第二块）：条目格式、原子替换、预算裁剪。
         .{ .name = "otto_diskcache", .module = ports_dep.module("otto_diskcache") },
-        // 文件夹选择口岸：IFileOpenDialog（UI 的「导入文件夹」按钮）。
+        // 文件/文件夹选择口岸：GetOpenFileNameW 多选 + IFileOpenDialog 选目录。
         .{ .name = "otto_folder_picker", .module = ports_dep.module("otto_folder_picker") },
         // 窗口置顶口岸：SetWindowPos(HWND_TOPMOST) + WS_EX_TOPMOST 查询（设置面板）。
         .{ .name = "otto_win_window", .module = ports_dep.module("otto_win_window") },
