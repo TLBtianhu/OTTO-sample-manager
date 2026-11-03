@@ -1,25 +1,12 @@
-//! 文件拖入 → 导入：把 nanoui 的 `DropHandler` 接到既有的导入状态机上。
-//!
-//!   * 是目录 → `import_ui.Import.start`（工作线程、状态机、reload 与
-//!     「导入文件夹」按钮完全同一条路，UI 显示「正在导入…」）；
-//!   * 不是目录（文件 / 不存在的路径）→ 一行日志「只接受文件夹」，不导入；
-//!   * 一次拖多个目录 → 只导入第一个，其余各打一行日志（同一时刻只有一个导入）。
-//!
-//! 回调里的路径只在调用期间有效（nanoui 用 arena 持有它们），所以这里立刻
-//! 分类并 `start`（`start` 自己复制路径），不保存任何切片。
-//!
-//! ## 验收探针
-//!
-//! `Drop.install` 的 `probe` 非空时（`--drop-probe=<path>`），会合成一次
-//! `WM_DROPFILES`（见 `drop_files.zig`）并在窗口隐藏时跑完整个回调 → 导入 →
-//! reload 链路，然后打印 `drop-probe: done …` 退出。这样验收不需要鼠标，
-//! 也不需要可见窗口。
-
+//! Library drop-in: nanoui `ui.Drop` file URLs -> native paths -> the existing
+//! import state machine. One folder uses `Import.start` exactly like the
+//! button; one or more files use `Import.startFiles` and remain flat entries.
+//! URLs belong to the delivery frame, so path copies are made before import.
 const std = @import("std");
+const nanoui = @import("nanoui");
 const import_ui = @import("import_ui.zig");
 const drop_files = @import("drop_files.zig");
 
-/// 拖入路径的三类：目录可导入，其余（文件 / 打不开）都只要一行日志。
 pub const Classification = enum { folder, file, missing };
 
 pub fn classify(io: std.Io, path: []const u8) Classification {
@@ -27,40 +14,43 @@ pub fn classify(io: std.Io, path: []const u8) Classification {
     return if (stat.kind == .directory) .folder else .file;
 }
 
-/// 与 `nanoui.App.after` 同签名：探针把「下一拍」的调度留给调用方，本文件
-/// 不 import nanoui，测试根因此不需要窗口/工具包。
+/// Same schedule signature as `nanoui.App.after`; keeping it here lets the
+/// probe drive a hidden window without giving this module an app dependency.
 pub const Schedule = *const fn (ms: u64, ctx: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) void;
 
 pub const Drop = struct {
     io: std.Io = undefined,
     import: *import_ui.Import = undefined,
     schedule: Schedule = undefined,
-    /// 回调至少进来过一次（文件路径不会起导入，不能只看 `busy()`）。
     seen: bool = false,
-    /// 这次拖入确实起了导入。
     started: bool = false,
-    /// 探针投递的路径（argv 的切片，活到进程结束）与回调实际拿到的第一条路径。
     probe_path: ?[]const u8 = null,
     first_path: [std.Io.Dir.max_path_bytes]u8 = undefined,
     first_len: usize = 0,
     grace: u32 = 0,
     ticks: u32 = 0,
 
-    /// 给窗口装 handler；`probe` 非空时再合成一次拖放（窗口必须已经有 HWND）。
+    pub fn init(self: *Drop, io: std.Io, import: *import_ui.Import) void {
+        self.io = io;
+        self.import = import;
+    }
+
+    /// The whole library window is the target. `dropAt` reads the previous
+    /// frame's root rectangle, so drops over search/list/preview all arrive.
+    pub fn accept(self: *Drop, c: *nanoui.ui.Context, index: u32) void {
+        c.acceptDrop(index);
+        if (c.dropAt(index)) |event| self.onUrls(event.urls);
+    }
+
+    /// Probe installation only: production delivery is accept/dropAt above.
+    /// A synthetic HDROP still travels through Windows and nanoui's URL codec.
     pub fn install(
         self: *Drop,
-        io: std.Io,
-        import: *import_ui.Import,
         probe: ?[]const u8,
         window: anytype,
         schedule: Schedule,
     ) void {
-        self.io = io;
-        self.import = import;
         self.schedule = schedule;
-        if (comptime @hasField(@TypeOf(window.*), "hwnd")) {
-            window.setDropHandler(.{ .context = self, .onPaths = onPaths });
-        }
         const path = probe orelse return;
         if (comptime !@hasField(@TypeOf(window.*), "hwnd")) return;
         const hwnd = window.hwnd orelse return;
@@ -72,10 +62,21 @@ pub const Drop = struct {
         self.schedule(0, self, tick);
     }
 
-    /// nanoui 的回调。`context` 就是 `install` 里的这个 `Drop`。
-    pub fn onPaths(context: *anyopaque, paths: []const []const u8) void {
-        const self: *Drop = @ptrCast(@alignCast(context));
+    fn onUrls(self: *Drop, urls: []const []const u8) void {
         self.seen = true;
+        var arena: std.heap.ArenaAllocator = .init(self.import.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const paths = a.alloc([]const u8, urls.len) catch {
+            self.import.reject("OutOfMemory", "file URL list");
+            return;
+        };
+        for (urls, 0..) |url, i| {
+            paths[i] = nanoui.file_url.toWindowsPath(a, url) catch |err| {
+                self.import.reject(@errorName(err), url);
+                return;
+            };
+        }
         if (paths.len > 0) {
             self.first_len = @min(paths[0].len, self.first_path.len);
             @memcpy(self.first_path[0..self.first_len], paths[0][0..self.first_len]);
@@ -83,33 +84,58 @@ pub const Drop = struct {
         self.handle(paths);
     }
 
-    /// 分类 + 导入第一个目录。日志是验收的一部分：文件路径必须出现
-    /// 「只接受文件夹」，目录则要能对上合成进来的路径。
+    /// Classify the complete batch before starting anything: a missing path,
+    /// mixed files/folders, or multiple folders gets a named, visible error.
     pub fn handle(self: *Drop, paths: []const []const u8) void {
-        var first: ?[]const u8 = null;
+        if (paths.len == 0) return;
+        if (self.import.busy()) {
+            std.debug.print("otto-lite: 正在导入，忽略这次拖入 paths={d}\n", .{paths.len});
+            return;
+        }
+        var arena: std.heap.ArenaAllocator = .init(self.import.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var files: std.ArrayList([]const u8) = .empty;
+        var folder: ?[]const u8 = null;
         for (paths) |path| {
             const kind = classify(self.io, path);
             std.debug.print("otto-lite: 拖入 path={s} kind={s}\n", .{ path, @tagName(kind) });
             switch (kind) {
-                .folder => if (first == null) {
-                    first = path;
-                } else {
-                    std.debug.print("otto-lite: 一次只导入一个文件夹，忽略 path={s}\n", .{path});
+                .folder => {
+                    if (folder != null) {
+                        self.import.reject("MultipleFolders", path);
+                        return;
+                    }
+                    folder = path;
                 },
-                .file, .missing => std.debug.print("otto-lite: 只接受文件夹，忽略 path={s}\n", .{path}),
+                .file => files.append(a, path) catch {
+                    self.import.reject("OutOfMemory", path);
+                    return;
+                },
+                .missing => {
+                    const stat = std.Io.Dir.cwd().statFile(self.io, path, .{});
+                    if (stat) |_| {
+                        self.import.reject("PathUnavailable", path);
+                    } else |err| self.import.reject(@errorName(err), path);
+                    return;
+                },
             }
         }
-        const folder = first orelse return;
-        if (self.import.busy()) {
-            std.debug.print("otto-lite: 正在导入，忽略这次拖入 path={s}\n", .{folder});
+        if (folder != null and files.items.len > 0) {
+            self.import.reject("MixedFilesAndFolder", folder.?);
             return;
         }
         self.started = true;
-        std.debug.print("otto-lite: 拖入导入 path={s}\n", .{folder});
-        self.import.start(folder);
+        if (folder) |path| {
+            std.debug.print("otto-lite: 拖入文件夹，走按钮导入 path={s}\n", .{path});
+            self.import.start(path);
+        } else {
+            std.debug.print("otto-lite: 拖入文件 files={d}\n", .{files.items.len});
+            self.import.startFiles(files.items);
+        }
     }
 
-    /// 探针的拍子：等回调、等导入结束，再给状态机/reload 两拍，然后退出。
+    /// Probe beats: wait for delivery and import, then allow reload two beats.
     pub fn tick(ctx: ?*anyopaque) callconv(.c) void {
         const self: *Drop = @ptrCast(@alignCast(ctx.?));
         self.ticks += 1;
@@ -149,10 +175,6 @@ pub const Drop = struct {
         std.process.exit(1);
     }
 };
-
-// ---------------------------------------------------------------------------
-// 测试：拖入路径的分类（真临时目录；导入链路由 `--drop-probe` 验收）
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

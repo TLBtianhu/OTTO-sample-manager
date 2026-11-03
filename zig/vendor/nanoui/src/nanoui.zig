@@ -79,6 +79,8 @@ pub const android = if (is_android) @import("android/main.zig") else struct {};
 /// The Objective-C runtime (macOS and iOS).
 pub const objc = if (mac or builtin.os.tag == .ios) @import("objc.zig") else struct {};
 pub const ui = @import("ui/ui.zig");
+/// File URLs emitted by native drops; Windows paths use the same codec both ways.
+pub const file_url = @import("file_url.zig");
 /// HTTP requests answered on the main thread (http.zig).
 pub const http = @import("http.zig");
 /// Haptic taps (iOS; nothing elsewhere).
@@ -141,6 +143,7 @@ pub const version = @import("build_options").version;
 test {
     _ = tsgen;
     _ = ui;
+    _ = file_url;
     _ = kit;
     // A page's platform-free parts: the asset table, the origin, the bridge.
     _ = @import("tests_page.zig");
@@ -181,6 +184,9 @@ test {
             _ = @import("windows/tests_surface.zig");
             // The window's own: styles, sizes, the close veto, the timers.
             _ = @import("windows/tests_window.zig");
+            // File drops: URL conversion and one HDROP as one event.
+            _ = @import("windows/drop_files.zig");
+            _ = @import("windows/tests_drop_files.zig");
             // The input method: its own tests, and the file itself for the
             // decode/mapping units.
             _ = @import("windows/ime.zig");
