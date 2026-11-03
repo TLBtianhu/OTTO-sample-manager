@@ -417,7 +417,7 @@ pub const Window = struct {
         // decorated style's border inflated every borderless window.
         const style: u32 = @bitCast(@as(i32, @truncate(w.GetWindowLongPtrW(h, w.GWL_STYLE))));
         _ = w.AdjustWindowRectEx(&r, style, 0, 0);
-        _ = w.SetWindowPos(h, null, 0, 0, r.right - r.left, r.bottom - r.top, 0x0002 | 0x0004); // no move, no z-order
+        _ = w.SetWindowPos(h, null, 0, 0, r.right - r.left, r.bottom - r.top, 0x0002 | 0x0004 | 0x0010); // no move, no z-order, no activate
     }
 
     pub fn setPosition(self: *Window, x: f64, y: f64) void {

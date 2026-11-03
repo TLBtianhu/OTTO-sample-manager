@@ -74,13 +74,16 @@ width: clamp(200px, 40%, 480px);
 ```
 **大多数尺寸变化应该被分配规则自然吸收**，不需要断点。
 
-### 原则 C：让位顺序写死，不靠运气
+### 原则 C：让位顺序写死，尺寸分配保持连续
 ```
-宽度 ≥ 640   名称 / 时长 / 格式 / 采样率 / 大小
-480–639     去掉采样率
-360–479     只留名称 + 时长，预览条降到 56 px
-< 360       工具栏次要按钮收进溢出菜单
+采样率（含间距 80px）先在 640 → 560 宽之间让位
+大小   （含间距 80px）再在 560 → 480 宽之间让位
+格式   （含间距 56px）再在 480 → 424 宽之间让位
+名称列始终吃剩余；时长列与名称最小可读宽度不让
+预览条在 360 → 480 宽之间，从 56 插值到 clamp(56,25%高,180)
 ```
+辅助列的 slot 同时包含列宽和它前面的 gap，所以列消失时不会突然还给名称一
+整块 8px 间距。任何相邻整数宽度之间，名称、辅助列和预览高度最多变化 1px；
 **先丢辅助信息，再压缩主要信息，绝不缩到不可读。**
 
 ### 原则 D：尺寸变化要"懒"
@@ -102,25 +105,27 @@ const Track = union(enum) {
 fn distribute(total: u16, tracks: []const Track) []u16;
 ```
 
-再配一个**容器驱动的 profile**：
+再配一个**只描述结构密度、不再提供第二套尺寸**的 profile：
 
 ```zig
 fn listProfile(container_width: u16) Profile {
-    if (container_width >= 640) return .full;
-    if (container_width >= 480) return .no_sample_rate;
+    if (visible(sample_rate, container_width)) return .full;
+    if (visible(format, container_width) or visible(size, container_width)) return .no_sample_rate;
     if (container_width >= 360) return .name_and_duration;
     return .compact_with_overflow;
 }
 ```
 
-**只有 profile 变化才重建显示列表**，宽度连续变化时只改数值。
+**只有 profile 变化才重建显示列表**；宽度连续变化时只改数值。真正的列宽由
+`auxiliarySlot` / `slotContent` 计算，profile 本身不参与尺寸跳变。
 
 ## 五、测试怎么写（前端很少做，但我们必须做）
 
-1. **约束断言**（每个断点 × 若干宽度）：
+1. **约束断言**（各密度区间 × 若干宽度，并遍历 280–900 的每个整数宽度）：
    - 无重叠、无负尺寸、无越界；
    - 可点目标 ≥ 24 px；
-   - 文件名始终有最小可读宽度。
+   - 文件名始终有最小可读宽度；
+   - 相邻宽度的名称列、辅助列、预览高度变化 ≤ 1 px，列出现/消失也 ≤ 1 px。
 2. **快照**：380 / 480 / 640 / 900 宽各一张，肉眼确认"重排"而不是"放大"。
 3. **让位顺序断言**：宽度减小时，**先消失的必须是辅助列**，不能是文件名。
 4. **性能**：连续拖动改变宽度 200 次，布局计算总耗时与滚动帧率不退化。

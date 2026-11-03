@@ -43,7 +43,7 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
         .width = .fill,
         .height = .{ .px = 44 },
         .padding = .xy(12, 0),
-        .gap = 8,
+        .gap = 0,
         .align_items = .center,
         .background = if (selected) c.theme.accent.alpha(0.16) else if (is_cursor) c.theme.accent.alpha(0.07) else null,
     };
@@ -66,10 +66,12 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     thumb_box.end();
     if (drew_image) s.rows_with_image += 1;
     s.row_probe.add(index, drew_image);
+    ui.div(c).w(8).h(1).end();
     cellf(c, @floatFromInt(plan.ordinal.w), .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
 
     const shown = if (!is_directory and !is_deleted) s.duration_trust.display(sample) else null;
     for (plan.columns[0..plan.column_count]) |column| {
+        if (column.gap_before > 0) ui.div(c).w(@floatFromInt(column.gap_before)).h(1).end();
         const width: f32 = @floatFromInt(column.rect.w);
         switch (column.kind) {
             .name => {

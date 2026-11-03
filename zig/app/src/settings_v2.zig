@@ -1,5 +1,6 @@
 //! settings.json v2 的 view / layout 值与展开路径集合。
 const std = @import("std");
+const responsive_layout = @import("responsive_layout.zig");
 
 pub const version: u16 = 2;
 pub const ViewMode = enum {
@@ -71,8 +72,8 @@ pub const View = struct {
 };
 
 pub const Layout = struct {
-    width: u32 = 380,
-    height: u32 = 700,
+    width: u32 = responsive_layout.default_window_width,
+    height: u32 = responsive_layout.default_window_height,
 };
 
 test "展开集合：复制路径、切换、去重、保序" {

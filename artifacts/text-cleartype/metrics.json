@@ -1,0 +1,34 @@
+{
+  "sample": "Sample 0001 · 采样管理 13px",
+  "font": "Segoe UI 13px at 96 DPI",
+  "stats": {
+    "before_natural": {
+      "coverage_sum": 599.519,
+      "active_mean": 0.6924,
+      "strong_fraction": 0.5
+    },
+    "after_gdi_classic": {
+      "coverage_sum": 592.006,
+      "active_mean": 0.693,
+      "strong_fraction": 0.53
+    },
+    "native_system_drawing": {
+      "coverage_sum": 579.472,
+      "active_mean": 0.6539,
+      "strong_fraction": 0.4751
+    }
+  },
+  "native_similarity": {
+    "before_natural": {
+      "mae_255": 5.1736,
+      "dx": -1,
+      "dy": 0
+    },
+    "after_gdi_classic": {
+      "mae_255": 4.7748,
+      "dx": 0,
+      "dy": 0
+    }
+  },
+  "mae_improvement_percent": 7.71
+}

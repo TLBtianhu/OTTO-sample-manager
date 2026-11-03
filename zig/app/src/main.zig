@@ -271,7 +271,7 @@ pub const State = struct {
 
         s.reporter.report(s.thumbs, s.rows_with_image);
         // 设置面板是最后一层：遮罩 + 卡片覆盖列表，点击优先级由树序保证。
-        s.settings.draw(c, s.thumbs, &s.update, window_util.nativeHandle(s.window));
+        s.settings.draw(c, s.thumbs, &s.update, s.window);
 
         // 帧尾：记下这一帧的视口，然后（有空的话）补一轮预取。每帧最多一次；
         // 滚动中队列几乎从不清空，所以真正跑起来的是停下之后的那一拍。
