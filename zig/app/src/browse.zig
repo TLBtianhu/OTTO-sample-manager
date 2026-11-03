@@ -137,8 +137,8 @@ pub const Session = struct {
     /// 导航历史 / 返回时的身份选中快照。
     history: history_mod.History,
     navigation_restore: bool = false,
-    /// 当前排序与历史恢复状态。
-    sort_key: sort_mod.Key = .name,
+    scroll_restore: bool = false, // 返回目录后恢复一次滚动位置；仅内存。
+    sort_key: sort_mod.Key = .name, // 当前排序与历史恢复状态。
     needs_sort: bool = false,
 
     // ---- 内存预算（`browse_budget.zig`） ----

@@ -3,6 +3,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const browse_ui = @import("browse_ui.zig");
 const navigation = @import("browse_navigation.zig");
+const scroll = @import("browse_scroll.zig");
 const transport = @import("transport.zig");
 const State = @import("main.zig").State;
 const ui = nanoui.ui;
@@ -27,6 +28,12 @@ pub fn handleKeys(s: *State, c: *ui.Context) void {
         return;
     }
     if (s.address.keyboardOwned()) return;
+    if (c.shortcut(.{ .key = ui.Shortcut.enter, .ctrl = true })) {
+        c.input.key = null; // Shell 移交不能再落到 Enter 的预览/播放分支。
+        openSelected(s);
+        c.changed = true;
+        return;
+    }
     if (c.shortcut(.{ .key = ui.Shortcut.left, .alt = true })) {
         session.goBack(&s.selection) catch |err| {
             logFailure("back", err);
@@ -108,6 +115,10 @@ pub fn handleToolbar(s: *State, c: *ui.Context, action: browse_ui.Action) void {
         }
     }
     if (navigated) afterNavigation(s);
+    if (action.open_with) {
+        openSelected(s);
+        c.changed = true;
+    }
     if (action.copy_path) {
         transport.copyPath(c.alloc(), session.rootPath()) catch |err| {
             std.debug.print("otto-lite: 复制路径失败（{s}）\n", .{@errorName(err)});
@@ -143,6 +154,32 @@ pub fn activateCursor(s: *State, index: usize) bool {
     if (!session.isDirectory(index)) return false;
     enterAt(s, index);
     return true;
+}
+
+pub fn openSelected(s: *State) void {
+    const session = s.browse orelse return;
+    const index = s.selection.previewIndex() orelse {
+        s.shell.reject(.no_selection);
+        return;
+    };
+    if (index >= s.samples.len or session.isDirectory(index) or session.isDeleted(index)) {
+        s.shell.reject(.no_selection);
+        return;
+    }
+    const path = s.samples[index].file_path;
+    std.debug.print("otto-lite: shell-open begin path={s}\n", .{path});
+    s.shell.begin(path);
+}
+
+pub fn scrollTarget(s: *State, c: *ui.Context, list_id: u64) ?f32 {
+    const session = s.browse orelse return null;
+    const view_height = if (c.rects.get(list_id)) |rect| rect.h else c.size.h;
+    return scroll.target(session, s.search.len(), 44, view_height);
+}
+
+pub fn rememberScroll(s: *State, c: *ui.Context, list_id: u64) void {
+    const session = s.browse orelse return;
+    scroll.remember(session, c.scroll.get(list_id) orelse 0);
 }
 
 fn afterNavigation(s: *State) void {

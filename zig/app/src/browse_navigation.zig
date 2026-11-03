@@ -167,6 +167,7 @@ fn activate(
     session.swapping = true;
     session.restore_pending = false;
     session.navigation_restore = true;
+    session.scroll_restore = true;
     session.needs_sort = false;
     session.tracker.reset();
     selected.clear();

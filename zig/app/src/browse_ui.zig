@@ -27,6 +27,7 @@ pub const Action = struct {
     forward: bool = false,
     up: bool = false,
     copy_path: bool = false,
+    open_with: bool = false,
     address: address_ui.Action = .{},
     sort: ?browse.SortKey = null,
 };
@@ -49,6 +50,10 @@ pub fn drawToolbar(
     ui.text(c, "复制", .{ .size = 9, .color = c.theme.muted });
     ui.end(c);
     if (copy_button.clicked) action.copy_path = true;
+    const open_button = smallPressable(c);
+    ui.text(c, "打开方式", .{ .size = 9, .color = c.theme.accent });
+    ui.end(c);
+    if (open_button.clicked) action.open_with = true;
     address.end();
     if (bar.drawDrives(c, drives)) |letter| action.address.drive = letter;
     if (bar.failure()) |message| {
@@ -82,12 +87,16 @@ fn navButton(c: *ui.Context, label: []const u8, enabled: bool) bool {
 }
 
 /// 表头下面那一行：`浏览 samples · 1234 个文件`，后面跟状态徽标与「加载更多」。
-pub fn drawBanner(c: *ui.Context, info: browse.Info) Action {
+pub fn drawBanner(c: *ui.Context, info: browse.Info, shell_message: ?[]const u8) Action {
     var action: Action = .{};
     const row = ui.div(c).row().wFull().h(banner_height).itemsCenter().px(12).gap(6);
     defer row.end();
 
     ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "浏览 {s} · {d} 个项目", .{ info.name, info.entries });
+    if (shell_message) |message| {
+        const failed = std.mem.indexOf(u8, message, "失败") != null;
+        ui.textf(c, .{ .size = 10, .color = if (failed) c.theme.danger else c.theme.accent, .truncate = .ellipsis }, "· {s}", .{message});
+    }
     if (info.path_error) |reason| {
         ui.textf(c, .{ .size = 11, .color = c.theme.danger }, "· {s}", .{pathErrorText(reason)});
     } else if (info.unavailable) {

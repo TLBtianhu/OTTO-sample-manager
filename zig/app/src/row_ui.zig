@@ -256,8 +256,8 @@ pub fn syncSelection(s: *State) void {
 /// 底部预览条要预览的那一行：最近点击的"当前行"；没有选中/越界就是 null。
 /// 用 `cursor` 而不是"选中集合的第一个"，这样 Ctrl+点取消选中时预览条不闪。
 pub fn previewRow(s: *const State) ?*const core.model.Sample {
-    const row = s.selection.cursor orelse return null;
-    if (row >= s.samples.len or State.isDirectory(s, row)) return null;
+    const row = s.selection.previewIndex() orelse return null;
+    if (State.isDirectory(s, row)) return null;
     return &s.samples[row];
 }
 
