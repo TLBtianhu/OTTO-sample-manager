@@ -46,13 +46,15 @@ pub fn formatOf(bytes: []const u8) Format {
     return .otto;
 }
 
-/// 一次"打开库"的结果。
-///
-/// `empty = true` 表示文件**不存在**，按空库启动（首次启动的正常路径）；
-/// 它不是错误，调用方照常开窗，只是列表里没有素材。
+/// 空库启动的原因。版本不兼容与首次启动必须分开：前者要给用户明确提示，
+/// 后者只是正常的空状态；其它损坏仍然走具名错误，不会出现在这个枚举里。
+pub const EmptyReason = enum { missing, incompatible_version };
+
+/// 一次"打开库"的结果。`empty_reason = null` 表示读到了正常库；
+/// 非 null 表示按空库启动，调用方据原因决定是否需要提示。
 pub const Opened = struct {
     library: core.store.Library,
-    empty: bool,
+    empty_reason: ?EmptyReason = null,
 };
 
 /// 打开一个库文件。返回的 `Library` 自己持有 arena，调用方 `deinit()`。
@@ -64,9 +66,9 @@ pub fn load(init: std.process.Init, allocator: std.mem.Allocator, path: []const 
 }
 
 /// 首次启动的打开方式：文件**不存在** → `core.store.empty()` 的空库；
-/// 存在但读不了 / 损坏（`AccessDenied` / `BadMagic` / `Truncated` / …）→ 原样
-/// 返回具名错误。两者不能混：把损坏文件当空库会静默丢掉用户的库，把不存在当
-/// 错误就是"点了没反应"。
+/// `UnknownVersion`（包括旧 v1）也只按空库继续，但带上 `incompatible_version`
+/// 让启动层提示。存在却读不了 / 损坏（`AccessDenied` / `BadMagic` /
+/// `ChecksumMismatch` / …）仍原样返回具名错误，绝不能静默清空用户的库。
 pub fn open(init: std.process.Init, allocator: std.mem.Allocator, path: []const u8) LoadError!Opened {
     return openWith(init.io, allocator, path);
 }
@@ -74,12 +76,20 @@ pub fn open(init: std.process.Init, allocator: std.mem.Allocator, path: []const 
 /// `open` 的 io 版本：`--import-into` / 测试不必伪造 `std.process.Init`。
 pub fn openWith(io: std.Io, allocator: std.mem.Allocator, path: []const u8) LoadError!Opened {
     const library = loadWith(io, allocator, path) catch |err| switch (err) {
-        // 文件不存在（含父目录也还不存在）：空库，不是错误。这里只认
-        // FileNotFound——读失败与解码失败都要按具名错误冒上去。
-        error.FileNotFound => return .{ .library = try core.store.empty(allocator), .empty = true },
+        // 文件不存在（含父目录也还不存在）：空库，不是错误。
+        error.FileNotFound => return .{
+            .library = try core.store.empty(allocator),
+            .empty_reason = .missing,
+        },
+        // 产品边界：不恢复 v1 解码，但也不让版本不兼容等于应用打不开。
+        // 这里只认 UnknownVersion；CRC、截断、读盘失败仍沿错误路径冒上去。
+        error.UnknownVersion => return .{
+            .library = try core.store.empty(allocator),
+            .empty_reason = .incompatible_version,
+        },
         else => |other| return other,
     };
-    return .{ .library = library, .empty = false };
+    return .{ .library = library };
 }
 
 /// `load` 的 io 版本：不开窗的命令行流水线（`--import`）与测试只需要 `std.Io`，
@@ -159,7 +169,7 @@ test "open：文件不存在（含父目录不存在）= 空库，不是错误" 
     defer std.testing.allocator.free(missing);
     var opened = try openWith(std.testing.io, std.testing.allocator, missing);
     defer opened.library.deinit();
-    try std.testing.expect(opened.empty);
+    try std.testing.expect(opened.empty_reason == .missing);
     try std.testing.expectEqual(@as(usize, 0), opened.library.samples.len);
 
     // 父目录也不在（全新安装，第一次导入之前）：同样是空库，不能崩在路径拼接上。
@@ -167,7 +177,7 @@ test "open：文件不存在（含父目录不存在）= 空库，不是错误" 
     defer std.testing.allocator.free(missing_dir);
     var opened_dir = try openWith(std.testing.io, std.testing.allocator, missing_dir);
     defer opened_dir.library.deinit();
-    try std.testing.expect(opened_dir.empty);
+    try std.testing.expect(opened_dir.empty_reason == .missing);
     try std.testing.expectEqual(@as(usize, 0), opened_dir.library.samples.len);
 }
 
@@ -185,7 +195,7 @@ test "open：存在但损坏仍是具名错误，绝不当成空库" {
     try std.testing.expectError(error.Truncated, openWith(std.testing.io, std.testing.allocator, path));
 }
 
-test "open：能读的库照常解析，empty = false" {
+test "open：能读的库照常解析，empty_reason = null" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -200,8 +210,62 @@ test "open：能读的库照常解析，empty = false" {
     defer std.testing.allocator.free(path);
     var opened = try openWith(std.testing.io, std.testing.allocator, path);
     defer opened.library.deinit();
-    try std.testing.expect(!opened.empty);
+    try std.testing.expect(opened.empty_reason == null);
     try std.testing.expectEqual(@as(usize, 1), opened.library.samples.len);
+}
+
+test "open：v1 库按空库继续，保留 incompatible_version 提示原因" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try ottoFixture(&tmp, "v1.otto", 1, false);
+    defer std.testing.allocator.free(path);
+
+    var opened = try openWith(std.testing.io, std.testing.allocator, path);
+    defer opened.library.deinit();
+    try std.testing.expect(opened.empty_reason == .incompatible_version);
+    try std.testing.expectEqual(@as(usize, 0), opened.library.samples.len);
+}
+
+test "open：CRC 损坏仍具名失败，不走版本不兼容的空库路径" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try ottoFixture(&tmp, "crc.otto", core.library_binary.format_version, true);
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectError(
+        error.ChecksumMismatch,
+        openWith(std.testing.io, std.testing.allocator, path),
+    );
+}
+
+test "open：正常 v2 库仍按文件读取，不带空库原因" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try ottoFixture(&tmp, "v2.otto", core.library_binary.format_version, false);
+    defer std.testing.allocator.free(path);
+
+    var opened = try openWith(std.testing.io, std.testing.allocator, path);
+    defer opened.library.deinit();
+    try std.testing.expect(opened.empty_reason == null);
+    try std.testing.expectEqual(@as(usize, 0), opened.library.samples.len);
+}
+
+/// 造一个头与 CRC 都有效的 OTTOLIB；只改版本号，或只破坏 CRC 覆盖的 payload。
+/// 因而 v1 与 CRC 两条测试证明的是两个独立判据，不是"坏文件都被吞掉"。
+fn ottoFixture(tmp: anytype, name: []const u8, version: u16, corrupt_crc: bool) ![]u8 {
+    var library = try core.store.empty(std.testing.allocator);
+    defer library.deinit();
+    const bytes = try core.library_binary.encode(std.testing.allocator, &library);
+    defer std.testing.allocator.free(bytes);
+    std.mem.writeInt(u16, bytes[8..10], version, .little);
+    const checksum = std.hash.Crc32.hash(bytes[0 .. bytes.len - core.library_binary.crc_size]);
+    std.mem.writeInt(u32, bytes[bytes.len - core.library_binary.crc_size ..][0..4], checksum, .little);
+    if (corrupt_crc) bytes[core.library_binary.header_size] ^= 0xFF;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buffer);
+    return std.fs.path.join(std.testing.allocator, &.{ buffer[0..len], name });
 }
 
 test "formatOf：magic 优先，坏 magic 仍按 otto，JSON 按内容判断" {

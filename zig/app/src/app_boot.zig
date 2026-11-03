@@ -73,6 +73,15 @@ pub const Boot = struct {
     }
 };
 
+/// 库指针从创建起就持有合法空库：加载失败时，上层 `errdefer` 也只能释放这个
+/// 已初始化对象，绝不会对 `gpa.create` 后的未初始化内存调用 `Library.deinit`。
+fn createLibrary(gpa: std.mem.Allocator) !*core.store.Library {
+    const library = try gpa.create(core.store.Library);
+    errdefer gpa.destroy(library);
+    library.* = try core.store.empty(gpa);
+    return library;
+}
+
 /// 库加载在工作线程上的那一段：普通启动把它与 `App.create`（进程里第一个
 /// HWND，本机 55–67 ms 的 win32k 一次性成本）重叠，省掉读文件 + JSON 解码的
 /// 5–6 ms（`PERF.md` §12.5 记的就是这一条）。
@@ -127,8 +136,17 @@ const LibraryLoad = struct {
         if (job.failure) |err| return err;
         const opened = job.opened orelse return;
         job.opened = null;
-        // 文件不存在 = 空库（首次启动）：照常开窗，列表区域画空状态。
-        if (opened.empty) std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{job.path});
+        // 文件不存在是首次启动；版本不兼容也继续，但必须明确告诉用户旧库未载入。
+        if (opened.empty_reason) |reason| switch (reason) {
+            .missing => std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{job.path}),
+            .incompatible_version => std.debug.print(
+                "otto-lite: 这个库是旧格式（v1），已按空库启动；你的音频文件不受影响 " ++
+                    "legacy-library-empty version=1 file={s}\n",
+                .{job.path},
+            ),
+        };
+        // 释放 createLibrary 放的空库占位，再接管解码结果（也可能是新的空库）。
+        job.target.deinit();
         job.target.* = opened.library;
     }
 
@@ -193,8 +211,11 @@ pub fn boot(
 ) !Boot {
     // 位置参数优先；没有就按运行形态给默认库（见 `mode.zig`）。格式按 magic 判断。
     const default_library_path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
-    const library = try init.gpa.create(core.store.Library);
-    errdefer init.gpa.destroy(library);
+    const library = try createLibrary(init.gpa);
+    errdefer {
+        library.deinit();
+        init.gpa.destroy(library);
+    }
 
     // 库加载：普通启动放到**工作线程**里，与后面的 `App.create`（进程里第一个
     // HWND，本机 55–67 ms 的 win32k 一次性成本）重叠；`--mem-probe` 与浏览模式
@@ -214,9 +235,8 @@ pub fn boot(
             load.begin(init, path, library, overlap);
         },
         .browse => |dir| {
-            // 浏览模式：**没有库文件**。内存里一个空库只为 `Import` 的类型；
+            // 浏览模式：**没有库文件**。createLibrary 给的空库只为 `Import` 的类型；
             // `Import` 在这条路上永远不会被调用（按钮隐藏、拖入不安装）。
-            library.* = try core.store.empty(init.gpa);
             const session = browse_mod.Session.init(init.gpa, init.io, dir, .{
                 .limit = options.browse_limit,
                 .path_mode = if (options.browse_legacy_paths) .legacy else .compact,
@@ -229,10 +249,6 @@ pub fn boot(
             };
             browse_session = session;
         },
-    }
-    errdefer {
-        library.deinit();
-        init.gpa.destroy(library);
     }
     // 加载线程拿着 `library` 的指针：出错返回时它必须比释放库先收掉。
     // LIFO：本行声明在"释放库"那条之后，所以先执行。
@@ -338,4 +354,36 @@ pub fn boot(
         .preview = preview,
         .app = app,
     };
+}
+
+test "boot：CRC 加载失败保持具名，库只清理一次且不建窗口" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var empty = try core.store.empty(std.testing.allocator);
+    defer empty.deinit();
+    const bytes = try core.library_binary.encode(std.testing.allocator, &empty);
+    defer std.testing.allocator.free(bytes);
+    bytes[core.library_binary.header_size] ^= 0xFF;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "crc.otto", .data = bytes });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..root_len], "crc.otto" });
+    defer std.testing.allocator.free(path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const init: std.process.Init = .{
+        .minimal = undefined, // 失败发生在任何参数 / 环境读取之前。
+        .arena = &arena,
+        .gpa = std.testing.allocator,
+        .io = std.testing.io,
+        .environ_map = undefined,
+        .preopens = undefined,
+    };
+    var probe: mem_probe.Probe = .{ .active = true, .io = std.testing.io };
+    const options: options_mod.Options = .{ .library_path = path };
+    try std.testing.expectError(
+        error.ChecksumMismatch,
+        boot(init, arena.allocator(), options, .{ .library = path }, &probe),
+    );
 }
