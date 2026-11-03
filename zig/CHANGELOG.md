@@ -23,6 +23,14 @@
 
 
 
+
+## 0.57.0
+
+- **小字号文字不再发虚**：≤16 em 时 DirectWrite 改用 **GDI Classic + 整数 pen position**，字干回到像素网格上；RGB 子像素与 gamma/contrast 保持不变。与 System.Drawing ClearType 对照，平均误差下降约 8%（不宣称逐像素一致）。
+- **窗口拉伸连续化**：列宽与间距连续收缩，让位顺序仍是采样率 → 大小 → 格式；预览高度在 360–480 间连续插值，不再 175→56 硬跳。
+- **新增"恢复默认大小（380×700）"**，设置里一键回到默认；同时修复关闭时把外框尺寸误存为 client 尺寸的旧 bug。
+- `setSize` 使用 `SWP_NOACTIVATE`，调整大小不抢焦点。
+
 ## 0.56.0
 
 - **D3D 文字不再发虚**：GPU 路径原来只上传灰度 mask、采样 `.r` 画字形，是灰度抗锯齿；GDI 早就有 RGB ClearType。现在 RGB 覆盖数据作为独立纹理上传，shader 输出到第二渲染目标，按子像素混合（gamma/contrast 与 CPU 路径一致）。
