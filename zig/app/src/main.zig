@@ -9,12 +9,7 @@
 //!   * `row_ui.zig`   —— 列表行的绘制、点击与拖拽、复制与选择表；
 //!   * `live.zig` / `live_adapt.zig` / `live_rescan.zig` —— 监听、翻译、重扫协作。
 //!
-//! 列表下方是预览区（`preview_panel.zig`）：本文件不认识任何媒体类型（ROADMAP M1）。
-//!
-//! 没有位置参数时库路径由运行形态决定（`mode.zig`）：dev 用 `fixtures/library.json`，
-//! 便携/安装版用 `<数据目录>\library.json`（导入过的库是那里的 `library.otto`）；库文件不存在 = 空库。
-//! 搜索（`search_ui.zig`）：Ctrl+F 聚焦、Esc 清空；输入即过滤（文件名子串、ASCII
-//! 大小写不敏感），过滤变化时清空选择、光标尽量停在原样本；拖出与 Ctrl+C 见 `transport.zig`。
+//! 预览见 `preview_panel.zig`；默认库路径由 `mode.zig` 决定，搜索/拖出各有独立模块。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -27,6 +22,7 @@ const browse_address = @import("browse_address.zig");
 const browse_drives = @import("browse_drives.zig");
 const browse_ui = @import("browse_ui.zig");
 const browse_action = @import("browse_action.zig");
+const browse_shell = @import("browse_shell.zig");
 const commands = @import("commands.zig");
 const console_mod = @import("console.zig");
 const drop_ui = @import("drop_ui.zig");
@@ -88,6 +84,8 @@ pub const State = struct {
     settings: settings_ui.Panel,
     /// 拖拽快照与执行（把 `DoDragDrop` 挡在帧外）。
     transport: transport_mod.Transport,
+    /// Shell 打开方式：异步宿主移交，与 preview 的状态和线程完全分开。
+    shell: browse_shell.Launcher,
     window: ?*nanoui.Window = null,
     /// 上一次 poll 之后看到的 ready 计数，用来判断「后台取到新图了」。
     last_ready: u32 = 0,
@@ -125,10 +123,8 @@ pub const State = struct {
         if (!busy) {
             row_ui.syncSelection(s);
             row_ui.resyncInput(s, c);
-            // Ctrl+C：在构建树之前处理，`c.changed` 会让这一帧重建出表头提示。
+            // Ctrl+C 在构建树之前处理；路径不可用时只在下一次用户交互重试。
             if (c.shortcut(.{ .key = 'c', .ctrl = true })) row_ui.copySelection(s, c);
-            // 浏览模式："路径不可用"只在**用户下一次交互**时重试一次（点击 / 滚轮 /
-            // 键盘 / 获得焦点），没有定时轮询。`retryUnavailable` 在可用时是空操作。
             if (s.browse) |session| {
                 const focused = if (s.window) |window| window.isFocused() else false;
                 const gained_focus = focused and !s.window_focused;
@@ -204,7 +200,7 @@ pub const State = struct {
         // 它必须**看得见**——这些状态只写日志等于没说。
         var load_more_clicked = false;
         if (s.browse) |session| {
-            load_more_clicked = browse_ui.drawBanner(c, session.info()).load_more_clicked;
+            load_more_clicked = browse_ui.drawBanner(c, session.info(), s.shell.message()).load_more_clicked;
         }
         if (!busy and load_more_clicked) {
             if (s.browse) |session| {
@@ -217,7 +213,9 @@ pub const State = struct {
         const body_it = body.interaction();
 
         // 列表只遍历行映射：第 row 行 → 第 index 个样本（选择/预览/拖拽仍只认样本下标）。
-        var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44 });
+        const list_id = c.peekId(null);
+        const scroll_target = browse_action.scrollTarget(s, c, list_id);
+        var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44, .scroll_to = scroll_target });
         // 本帧建出来的行范围（含 list 的 overscan）。预取与验收都用它，不改列表行为。
         var first_row: usize = 0;
         var last_row: usize = 0;
@@ -239,6 +237,7 @@ pub const State = struct {
             built_rows += 1;
         }
         rows.end();
+        browse_action.rememberScroll(s, c, list_id);
 
         // 库非空但过滤到 0 行：给一段明确文案（不是一片空白）。
         if (!busy and s.samples.len > 0 and s.search.len() == 0) s.search.drawNoMatches(c);
@@ -281,11 +280,7 @@ pub const State = struct {
         if (!busy) s.maybePrefetch();
     }
 
-    /// 空闲预取的一趟：队列空闲（`pending == 0`）才把视口上下几十行提前入队。
-    ///
-    /// 三道闸在 `thumbs_prefetch.Scheduler`：开关（`--no-prefetch`）、视口是否变了、
-    /// 距上一轮 ≥120ms。这里只做行号翻译（过滤后的行 → 样本下标）与入队；预取优先级
-    /// 由 `Thumbs` 的队列保证（可见 > 预取），所以这一趟**挤不掉**任何可见请求。
+    /// 队列空闲时才把视口上下几十行提前入队；拖放循环里不预取。
     fn maybePrefetch(s: *State) void {
         const now = trace.now();
         if (!s.prefetch.due(now)) return;
@@ -326,6 +321,10 @@ pub const State = struct {
             if (s.import.tick()) if (s.window) |window| window.redraw();
             // 更新检查也是异步的：结果回来就换表头那一行并重画。
             if (s.update.poll()) if (s.window) |window| window.redraw();
+            if (s.shell.poll()) |result| {
+                std.debug.print("otto-lite: shell-open status={s} code={d}\n", .{ @tagName(result.status), result.code });
+                if (s.window) |window| window.redraw();
+            }
             // 预览是异步的：工作线程交回结果就换画面并打一行账。`poll` 只在
             // UI 线程调；`sync` 在 view 里提交，这里不重复提交。
             if (s.preview.poll()) {
@@ -524,6 +523,7 @@ fn run(init: std.process.Init) !void {
         .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse boot.settings.update_url, options.no_exec, options.update_current),
         .settings = try settings_ui.Panel.init(init.gpa, init.io, boot.settings, boot.settings_path, .{ .d3d = options.d3d, .read_only = boot.settings_read_only }),
         .transport = transport_mod.Transport.init(init.gpa),
+        .shell = browse_shell.Launcher.init(init.gpa, init.io),
         // `--no-prefetch`：空闲预取关掉（对比实验只差这一项）。
         .prefetch = .{ .enabled = !options.no_prefetch, .last_try_s = trace.now() },
     };
@@ -538,6 +538,7 @@ fn run(init: std.process.Init) !void {
     defer state.address.deinit();
     defer state.search.deinit();
     defer state.transport.deinit();
+    defer state.shell.deinit();
     defer state.duration_trust.deinit();
     state.selection.resize(init.gpa, state.samples.len) catch {};
     if (options.select) |text| selection_mod.seedSelection(&state.selection, state.samples.len, text);

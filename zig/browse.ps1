@@ -389,17 +389,27 @@ function Invoke-Scroll {
 # ---------------------------------------------------------------------------
 
 function Invoke-ZeroWrite {
-  Write-Step '5. 零写入（源目录前后快照）'
+  Write-Step '5. 零写入（源目录 + 库 + 设置前后快照）'
   $dir = Join-Path $Root '10k'
   $before = Get-DirSnapshot $dir
+  $settings = Join-Path $env:LOCALAPPDATA 'OTTO\dev\settings.json'
+  $library = Join-Path $PSScriptRoot 'app\fixtures\library.json'
+  $settingsBefore = if (Test-Path -LiteralPath $settings) { (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash } else { 'missing' }
+  $libraryBefore = if (Test-Path -LiteralPath $library) { (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash } else { 'missing' }
   $r = Invoke-Exe $Exe @('--browse-probe', ('"{0}"' -f $dir))
+  # 走一次真正的 GUI 启动/关闭（隐藏、不激活），覆盖 settings.read_only 的接线。
+  $png = Join-Path $Root 'zero-write.png'
+  $ui = Invoke-Exe $Exe @('--browse', ('"{0}"' -f $dir), ('--nanoui-snapshot="{0}"' -f $png), '--nanoui-wait=1')
+  $settingsAfter = if (Test-Path -LiteralPath $settings) { (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash } else { 'missing' }
+  $libraryAfter = if (Test-Path -LiteralPath $library) { (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash } else { 'missing' }
   $after = Get-DirSnapshot $dir
   $diff = Compare-DirSnapshot $before $after
   $m = [regex]::Match($r.Text, 'writes=(\d+)')
   $probeWrites = if ($m.Success) { [int]$m.Groups[1].Value } else { -1 }
-  $ok = ($r.Code -eq 0 -and $probeWrites -eq 0 -and $diff -eq 0 -and $before.Count -eq 10000)
-  $stat = 'writes={0} 快照差异={1}（{2} 个条目）' -f $probeWrites, $diff, $before.Count
-  $note = '判据 writes=0 且 名字+大小+mtime 完全一致'
+  $persistentDiff = ($settingsBefore -ne $settingsAfter) -or ($libraryBefore -ne $libraryAfter)
+  $ok = ($r.Code -eq 0 -and $ui.Code -eq 0 -and $probeWrites -eq 0 -and $diff -eq 0 -and (-not $persistentDiff) -and $before.Count -eq 10000)
+  $stat = 'writes={0} 源差异={1} 库/设置差异={2}' -f $probeWrites, $diff, ([int]$persistentDiff)
+  $note = '判据：隐藏 GUI 前后源目录、库与 settings 内容完全一致'
   if ($ok) { Add-Row '零写入' 'PASS' $stat $note } else { Add-Row '零写入' 'FAIL' $stat $note }
 }
 

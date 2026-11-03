@@ -71,6 +71,10 @@ test {
     _ = @import("browse_crumbs.zig");
     _ = @import("browse_drives.zig");
     _ = @import("browse_sort.zig");
+    // Stage 2：身份多选、每目录滚动记忆、异步 Shell 打开方式（假关联，不启动外部程序）。
+    _ = @import("browse_scroll.zig");
+    _ = @import("browse_shell.zig");
+    _ = @import("browse_stage2_test.zig");
     _ = @import("library_io.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");

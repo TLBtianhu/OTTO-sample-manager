@@ -147,6 +147,12 @@ pub const Selection = struct {
         self.selectOnly(index);
     }
 
+    /// 多选时预览仍跟随最近活动的当前行；Ctrl 取消它不强行跳到集合第一项。
+    pub fn previewIndex(self: *const Selection) ?usize {
+        const cursor = self.cursor orelse return null;
+        return if (cursor < self.len()) cursor else null;
+    }
+
     /// 选中的行号，升序。返回的切片归调用方。
     pub fn selectedIndices(self: *const Selection, allocator: std.mem.Allocator) error{OutOfMemory}![]usize {
         const out = try allocator.alloc(usize, self.count());

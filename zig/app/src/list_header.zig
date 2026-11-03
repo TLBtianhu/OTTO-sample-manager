@@ -59,7 +59,7 @@ pub fn draw(c: *ui.Context, info: Info) Action {
 
     // 工具栏始终 32px（24px 行 + 上下 4px）；字体与点击目标不随窗口变。
     const row = ui.div(c).row().wFull().h(24).itemsCenter().gap(8);
-    ui.textf(c, .{ .size = 12, .truncate = .ellipsis }, "{d} 个素材 · {d} 命中 · {d} 选中", .{
+    ui.textf(c, .{ .size = 12, .truncate = .ellipsis }, "{d} 个素材 · {d} 命中 · 选中 {d} 项", .{
         info.total,
         info.matched,
         info.selected,

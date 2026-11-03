@@ -42,8 +42,12 @@ pub const Capture = struct {
     tombstone_index: ?usize = null,
 };
 
+pub const Mode = enum { identity, row_for_reverse_proof };
+
 pub const Tracker = struct {
     arena: std.heap.ArenaAllocator,
+    /// 默认永远是身份；`row_for_reverse_proof` 只供测试证明旧算法会选错。
+    mode: Mode = .identity,
     /// 最近一次 `capture` 记下的东西（`restore` 读它）。字段叫 `state` 而不是
     /// `capture`：`capture()` 是方法名，同名会让 Zig 报 "duplicate struct member"。
     state: Capture = .{},
@@ -73,6 +77,7 @@ pub const Tracker = struct {
         sel: *const selection_mod.Selection,
         unreadable: *u32,
     ) error{OutOfMemory}!void {
+        std.debug.assert(entries.len <= types.hard_limit); // 选择快照也有同一道硬上界。
         _ = self.arena.reset(.retain_capacity);
         self.state = .{};
 
@@ -160,6 +165,12 @@ pub const Tracker = struct {
                 if (identities.get(types.identityHash(identity))) |slot| {
                     if (keys[slot].identity.?.eql(identity)) found[slot] = index;
                 }
+            }
+        }
+        // 反向证明开关：只改这一处为按旧行号恢复，真实重扫测试就必须选错文件。
+        if (self.mode == .row_for_reverse_proof) {
+            for (keys, 0..) |key, slot| {
+                found[slot] = if (key.old_index < entries.len and !entries[key.old_index].deleted) key.old_index else null;
             }
         }
 
