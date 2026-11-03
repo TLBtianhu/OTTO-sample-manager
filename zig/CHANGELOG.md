@@ -19,6 +19,14 @@
 
 
 
+
+## 0.53.0
+
+- **nanoui 同步到上游 0.10.0**（此前落后 32 个提交）。上游新增 nanolight 启动器、WebView2 页面、kv 持久化；IME 修复（#63）不涉及我们改过的文件。
+- 只有三处需要真正合并：build.zig（我们的 d3dcompiler/shell32 链接与上游 WebView2 加载并存）、窗口创建（上游 COM 初始化与我们的 `non_activating` 显示逻辑并存）、以及一组被两边重复添加的 SetWindowPos 常量。
+- 我们的补丁仍在最上层：原始 BGRA 绘制、字体索引缓存、mmap 字体、GDI 上屏、帧日志/追踪、drop 事件与 `non_activating`。
+- `zig\vendor\nanoui\VENDOR.md` 记录了当前提交与补丁清单。
+
 ## 0.52.0
 
 - **PCM 与解码缓冲纳入驻留预算**：新增三档驻留策略（`--pcm-residency` 可覆盖）：≤2 MiB 保留完整 PCM；2–64 MiB 保留 2 MiB 播放窗；**≥64 MiB 只留波形**，播放时才建有界帧源。
