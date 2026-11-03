@@ -207,18 +207,27 @@ zig\health.ps1 -Fresh    # 再加"全新用户"安装→升级→卸载
 ### 出安装包
 
 ```powershell
-zig\package.ps1 -Version 0.44.0    # zig\dist\ 下出 portable.zip + setup.exe，各自带 .sig
+zig\package.ps1 -Version 0.60.0    # zig\dist\ 下出 portable.zip + setup.exe，各自带 .sig
 ```
 
 ### 运行时数据在哪
 
-| 形态 | 数据目录 |
+| 形态 | 程序与数据目录 |
 | --- | --- |
-| 便携版（zip 解压） | `<exe>\data` |
-| 安装版 | `%APPDATA%\OTTO` |
+| 便携版（zip 解压） | 程序在解压目录；数据在 `<exe>\data` |
+| 安装版 | 默认根 `%LOCALAPPDATA%\Programs\OTTO`；程序在 `<根>\app`，设置在 `<根>\data\settings.json`，库在 `<根>\data\library.otto`，缓存根为 `<根>\cache` |
 | 开发版（`zig build` 产物） | `%LOCALAPPDATA%\OTTO\dev` |
 
-卸载不会删除用户数据。
+安装版的默认根是当前用户目录，**不需要管理员权限**；图形安装页可以更改根，静默安装也支持把 `/D=<根>` 放在命令行最后。安装器只写 `app\`，不会创建或覆盖 `data\`、`cache\`，也不读取或迁移旧 `%APPDATA%\OTTO`。
+
+```text
+%LOCALAPPDATA%\Programs\OTTO\
+  app\    otto-lite.exe / otto-thumb-host.exe / Uninstall.exe
+  data\   settings.json / library.otto
+  cache\  缩略图等可再生的缓存
+```
+
+覆盖升级会全量替换 `app\`，`data\` 与 `cache\` 逐字节保留。卸载页默认只勾选**主程序**；**配置与素材库（data）**、**缓存（cache）**默认不勾，只有明确勾选才删除。选择**全选**会再确认一次。静默卸载 `Uninstall.exe /S` 始终只删除 `app\`，保留全部数据。
 
 ---
 

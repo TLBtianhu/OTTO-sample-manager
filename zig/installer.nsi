@@ -1,14 +1,5 @@
-; OTTO Lite 的 NSIS 安装包脚本。
-;
-; 由 `package.ps1` 调用，版本号与所有路径都从命令行 /D 传入，脚本里没有第二份副本：
-;
-;   makensis /DVERSION=<x.y.z> /DSOURCE_DIR=<exe + README> /DOUT_FILE=<setup.exe> \
-;            /DICON_FILE=<resources/icon.ico> /DLICENSE_FILE=<LICENSE> installer.nsi
-;
-; 规矩（CHARTER 九）：
-;   * 程序装进 $PROGRAMFILES64\OTTO Lite，**安装目录不写任何数据**；
-;   * 用户数据在 %APPDATA%\OTTO，卸载时保留（确认页与完成页都会说明）；
-;   * 不生成 otto-portable.flag——安装版不是便携版，标记只在便携 zip 里。
+; OTTO Lite 单根目录 NSIS 安装包。
+; 用户只选安装根；安装器只写 <根>\app，绝不创建、读取或覆盖 data/cache。
 
 !ifndef VERSION
   !error "缺少 /DVERSION=<x.y.z>"
@@ -22,20 +13,20 @@
 
 Unicode true
 SetCompressor /SOLID lzma
-
 Name "OTTO Lite ${VERSION}"
 BrandingText "OTTO Lite ${VERSION}"
 OutFile "${OUT_FILE}"
-InstallDir "$PROGRAMFILES64\OTTO Lite"
-RequestExecutionLevel admin
-
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\OTTO Lite"
 !define APP_KEY "Software\OTTO\OTTO Lite"
+InstallDir "$LOCALAPPDATA\Programs\OTTO"
+InstallDirRegKey HKCU "${APP_KEY}" "InstallDir"
+RequestExecutionLevel user
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
+!include "nsDialogs.nsh"
 
-; 版本资源：装出来的 setup.exe 在资源管理器属性里也能看到版本。
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey /LANG=2052 "ProductName" "OTTO Lite"
 VIAddVersionKey /LANG=2052 "ProductVersion" "${VERSION}"
@@ -46,12 +37,10 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "MIT License"
 VIAddVersionKey /LANG=2052 "OriginalFilename" "otto-lite-${VERSION}-setup.exe"
 
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\otto-lite.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\app\otto-lite.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "$(OTTO_RUN_TEXT)"
-
-; 卸载确认页：这里就说清楚"数据会保留"，而不是卸完才让用户找。
 !define MUI_UNCONFIRMPAGE_TEXT_TOP "$(OTTO_UNCONFIRM_TOP)"
-
+!define MUI_UNFINISHPAGE_TEXT "$(OTTO_UNINSTALL_DONE)"
 !ifdef ICON_FILE
   !define MUI_ICON "${ICON_FILE}"
   !define MUI_UNICON "${ICON_FILE}"
@@ -63,9 +52,8 @@ VIAddVersionKey /LANG=2052 "OriginalFilename" "otto-lite-${VERSION}-setup.exe"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.OttoOptionsPage un.OttoOptionsLeave
 !insertmacro MUI_UNPAGE_INSTFILES
-; 卸载完成页也说明一次：程序没了，库还在。
-!define MUI_FINISHPAGE_TEXT "$(OTTO_UNINSTALL_DONE)"
 !insertmacro MUI_UNPAGE_FINISH
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
@@ -73,76 +61,93 @@ VIAddVersionKey /LANG=2052 "OriginalFilename" "otto-lite-${VERSION}-setup.exe"
 
 LangString OTTO_RUN_TEXT ${LANG_SIMPCHINESE} "运行 OTTO Lite"
 LangString OTTO_RUN_TEXT ${LANG_ENGLISH} "Run OTTO Lite"
-
 LangString OTTO_UNCONFIRM_TOP ${LANG_SIMPCHINESE} \
-  "将删除 OTTO Lite 的程序文件与快捷方式。$\r$\n$\r$\n用户数据（库、分组、标签）保留在 %APPDATA%\OTTO，不会被删除；如需彻底清理，请在卸载后手动删除该目录。"
+  "下一步可选择清理范围。默认只删除主程序；配置、素材库与缓存都会保留。"
 LangString OTTO_UNCONFIRM_TOP ${LANG_ENGLISH} \
-  "OTTO Lite's program files and shortcuts will be removed.$\r$\n$\r$\nYour user data (library, groups, tags) stays in %APPDATA%\OTTO and is not deleted. Delete that folder manually for a clean wipe."
-
+  "Choose the cleanup scope next. By default only the app is removed; data and cache stay."
 LangString OTTO_UNINSTALL_DONE ${LANG_SIMPCHINESE} \
-  "OTTO Lite 已卸载。$\r$\n$\r$\n用户数据仍保留在 %APPDATA%\OTTO。"
+  "OTTO Lite 已按你选择的范围卸载。未勾选的数据与缓存未被删除。"
 LangString OTTO_UNINSTALL_DONE ${LANG_ENGLISH} \
-  "OTTO Lite has been removed.$\r$\n$\r$\nYour user data is still in %APPDATA%\OTTO."
+  "OTTO Lite was removed using your selected scope. Unselected data and cache were kept."
+LangString OTTO_UN_OPTIONS_TEXT ${LANG_SIMPCHINESE} \
+  "选择卸载范围。主程序固定勾选；data 与 cache 默认保留。"
+LangString OTTO_UN_OPTIONS_TEXT ${LANG_ENGLISH} \
+  "Select a cleanup scope. The app is required; data and cache are kept by default."
+LangString OTTO_UN_MAIN ${LANG_SIMPCHINESE} "主程序（app，默认）"
+LangString OTTO_UN_MAIN ${LANG_ENGLISH} "Application (app, default)"
+LangString OTTO_UN_DATA ${LANG_SIMPCHINESE} "配置与素材库（data，默认保留）"
+LangString OTTO_UN_DATA ${LANG_ENGLISH} "Settings and library (data, kept by default)"
+LangString OTTO_UN_CACHE ${LANG_SIMPCHINESE} "缓存（cache，默认保留）"
+LangString OTTO_UN_CACHE ${LANG_ENGLISH} "Cache (cache, kept by default)"
+LangString OTTO_UN_ALL ${LANG_SIMPCHINESE} "全选（需要再次确认）"
+LangString OTTO_UN_ALL ${LANG_ENGLISH} "Select all (requires confirmation)"
+LangString OTTO_UN_ALL_CONFIRM ${LANG_SIMPCHINESE} \
+  "全选会永久删除配置、素材库和缓存，且无法撤销。确定继续吗？"
+LangString OTTO_UN_ALL_CONFIRM ${LANG_ENGLISH} \
+  "Select all permanently deletes settings, the library, and cache. Continue?"
+
+!include "installer-uninstall.nsh"
 
 Section "OTTO Lite" SecMain
   SectionIn RO
-  SetShellVarContext all
+  SetShellVarContext current
   SetRegView 64
 
-  ; 程序文件。安装目录只放可执行文件与说明/许可证，不创建 data\。
-  SetOutPath "$INSTDIR"
+  ; app 是可整体替换的资产；data/cache 没有任何安装器指令指向它们。
+  RMDir /r "$INSTDIR\app"
+  SetOutPath "$INSTDIR\app"
   File "${SOURCE_DIR}\otto-lite.exe"
   File "${SOURCE_DIR}\otto-thumb-host.exe"
   File "${SOURCE_DIR}\README.txt"
 !ifdef LICENSE_FILE
   File "${LICENSE_FILE}"
 !endif
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  WriteUninstaller "$INSTDIR\app\Uninstall.exe"
 
-  ; 开始菜单 + 桌面快捷方式（所有用户；安装需要管理员，和 Program Files 一致）。
+!ifndef OTTO_TEST
   CreateDirectory "$SMPROGRAMS\OTTO Lite"
-  CreateShortcut "$SMPROGRAMS\OTTO Lite\OTTO Lite.lnk" "$INSTDIR\otto-lite.exe"
-  CreateShortcut "$SMPROGRAMS\OTTO Lite\Uninstall OTTO Lite.lnk" "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$DESKTOP\OTTO Lite.lnk" "$INSTDIR\otto-lite.exe"
+  CreateShortcut "$SMPROGRAMS\OTTO Lite\OTTO Lite.lnk" "$INSTDIR\app\otto-lite.exe"
+  CreateShortcut "$SMPROGRAMS\OTTO Lite\Uninstall OTTO Lite.lnk" "$INSTDIR\app\Uninstall.exe"
+  CreateShortcut "$DESKTOP\OTTO Lite.lnk" "$INSTDIR\app\otto-lite.exe"
 
-  ; 控制面板"程序和功能"里的卸载项；DisplayVersion 必须与 exe 的 --version 一致。
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "OTTO Lite"
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "CandaceZcc"
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\otto-lite.exe,0"
-  WriteRegStr HKLM "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
-  WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S'
-  WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
-  WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
-
-  ; 供安装程序下次记住目录（InstallDir 不用 InstallDirRegKey：那是默认视图）。
-  WriteRegStr HKLM "${APP_KEY}" "InstallDir" "$INSTDIR"
-  WriteRegStr HKLM "${APP_KEY}" "Version" "${VERSION}"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "OTTO Lite"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "CandaceZcc"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\app\otto-lite.exe,0"
+  WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\app\Uninstall.exe"'
+  WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\app\Uninstall.exe" /S'
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+  WriteRegStr HKCU "${APP_KEY}" "InstallDir" "$INSTDIR"
+  WriteRegStr HKCU "${APP_KEY}" "Version" "${VERSION}"
+!endif
 SectionEnd
 
 Section "Uninstall"
-  SetShellVarContext all
+  SetShellVarContext current
   SetRegView 64
+  SetOutPath "$TEMP"
 
-  ; 先删程序和快捷方式；安装目录里没有用户数据。
-  Delete "$INSTDIR\otto-thumb-host.exe"
-  Delete "$INSTDIR\otto-lite.exe"
-  Delete "$INSTDIR\README.txt"
-!ifdef LICENSE_FILE
-  Delete "$INSTDIR\LICENSE"
-!endif
-  Delete "$INSTDIR\Uninstall.exe"
-  RMDir "$INSTDIR"
+  ; /S 下两个变量在 un.onInit 固定为 0，所以这里只删除 app。
+  ; NSIS 的卸载器自删除由 Delete 触发；仅 RMDir /r 会留下正在运行的 Uninstall.exe。
+  Delete "$OttoRoot\app\Uninstall.exe"
+  RMDir /r "$OttoRoot\app"
+  ${If} $OttoCleanData == "1"
+    RMDir /r "$OttoRoot\data"
+  ${EndIf}
+  ${If} $OttoCleanCache == "1"
+    RMDir /r "$OttoRoot\cache"
+  ${EndIf}
+  ; 根里可能有用户自己的文件：只尝试移除空根，不递归删除整个根。
+  RMDir "$OttoRoot"
 
+!ifndef OTTO_TEST
   Delete "$SMPROGRAMS\OTTO Lite\OTTO Lite.lnk"
   Delete "$SMPROGRAMS\OTTO Lite\Uninstall OTTO Lite.lnk"
   RMDir "$SMPROGRAMS\OTTO Lite"
   Delete "$DESKTOP\OTTO Lite.lnk"
-
-  DeleteRegKey HKLM "${UNINST_KEY}"
-  DeleteRegKey HKLM "${APP_KEY}"
-
-  ; 刻意不碰 %APPDATA%\OTTO：用户数据不随卸载消失（CHARTER 九）。
-  ; 这里没有 Delete/ RMDir 指向 $APPDATA，请不要"顺手补上"。
+  DeleteRegKey HKCU "${UNINST_KEY}"
+  DeleteRegKey HKCU "${APP_KEY}"
+!endif
 SectionEnd

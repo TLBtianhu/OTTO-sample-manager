@@ -14,7 +14,9 @@
 //!   * dev        `%LOCALAPPDATA%\OTTO\dev`（没有 LOCALAPPDATA 时 `%TEMP%\OTTO-dev`）；
 //!                默认库仍是 `fixtures/library.json`（相对 cwd，源码里的 fixture）
 //!   * portable  `<exe 目录>\data`
-//!   * installed `%APPDATA%\OTTO`
+//!   * installed `<安装根>\data`，exe 必须位于 `<安装根>\app`；缓存位于 `<安装根>\cache`
+//!
+//! installed 不读 `%APPDATA%\OTTO`，也不从旧结构迁移。安装根完全由 exe 位置推导。
 //!
 //! **编译产物（`zig-out`）不承载任何运行数据。** dev 的数据在开发者的本地目录里，
 //! 删掉它不影响源码；从 `zig-out/bin` 拷 exe 出去也不会带上一份别人的设置。
@@ -41,8 +43,10 @@ pub const Mode = enum {
 /// 便携版的唯一判据：与 exe 同目录。
 pub const portable_marker = "otto-portable.flag";
 
-/// 安装版在 %APPDATA% 下的目录名。
+/// dev 的产品目录名；installed 不再使用任何 APPDATA 子目录。
 pub const installed_dir_name = "OTTO";
+/// installed 的固定程序子目录：`<安装根>\app\otto-lite.exe`。
+pub const install_app_dir_name = "app";
 
 /// dev 形态的默认库文件（相对 cwd，和 `zig build run` 的工作目录一致）。
 pub const dev_library_path = "fixtures/library.json";
@@ -118,11 +122,21 @@ pub fn devDataDirFor(
     return null;
 }
 
+/// installed 的安装根。只认固定的 `app` 子目录，避免把任意绿色 exe 的父目录
+/// 误当成数据根；路径非法是具名错误，绝不回退读取旧 `%APPDATA%\OTTO`。
+pub fn installRootFor(allocator: std.mem.Allocator, exe_path: []const u8) ![]u8 {
+    const app_dir = std.fs.path.dirname(exe_path) orelse return error.InstallRootUnavailable;
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(app_dir), install_app_dir_name)) {
+        return error.InstallRootUnavailable;
+    }
+    const root = std.fs.path.dirname(app_dir) orelse ".";
+    return try allocator.dupe(u8, root);
+}
+
 /// 纯路径：形态 → 数据目录。
 ///
 /// dev 的数据在开发者的 `%LOCALAPPDATA%` 下，**不在 `zig-out` 里**；
-/// installed 需要调用方给出 `%APPDATA%` 的值，拿不到就是显式错误——
-/// 绝不悄悄退化成“写到当前目录”。
+/// installed 由 `<根>\app\otto-lite.exe` 推出 `<根>\data`，不读取环境变量中的旧路径。
 pub fn dataDirFor(
     allocator: std.mem.Allocator,
     mode: Mode,
@@ -136,8 +150,9 @@ pub fn dataDirFor(
             return try std.fs.path.join(allocator, &.{ exe_dir, "data" });
         },
         .installed => {
-            const base = env.appdata orelse return error.AppDataDirUnavailable;
-            return try std.fs.path.join(allocator, &.{ base, installed_dir_name });
+            const root = try installRootFor(allocator, exe_path);
+            defer allocator.free(root);
+            return try std.fs.path.join(allocator, &.{ root, "data" });
         },
     }
 }
@@ -145,8 +160,7 @@ pub fn dataDirFor(
 /// 纯路径：形态 → 下载目录。
 ///
 /// 三种形态都放在各自的数据目录下；dev 也不例外——`zig-out` 里不留 `updates\`。
-/// installed 拿不到 `%APPDATA%` 时返回 null，由调用方报 `UpdatesDirUnavailable`；
-/// OOM 仍然是错误。
+/// installed 路径非法时返回 null，由调用方报 `UpdatesDirUnavailable`；OOM 仍然是错误。
 pub fn updatesDirFor(
     allocator: std.mem.Allocator,
     mode: Mode,
@@ -154,7 +168,7 @@ pub fn updatesDirFor(
     env: Env,
 ) !?[]u8 {
     const data_dir = dataDirFor(allocator, mode, exe_path, env) catch |err| switch (err) {
-        error.AppDataDirUnavailable => return null,
+        error.InstallRootUnavailable => return null,
         else => return err,
     };
     const resolved = data_dir orelse return null;
@@ -163,7 +177,7 @@ pub fn updatesDirFor(
 }
 
 /// 本进程的下载目录：和 `defaultLibraryPath` 一样从进程自身的 exe 路径判定形态。
-/// installed 拿不到 `%APPDATA%` 时返回 null——由调用方报具名错误，不猜路径。
+/// installed 路径非法时返回 null——由调用方报具名错误，不猜旧目录。
 pub fn updatesDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
@@ -347,30 +361,29 @@ fn absolutePath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u
     return try std.fs.path.resolveAlloc(allocator, &.{ cwd, path });
 }
 
-/// 启动时的数据目录：三种形态都按 exe 旁边的标记 / `zig-out` 路径 /
-/// `%APPDATA%` 判定；拿不到也是 null——缓存只是加速层，不值得让启动失败。
-fn startupDataDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+/// 启动时的缓存根：installed 是 `<安装根>`，其它形态仍使用自己的数据目录。
+/// 这样安装版得到 `<根>\cache`，而不是把缓存藏回 `<根>\data\cache`。
+fn startupCacheBaseDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     const mode = try detect(allocator, io, exe_path);
+    if (mode == .installed) return try installRootFor(allocator, exe_path);
     return dataDir(allocator, io, mode, exe_path);
 }
 
-/// 启动时的 L3 缓存目录：按运行形态取 dataDir 再拼 `cache/thumbs`。
-/// 拿不到 dataDir（例如 installed 没有 %APPDATA%，dev 没有 LOCALAPPDATA/TEMP）
-/// 返回 null——缓存只是加速层，不值得让启动失败。
+/// 启动时的 L3 缓存目录：installed 为 `<根>\cache\thumbs`，dev/portable 保持原位置。
+/// 路径不可用就返回 null——缓存只是加速层，不值得让启动失败。
 pub fn thumbsCacheDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
-    const data_dir = (try startupDataDir(allocator, io)) orelse return null;
-    defer allocator.free(data_dir);
-    return cacheDirFor(allocator, data_dir);
+    const base = (try startupCacheBaseDir(allocator, io)) orelse return null;
+    defer allocator.free(base);
+    return cacheDirFor(allocator, base);
 }
 
-/// 启动时的字体索引缓存：按运行形态取 dataDir 再拼 `cache/fonts.idx`。
-/// 拿不到 dataDir → null（每次启动重扫，与没有这个功能时一致）。
+/// 启动时的字体索引缓存，与 L3 使用同一个缓存根。
 pub fn fontCachePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
-    const data_dir = (try startupDataDir(allocator, io)) orelse return null;
-    defer allocator.free(data_dir);
-    return fontCachePathFor(allocator, data_dir);
+    const base = (try startupCacheBaseDir(allocator, io)) orelse return null;
+    defer allocator.free(base);
+    return fontCachePathFor(allocator, base);
 }
 
 /// 读进程环境里的两个 appdata 与临时目录。

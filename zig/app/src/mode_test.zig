@@ -31,7 +31,7 @@ test "zig-out 必须是完整路径段" {
     try testing.expect(!mode.hasZigOutSegment("C:\\src\\zig_out\\otto-lite.exe"));
 }
 
-test "数据目录：dev 在 %LOCALAPPDATA%，portable 在 exe 旁边，installed 在 %APPDATA%" {
+test "数据目录：dev 在 LOCALAPPDATA，portable 在 exe 旁，installed 在单根 data" {
     const env = Env{
         .appdata = "C:\\Users\\me\\AppData\\Roaming",
         .local_appdata = "C:\\Users\\me\\AppData\\Local",
@@ -46,9 +46,11 @@ test "数据目录：dev 在 %LOCALAPPDATA%，portable 在 exe 旁边，installe
     defer testing.allocator.free(portable);
     try testing.expectEqualStrings("D:\\tools\\otto\\data", portable);
 
-    const installed = (try mode.dataDirFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", env)).?;
+    const installed = (try mode.dataDirFor(testing.allocator, .installed, "C:\\Users\\me\\AppData\\Local\\Programs\\OTTO\\app\\otto-lite.exe", env)).?;
     defer testing.allocator.free(installed);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO", installed);
+    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\Programs\\OTTO\\data", installed);
+    // 即使 APPDATA 指向旧库，installed 也只能由 exe 所在的新根决定。
+    try testing.expect(std.mem.indexOf(u8, installed, "Roaming") == null);
 }
 
 test "dev 数据目录不在 zig-out 下（编译产物不承载任何运行数据）" {
@@ -109,25 +111,29 @@ test "下载目录：三种形态都在各自的数据目录下，dev 不写 zig
     const installed = (try mode.updatesDirFor(
         testing.allocator,
         .installed,
-        "C:\\Program Files\\OTTO Lite\\otto-lite.exe",
+        "D:\\OTTO\\app\\otto-lite.exe",
         env,
     )).?;
     defer testing.allocator.free(installed);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\updates", installed);
+    try testing.expectEqualStrings("D:\\OTTO\\data\\updates", installed);
 
-    // installed 拿不到 %APPDATA%：null，不猜路径。
-    try testing.expect((try mode.updatesDirFor(
+    // installed 不需要 APPDATA；路径合法时结果完全相同。
+    const without_appdata = (try mode.updatesDirFor(
         testing.allocator,
         .installed,
-        "C:\\Program Files\\OTTO Lite\\otto-lite.exe",
+        "D:\\OTTO\\app\\otto-lite.exe",
         .{},
-    )) == null);
+    )).?;
+    defer testing.allocator.free(without_appdata);
+    try testing.expectEqualStrings(installed, without_appdata);
 }
 
-test "installed 拿不到 %APPDATA% 是显式错误，不落到当前目录" {
+test "installed 不在 app 子目录时是具名错误，绝不回退旧 APPDATA" {
     try testing.expectError(
-        error.AppDataDirUnavailable,
-        mode.dataDirFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", .{}),
+        error.InstallRootUnavailable,
+        mode.dataDirFor(testing.allocator, .installed, "C:\\legacy\\otto-lite.exe", .{
+            .appdata = "C:\\Users\\me\\AppData\\Roaming",
+        }),
     );
 }
 
@@ -140,11 +146,11 @@ test "默认库文件：dev 仍是 fixtures，其余在数据目录下" {
     defer testing.allocator.free(portable);
     try testing.expectEqualStrings("D:\\tools\\otto\\data\\library.json", portable);
 
-    const installed = try mode.libraryPathFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", .{
-        .appdata = "C:\\Users\\me\\AppData\\Roaming",
+    const installed = try mode.libraryPathFor(testing.allocator, .installed, "D:\\OTTO\\app\\otto-lite.exe", .{
+        .appdata = "C:\\legacy-must-not-be-read",
     });
     defer testing.allocator.free(installed);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\library.json", installed);
+    try testing.expectEqualStrings("D:\\OTTO\\data\\library.json", installed);
 }
 
 test "exe 没有目录部分时，portable 的数据目录落在相对 data" {
@@ -180,11 +186,11 @@ test "薄封装：标记只在 exe 同目录时成立" {
     try testing.expect(!mode.markerExists(testing.allocator, testing.io, other_exe));
 }
 
-test "薄封装：installed 的数据目录真的落在 %APPDATA% 下" {
+test "薄封装：installed 的数据目录由 app 的父目录决定" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const dir = (try mode.dataDir(testing.allocator, testing.io, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe")).?;
+    const dir = (try mode.dataDir(testing.allocator, testing.io, .installed, "D:\\OTTO\\app\\otto-lite.exe")).?;
     defer testing.allocator.free(dir);
-    try testing.expect(std.mem.endsWith(u8, dir, mode.installed_dir_name));
+    try testing.expectEqualStrings("D:\\OTTO\\data", dir);
     try testing.expect(std.fs.path.isAbsolute(dir));
 }
 

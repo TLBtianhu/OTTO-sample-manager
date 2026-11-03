@@ -176,12 +176,15 @@ function Invoke-CrashCase([string]$Name, [string]$CaseExe, [string]$LocalBase, [
 $devLocal = Join-Path $work 'dev-local'
 Invoke-CrashCase 'dev' $Exe $devLocal (Join-Path $devLocal 'OTTO\dev\crash.log')
 
-$installedDir = New-Case 'installed' $false
+$installedRoot = Join-Path $work 'installed-root'
+$installedDir = New-Case 'installed-root\app' $false
 $installedLocal = Join-Path $work 'installed-local'
-$installedLog = Join-Path $installedLocal 'OTTO\crash.log'
+$installedLog = Join-Path $installedRoot 'data\crash.log'
 Invoke-CrashCase 'installed' (Join-Path $installedDir 'otto-lite.exe') $installedLocal $installedLog
-Add-Check 'installed never writes program data\crash.log' (
-  -not (Test-Path -LiteralPath (Join-Path $installedDir 'data\crash.log'))) $installedDir
+Add-Check 'installed writes crash.log beside app under root\data' (
+  (Test-Path -LiteralPath $installedLog) -and
+  -not (Test-Path -LiteralPath (Join-Path $installedDir 'data\crash.log')) -and
+  -not (Test-Path -LiteralPath (Join-Path $installedLocal 'OTTO\crash.log'))) $installedLog
 
 $portableDir = New-Case 'portable' $true
 $portableLocal = Join-Path $work 'portable-local'

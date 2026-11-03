@@ -526,35 +526,28 @@ working directory or a path guess:
 | --- | --- | --- |
 | dev | exe path contains a whole `zig-out` segment | none — default library is `fixtures/library.json` |
 | portable | `otto-portable.flag` next to the exe | `<exe dir>\data` |
-| installed | everything else | `%APPDATA%\OTTO` |
+| installed | exe is `<install root>\app\otto-lite.exe` | `<install root>\data`; cache is `<install root>\cache` |
 
 `--version` prints the mode in parentheses and exits 0; it never opens the
 library or a window, so it works on a freshly unpacked portable copy.
 
-### Verifying all three forms in real processes
+### Verifying the installed lifecycle
 
-```
-# from zig/app; from the repo root use zig\verify-distribution.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File ..\verify-distribution.ps1
+```powershell
+# Build two versions with -TestSetupOut, then run the headless lifecycle gate.
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\fresh-user.ps1
 ```
 
-`zig/verify-distribution.ps1` builds the app and runs dev, portable and
-installed for real: `--version` must name the expected form; dev must write no
-user data and keep `fixtures/library.json` read-only; portable must put the
-imported library, settings, cache and update downloads under `<exe>\data`;
-installed must put all of them under the **real** `%APPDATA%\OTTO`, so the test
-proves this machine's `%APPDATA%` works instead of only proving the code reads
-the variable. Each form is started twice so the second process has to read the
-first one's settings and library back. If `%APPDATA%\OTTO` already exists (the
-user is running OTTO), it is moved to a stash under `%TEMP%` before the forms and
-moved back in a `finally`; the script then asserts the restored directory matches
-the pre-test one entry by entry (existence + top-level name/size/mtime) and exits
-1 if it does not. The stash is never deleted while it is the only copy: on
-failure its path is printed. `-Hermetic` switches the installed form back to a
-throw-away `APPDATA` (the table then says `installed(hermetic)`) and leaves the
-real directory in place — that only proves the child honours the variable. Any
-mismatch makes the script exit 1, and the last thing it prints is a three-row
-PASS/FAIL table (`installed(real)` / `installed(hermetic)`).
+`zig/fresh-user.ps1` installs v1 into a throw-away custom root, imports a real
+library, writes settings through the hidden snapshot panel, and creates cache
+sentinels. It then overwrites the root with the newer installer and compares
+relative paths, sizes and SHA-256 for every file: `app` must equal a pristine new
+install, while `data` and `cache` must be byte-for-byte unchanged. The remaining
+cases prove that default `/S` removes only `app`, and that data/cache disappear
+only after an explicit choice. `-FaultDataLoss` simulates a lost settings file
+and must make the preservation check red. The test installers use `OTTO_TEST`,
+so they create no real shortcuts, registry entries, windows or focus changes;
+production uninstallers have no command-line data deletion option.
 
 ### One command: health check
 
@@ -585,7 +578,7 @@ unrelated shell window; the table says so when that happens.
 
 The header's 「设置」 entry opens a card over the list. Three kinds of state live
 in `<data dir>\settings.json` for every form — `%LOCALAPPDATA%\OTTO\dev` (dev),
-`<exe dir>\data` (portable), or `%APPDATA%\OTTO` (installed) — with defaults when
+`<exe dir>\data` (portable), or `<install root>\data` (installed) — with defaults when
 the field is missing. The build output (`zig-out`) never carries run data:
 
 ```json
@@ -756,9 +749,12 @@ artifacts in `zig/dist/`:
 
 - `otto-lite-0.0.1-portable.zip` — `otto-lite.exe`, `otto-thumb-host.exe`,
   `otto-portable.flag`, `README.txt`, `LICENSE`;
-- `otto-lite-0.0.1-setup.exe` — NSIS installer (Chinese + English), installs to
-  `Program Files\OTTO Lite`, writes no data there, keeps `%APPDATA%\OTTO` on
-  uninstall. It is **not** code-signed: SmartScreen will warn on first run.
+- `otto-lite-0.0.1-setup.exe` — NSIS installer (Chinese + English). Its default
+  root is `%LOCALAPPDATA%\Programs\OTTO` (configurable, no administrator rights).
+  It writes only `<root>\app`; settings/library live in `<root>\data` and reusable
+  caches in `<root>\cache`. Overwrite upgrades replace only `app`. Interactive
+  uninstall keeps data/cache unless their checkboxes are selected; `/S` always
+  removes only `app`. It is **not** code-signed: SmartScreen will warn on first run.
 
 Both artifacts ship the thumbnail helper next to the main exe; `otto-lite.exe`
 refuses to start (with a named error) if `otto-thumb-host.exe` is missing, so a
