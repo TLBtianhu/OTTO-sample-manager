@@ -35,7 +35,7 @@ pub const Outcome = struct {
     activate: bool = false,
     /// 空格（列表聚焦时）：当前行是音频就切换播放/停止；不是音频由调用方空操作。
     toggle_play: bool = false,
-    /// 搜索框右侧的固定宽按钮被点了（「导入文件夹」）。按钮的语义不在本文件。
+    /// 搜索框右侧的固定宽按钮被点了（「打开」）。按钮的语义不在本文件。
     trailing_clicked: bool = false,
 };
 

@@ -136,7 +136,7 @@ pub const Options = struct {
     /// `--set-opacity=<0..100>`：验收探针的百分数（见 `opacity_probe.zig`）。
     set_opacity: ?u8 = null,
     /// `--drop-probe=<path>`：隐藏窗口里合成一次文件/文件夹拖入，等导入结束后
-    /// 打印 `drop-probe: done …` 并退出。文件路径用来验收「只接受文件夹」。
+    /// 打印 `drop-probe: done …` 并退出；文件与文件夹分别断言平铺/层级结构。
     drop_probe: ?[]const u8 = null,
     /// `--thumb-bench <dir>`：进程内 vs 隔离 helper 的字节数 / 耗时对照（不开窗）。
     thumb_bench_dir: ?[]const u8 = null,

@@ -2,6 +2,7 @@
 const std = @import("std");
 const core = @import("otto_core");
 const settings_v2 = @import("settings_v2.zig");
+const import_shape = @import("import_shape.zig");
 
 const none = std.math.maxInt(u32);
 pub const RowKind = enum { folder, sample };
@@ -131,6 +132,20 @@ pub const Tree = struct {
     }
 
     fn addSample(self: *Tree, sample: core.model.Sample, sample_index: usize) error{OutOfMemory}!void {
+        // Explicit file batches have no import root: they are root-level sample
+        // rows, not a synthetic parent-folder node. Folder imports never use it.
+        if (import_shape.isFlatFile(sample)) {
+            if (self.seen_paths.contains(sample.file_path)) return;
+            try self.seen_paths.put(self.backing, sample.file_path, {});
+            _ = try self.appendNode(.{
+                .kind = .sample,
+                .name = core.model.baseName(sample.file_path),
+                .path = sample.file_path,
+                .depth = 0,
+                .sample_index = sample_index,
+            });
+            return;
+        }
         const inferred = core.sample_location.fromParent(sample.file_path);
         var root = if (sample.rootPath().len > 0) sample.rootPath() else inferred.root_path;
         if (root.len == 0) root = "(未分组)";
@@ -235,6 +250,14 @@ fn fixtureSample(id: []const u8, path: []const u8, root: []const u8, relative: [
     return result;
 }
 
+fn fixtureFlatSample(id: []const u8, path: []const u8) core.model.Sample {
+    // Model a reloaded flat import: core has backfilled the parent root, while
+    // the app-owned original_id still says this was an explicit file batch.
+    var result = fixtureSample(id, path, "E:/", "free.wav");
+    result.original_id = import_shape.flat_files_id;
+    return result;
+}
+
 test "树：默认只显示导入根，四层中文/长路径/同名文件逐层准确" {
     const long = "很长的目录名称_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const deep = "一层/二层/三层/" ++ long ++ "/同名.wav";
@@ -280,11 +303,12 @@ test "树：默认只显示导入根，四层中文/长路径/同名文件逐层
     try testing.expectEqual(@as(usize, 2), found);
 }
 
-test "树：同一路径被两个导入根覆盖只出现一次，不同目录同名不合并" {
+test "树：同路径去重、不同目录同名不合并，显式文件批次根级平铺" {
     const samples = [_]core.model.Sample{
         fixtureSample("first", "D:/a/same.wav", "D:/a", "same.wav"),
         fixtureSample("covered", "D:/a/same.wav", "D:/a", "same.wav"),
         fixtureSample("other", "D:/b/same.wav", "D:/b", "same.wav"),
+        fixtureFlatSample("flat", "E:/free.wav"),
     };
     var tree = Tree.init(testing.allocator);
     defer tree.deinit();
@@ -295,8 +319,12 @@ test "树：同一路径被两个导入根覆盖只出现一次，不同目录�
     try expanded.set("D:/a", true);
     try expanded.set("D:/b", true);
     try tree.rebuild(&samples);
-    try testing.expectEqual(@as(usize, 4), tree.len()); // 两个根 + 两个不同路径的同名文件。
+    try testing.expectEqual(@as(usize, 5), tree.len()); // 两个根 + 两个不同路径的同名文件 + 一个平铺文件。
     try testing.expect(tree.rowOfSample(0) != null);
     try testing.expect(tree.rowOfSample(1) == null);
     try testing.expect(tree.rowOfSample(2) != null);
+    const flat_row = tree.rowOfSample(3) orelse return error.TestExpectedEqual;
+    try testing.expectEqual(RowKind.sample, tree.rowAt(flat_row).?.kind);
+    try testing.expectEqual(@as(u32, 0), tree.rowAt(flat_row).?.depth);
+    try testing.expectEqualStrings("free.wav", tree.rowAt(flat_row).?.name);
 }

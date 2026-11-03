@@ -1,5 +1,5 @@
-//! 「导入文件夹」的 UI 胶水：文件夹选择 → 工作线程跑 `import_cli.importRun` →
-//! 重读刚保存的库并重建 `Live`。视图只读这里的状态，不碰流水线细节。
+//! 「打开」与拖入的 UI 胶水：文件/文件夹选择 → 工作线程导入 → 重读刚保存的库并重建 `Live`。
+//! 文件走 `import_files.run`，文件夹走 `import_cli.importRun`；视图只读这里的状态。
 //!
 //! ## 状态机
 //!
@@ -36,8 +36,8 @@ const import_target = @import("import_target.zig");
 const library_io = @import("library_io.zig");
 const live_mod = @import("live.zig");
 
-pub const button_label = "导入文件夹";
-pub const button_width: f32 = 92;
+pub const button_label = "打开";
+pub const button_width: f32 = 56;
 
 /// 「已导入 N 个」闪几拍。`tick` 是 150ms 一拍，10 拍 = 1.5 秒（与 Ctrl+C 提示同）。
 pub const done_ticks: u32 = 10;
@@ -133,7 +133,7 @@ pub const Import = struct {
         return self.phase == .importing;
     }
 
-    /// 点击「导入文件夹」：先在 UI 线程上弹模态选择框，取消就什么都不做；
+    /// 「选择文件夹」：先在 UI 线程上弹模态选择框，取消就什么都不做；
     /// 选到目录才起工作线程。`owner` 为空（无头运行）时 `pickForWindow` 不会弹窗。
     pub fn begin(self: *Import, owner: ?*anyopaque) void {
         if (self.phase == .importing) return;
@@ -280,8 +280,9 @@ pub const Import = struct {
         self.show_conversion = false;
         self.done_left = done_ticks;
         std.debug.print(
-            "otto-lite: 导入完成 scanned={d} added={d} skipped_path={d} skipped_identity={d} failed={d} ms={d:.2} reloaded={d}\n",
+            "otto-lite: 导入完成 source={s} scanned={d} added={d} skipped_path={d} skipped_identity={d} failed={d} ms={d:.2} reloaded={d}\n",
             .{
+                @tagName(self.source),
                 report.scanned,
                 report.added,
                 report.skipped_path,
@@ -372,7 +373,7 @@ pub const Import = struct {
         self.fail("拖入失败：{s}；路径：{s}", .{ name, path });
     }
 
-    fn fail(self: *Import, comptime format: []const u8, args: anytype) void {
+    pub fn fail(self: *Import, comptime format: []const u8, args: anytype) void {
         self.phase = .failed;
         self.done_left = 0;
         const text = std.fmt.bufPrint(&self.message, format, args) catch "导入失败";

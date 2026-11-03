@@ -40,6 +40,7 @@
 const std = @import("std");
 const core = @import("otto_core");
 const import_target = @import("import_target.zig");
+const import_shape = @import("import_shape.zig");
 const library_io = @import("library_io.zig");
 const probe_mod = @import("otto_probe");
 const scan_mod = @import("otto_scan");
@@ -352,8 +353,7 @@ pub fn importRun(
     report.skipped_other = scan.counts.skipped_other;
     report.duplicate_scanned = scan.counts.duplicates;
 
-    // 3) 去重 + probe + 合并。单文件拖入也复用这一段；空 scan.root 表示
-    //    每条文件按现有库的最长包含根（没有则父目录）决定归属。
+    // 3) 去重 + probe + 合并。文件批次的空 scan.root 表示根级平铺素材。
     try mergeScan(temp, io, &library, &scan, &report);
 
     // 4) 原子写。
@@ -377,8 +377,7 @@ pub fn importRun(
 }
 
 /// Shared merge half of folder and multi-file imports. A non-empty scan root
-/// preserves the folder tree exactly; an empty root applies the library's
-/// existing longest-root rule, falling back to each file's parent directory.
+/// preserves the folder tree exactly; an empty root marks flat file entries.
 pub fn mergeScan(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -414,11 +413,14 @@ pub fn mergeScan(
             continue;
         };
         const id = try uniqueSampleId(allocator, fact.path, &dedupe);
-        const root = if (scan.root.len > 0)
+        const flat = scan.root.len == 0;
+        const root = if (!flat)
             scan.root
         else
             core.sample_location.inferFromLibrary(fact.path, library.samples).root_path;
-        try incoming.append(allocator, buildSample(fact, metadata, id, imported_at, root));
+        var sample = buildSample(fact, metadata, id, imported_at, root);
+        if (flat) sample.original_id = import_shape.flat_files_id;
+        try incoming.append(allocator, sample);
         try dedupe.accept(allocator, fact, id);
     }
     report.added = try library.appendSamples(incoming.items);

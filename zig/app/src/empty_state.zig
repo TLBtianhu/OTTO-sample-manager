@@ -1,27 +1,26 @@
-//! 空库（首次启动）的空状态：列表区域中间一段说明 + 一枚显眼的「导入文件夹」。
+//! 空库（首次启动）的空状态：列表区域中间一段说明 + 一枚显眼的「打开」。
 //!
 //! 从 `main.zig` 拆出来只为守住单文件行数（与 `list_header.zig` 同一条理由）。
-//! 语义不在本文件：点了按钮返回 true，由 `main` 交给 `import_ui.Import.begin`；
+//! 语义不在本文件：点了按钮返回 true，由 `main` 展开文件/文件夹两个选择入口；
 //! 空的判定也只有一条——库里有几条样本（`sample_count == 0`），与搜索过滤的
 //! "0 命中"不是一回事：过滤掉了所有行时列表照旧是列表，不显示这个空状态。
 //!
-//! 文案里的「把文件夹拖进来」是真的：`drop_ui.zig` 把 nanoui 的
-//! `WM_DROPFILES` 接到同一条 `import_ui.Import.start` 上；拖入文件只会打一行
-//! 「只接受文件夹」，列表不变。
+//! 拖入与「打开」共用导入状态机：文件走 `Import.startFiles`，文件夹走
+//! `Import.start`，分别呈现平铺素材与文件夹节点。
 
 const nanoui = @import("nanoui");
 const import_ui = @import("import_ui.zig");
 const ui = nanoui.ui;
 
 pub const title = "还没有素材";
-pub const description = "点右上角「导入文件夹」开始，或把文件夹拖进来";
+pub const description = "点右上角「打开」开始，或把文件/文件夹拖进来";
 
 /// 空状态用的线图标（Windows/Linux 也有：`ui/icons.zig` 画的是线性图标）。
 const icon_name = "folder";
 
 /// 在列表区域里画空状态；库非空时什么都不画。
 ///
-/// 返回 true = 这一帧点了居中的导入按钮（`main` 负责打开文件夹选择框）。
+/// 返回 true = 这一帧点了居中的「打开」（`main` 展开两个选择入口）。
 /// `busy` 是导入线程在跑：按钮变灰，但版式不变。
 pub fn draw(c: *ui.Context, sample_count: usize, busy: bool) bool {
     if (sample_count != 0) return false;

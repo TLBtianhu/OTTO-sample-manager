@@ -5,6 +5,7 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const import_ui = @import("import_ui.zig");
+const import_shape = @import("import_shape.zig");
 const drop_files = @import("drop_files.zig");
 
 pub const Classification = enum { folder, file, missing };
@@ -25,6 +26,9 @@ pub const Drop = struct {
     seen: bool = false,
     started: bool = false,
     probe_path: ?[]const u8 = null,
+    probe_hwnd: ?*anyopaque = null,
+    probe_injected: bool = false,
+    probe_kind: Classification = .missing,
     first_path: [std.Io.Dir.max_path_bytes]u8 = undefined,
     first_len: usize = 0,
     grace: u32 = 0,
@@ -39,7 +43,18 @@ pub const Drop = struct {
     /// frame's root rectangle, so drops over search/list/preview all arrive.
     pub fn accept(self: *Drop, c: *nanoui.ui.Context, index: u32) void {
         c.acceptDrop(index);
-        if (c.dropAt(index)) |event| self.onUrls(event.urls);
+        if (!self.probe_injected) if (self.probe_path) |path| if (self.probe_hwnd) |hwnd| {
+            self.probe_injected = true;
+            std.debug.print("drop-probe: inject WM_DROPFILES during_frame=true\n", .{});
+            drop_files.send(@ptrCast(hwnd), &.{path}) catch |err| {
+                std.debug.print("drop-probe: 合成拖放失败（{s}）\n", .{@errorName(err)});
+                std.process.exit(1);
+            };
+        };
+        if (c.dropAt(index)) |event| {
+            if (self.probe_path != null) std.debug.print("drop-probe: dropAt urls={d}\n", .{event.urls.len});
+            self.onUrls(event.urls);
+        }
     }
 
     /// Probe installation only: production delivery is accept/dropAt above.
@@ -55,15 +70,17 @@ pub const Drop = struct {
         if (comptime !@hasField(@TypeOf(window.*), "hwnd")) return;
         const hwnd = window.hwnd orelse return;
         self.probe_path = path;
-        drop_files.post(@ptrCast(hwnd), &.{path}) catch |err| {
-            std.debug.print("otto-lite: drop-probe 合成拖放失败（{s}）\n", .{@errorName(err)});
-            std.process.exit(1);
-        };
+        self.probe_hwnd = @ptrCast(hwnd);
+        self.probe_kind = classify(self.io, path);
+        // Force one hidden frame; accept injects synchronously while that frame
+        // is building, exercising the reentrant path real shell delivery can hit.
+        window.redraw();
         self.schedule(0, self, tick);
     }
 
     fn onUrls(self: *Drop, urls: []const []const u8) void {
         self.seen = true;
+        if (self.probe_path != null) std.debug.print("drop-probe: onUrls count={d}\n", .{urls.len});
         var arena: std.heap.ArenaAllocator = .init(self.import.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -162,12 +179,22 @@ pub const Drop = struct {
         const phase = self.import.phase;
         const received = self.first_path[0..self.first_len];
         const matched = if (self.probe_path) |expected| std.mem.eql(u8, received, expected) else false;
+        const samples = self.import.live().samples();
+        const expected_source: import_ui.Source = if (self.probe_kind == .folder) .folder else .files;
+        var structure_ok = self.import.source == expected_source and samples.len > 0;
+        if (structure_ok and self.probe_kind == .folder) {
+            structure_ok = std.mem.eql(u8, samples[0].rootPath(), received);
+        } else if (structure_ok) {
+            for (samples) |sample| {
+                if (!import_shape.isFlatFile(sample)) structure_ok = false;
+            }
+        }
+        const ok = matched and self.started and phase == .done and structure_ok;
         std.debug.print(
-            "drop-probe: done phase={s} samples={d} started={} path={s} match={}\n",
-            .{ @tagName(phase), self.import.live().samples().len, self.started, received, matched },
+            "drop-probe: done phase={s} samples={d} started={} source={s} structure={} path={s} match={}\n",
+            .{ @tagName(phase), samples.len, self.started, @tagName(self.import.source), structure_ok, received, matched },
         );
-        if (self.probe_path != null and !matched) std.process.exit(1);
-        std.process.exit(if (phase == .failed) 1 else 0);
+        std.process.exit(if (ok) 0 else 1);
     }
 
     fn abort(comptime why: []const u8) noreturn {

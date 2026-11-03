@@ -1,5 +1,5 @@
-//! 文件夹选择口岸（Windows）：`IFileOpenDialog` 的"选择文件夹"模式，阻塞在
-//! 调用线程上，返回用户选中的**绝对文件系统路径**（UTF-8）。
+//! 文件/文件夹选择口岸（Windows）：文件夹走 `IFileOpenDialog`，多选文件走
+//! `GetOpenFileNameW`；都返回绝对文件系统路径（UTF-8），并遵守同一无弹窗开关。
 //!
 //! ```
 //! CoInitializeEx(APARTMENTTHREADED)     线程套间（见下）
@@ -65,6 +65,32 @@ const GUID = extern struct {
     Data4: [8]u8,
 };
 
+const OPENFILENAMEW = extern struct {
+    lStructSize: u32 = @sizeOf(OPENFILENAMEW),
+    hwndOwner: ?HWND = null,
+    hInstance: ?*anyopaque = null,
+    lpstrFilter: ?[*:0]const u16 = null,
+    lpstrCustomFilter: ?[*]u16 = null,
+    nMaxCustFilter: u32 = 0,
+    nFilterIndex: u32 = 0,
+    lpstrFile: [*]u16,
+    nMaxFile: u32,
+    lpstrFileTitle: ?[*]u16 = null,
+    nMaxFileTitle: u32 = 0,
+    lpstrInitialDir: ?[*:0]const u16 = null,
+    lpstrTitle: ?[*:0]const u16 = null,
+    Flags: u32 = 0,
+    nFileOffset: u16 = 0,
+    nFileExtension: u16 = 0,
+    lpstrDefExt: ?[*:0]const u16 = null,
+    lCustData: isize = 0,
+    lpfnHook: ?*anyopaque = null,
+    lpTemplateName: ?[*:0]const u16 = null,
+    pvReserved: ?*anyopaque = null,
+    dwReserved: u32 = 0,
+    FlagsEx: u32 = 0,
+};
+
 const COINIT_APARTMENTTHREADED: DWORD = 0x0000_0002;
 const CLSCTX_INPROC_SERVER: DWORD = 0x0000_0001;
 
@@ -83,6 +109,12 @@ const HRESULT_CANCELLED: HRESULT = hr(0x8007_04C7);
 pub const FOS_PICKFOLDERS: DWORD = 0x0000_0020;
 pub const FOS_FORCEFILESYSTEM: DWORD = 0x0000_0040;
 pub const FOS_PATHMUSTEXIST: DWORD = 0x0000_0800;
+
+const OFN_NOCHANGEDIR: DWORD = 0x0000_0008;
+const OFN_ALLOWMULTISELECT: DWORD = 0x0000_0200;
+const OFN_PATHMUSTEXIST: DWORD = 0x0000_0800;
+const OFN_FILEMUSTEXIST: DWORD = 0x0000_1000;
+const OFN_EXPLORER: DWORD = 0x0008_0000;
 
 /// `SIGDN_FILESYSPATH`：要绝对文件系统路径，不要显示名 / URL。
 const SIGDN_FILESYSPATH: DWORD = 0x8005_8000;
@@ -162,6 +194,7 @@ extern "ole32" fn CoCreateInstance(
     out: *?*anyopaque,
 ) callconv(.winapi) HRESULT;
 extern "ole32" fn CoTaskMemFree(memory: ?*anyopaque) callconv(.winapi) void;
+extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(.winapi) i32;
 
 // ---------------------------------------------------------------------------
 // 诊断
@@ -275,6 +308,111 @@ fn pickImpl(allocator: std.mem.Allocator, owner_hwnd: ?*anyopaque) Error![]u8 {
     return wideToUtf8(allocator, wide);
 }
 
+/// Explorer's multi-select open dialog. One selection is a full path; multiple
+/// selections are returned as directory NUL name NUL ... NUL, parsed below.
+pub fn pickFiles(allocator: std.mem.Allocator, owner_hwnd: *anyopaque) Error![][]u8 {
+    return pickFilesForWindow(allocator, owner_hwnd);
+}
+
+pub fn pickFilesForWindow(allocator: std.mem.Allocator, owner_hwnd: ?*anyopaque) Error![][]u8 {
+    last_hresult = S_OK;
+    if (!supported) return error.OleFailure;
+    if (try dialogSuppressed(allocator)) {
+        printFileSuppressed();
+        return error.Cancelled;
+    }
+    const owner: HWND = if (owner_hwnd) |raw| @ptrCast(raw) else {
+        last_hresult = E_UNEXPECTED;
+        return error.OleFailure;
+    };
+    const buffer = try allocator.alloc(u16, 64 * 1024);
+    defer allocator.free(buffer);
+    @memset(buffer, 0);
+    var ofn: OPENFILENAMEW = .{
+        .hwndOwner = owner,
+        .lpstrFile = buffer.ptr,
+        .nMaxFile = @intCast(buffer.len),
+        .lpstrTitle = std.unicode.utf8ToUtf16LeStringLiteral("打开文件（可多选）"),
+        .Flags = fileOptions(),
+    };
+    if (GetOpenFileNameW(&ofn) == 0) return error.Cancelled;
+    return parseFileBuffer(allocator, buffer);
+}
+
+pub fn fileOptions() DWORD {
+    return OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST |
+        OFN_ALLOWMULTISELECT | OFN_NOCHANGEDIR;
+}
+
+pub fn freePaths(allocator: std.mem.Allocator, paths: [][]u8) void {
+    for (paths) |path| allocator.free(path);
+    allocator.free(paths);
+}
+
+fn nextWide(buffer: []const u16, pos: *usize) ?[]const u16 {
+    if (pos.* >= buffer.len) return null;
+    const relative_end = std.mem.indexOfScalar(u16, buffer[pos.*..], 0) orelse return null;
+    const end = pos.* + relative_end;
+    const result = buffer[pos.*..end];
+    pos.* = end + 1;
+    return result;
+}
+
+fn wideSliceToUtf8(allocator: std.mem.Allocator, wide: []const u16) Error![]u8 {
+    if (wide.len == 0) {
+        last_hresult = E_UNEXPECTED;
+        return error.OleFailure;
+    }
+    return std.unicode.wtf16LeToWtf8Alloc(allocator, wide) catch error.OutOfMemory;
+}
+
+/// Pure parser for GetOpenFileNameW's double-NUL buffer, kept separate so the
+/// multi-select contract is tested without displaying a system dialog.
+pub fn parseFileBuffer(allocator: std.mem.Allocator, buffer: []const u16) Error![][]u8 {
+    var pos: usize = 0;
+    const first = nextWide(buffer, &pos) orelse return invalidSelection();
+    if (first.len == 0) return invalidSelection();
+    const second = nextWide(buffer, &pos) orelse return invalidSelection();
+    if (second.len == 0) {
+        const out = try allocator.alloc([]u8, 1);
+        errdefer allocator.free(out);
+        out[0] = try wideSliceToUtf8(allocator, first);
+        return out;
+    }
+
+    const directory = try wideSliceToUtf8(allocator, first);
+    defer allocator.free(directory);
+    var out: std.ArrayList([]u8) = .empty;
+    defer out.deinit(allocator);
+    errdefer for (out.items) |path| allocator.free(path);
+    var name = second;
+    while (true) {
+        if (name.len == 0) return invalidSelection();
+        const name_utf8 = try wideSliceToUtf8(allocator, name);
+        defer allocator.free(name_utf8);
+        const path = try std.fs.path.join(allocator, &.{ directory, name_utf8 });
+        out.append(allocator, path) catch |err| {
+            allocator.free(path);
+            return err;
+        };
+        name = nextWide(buffer, &pos) orelse return invalidSelection();
+        if (name.len == 0) break;
+    }
+    if (out.items.len == 0) return invalidSelection();
+    return out.toOwnedSlice(allocator);
+}
+
+fn invalidSelection() Error {
+    last_hresult = E_UNEXPECTED;
+    return error.OleFailure;
+}
+
+fn printFileSuppressed() void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const line = "otto-lite: file picker suppressed by OTTO_NO_DIALOG=1 -> Cancelled\n";
+    std.Io.File.stdout().writeStreamingAll(io, line) catch {};
+}
+
 /// 三个选项位的组合。单独成函数是为了能纯测位组合（对话框本身不可自动化）。
 pub fn folderOptions() DWORD {
     return FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
@@ -335,6 +473,9 @@ test "文件夹选项：三个位都在，且不误开别的位" {
     // 三项各不相同：组合不是把同一个位或了三次。
     try testing.expect(FOS_PICKFOLDERS != FOS_FORCEFILESYSTEM);
     try testing.expect(FOS_FORCEFILESYSTEM != FOS_PATHMUSTEXIST);
+    try testing.expectEqual(@as(DWORD, 0x0008_1A08), fileOptions());
+    try testing.expect(fileOptions() & OFN_ALLOWMULTISELECT != 0);
+    try testing.expect(fileOptions() & OFN_NOCHANGEDIR != 0);
 }
 
 test "取消码：只有 HRESULT_FROM_WIN32(ERROR_CANCELLED) 算取消" {
@@ -362,6 +503,22 @@ test "宽字符路径转 UTF-8：中文、空格、反斜杠原样保留" {
     defer testing.allocator.free(converted);
     try testing.expectEqualStrings(source, converted);
     try testing.expect(std.mem.indexOfScalar(u8, converted, 0) == null);
+
+    var single_buffer: [256]u16 = @splat(0);
+    @memcpy(single_buffer[0..wide.len], wide);
+    const single = try parseFileBuffer(testing.allocator, &single_buffer);
+    defer freePaths(testing.allocator, single);
+    try testing.expectEqual(@as(usize, 1), single.len);
+    try testing.expectEqualStrings(source, single[0]);
+
+    const multiple_buffer = std.unicode.utf8ToUtf16LeStringLiteral(
+        "C:\\素材\x00Kick 01.wav\x00Snare 02.wav\x00\x00",
+    );
+    const multiple = try parseFileBuffer(testing.allocator, multiple_buffer);
+    defer freePaths(testing.allocator, multiple);
+    try testing.expectEqual(@as(usize, 2), multiple.len);
+    try testing.expectEqualStrings("C:\\素材\\Kick 01.wav", multiple[0]);
+    try testing.expectEqualStrings("C:\\素材\\Snare 02.wav", multiple[1]);
 }
 
 test "宽字符空路径：按失败处理，不返回空切片" {
