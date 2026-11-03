@@ -25,6 +25,7 @@ const Com = extern struct {
 };
 extern "dwrite" fn DWriteCreateFactory(u32, *const Guid, *?*Com) callconv(.winapi) i32;
 extern "user32" fn SystemParametersInfoW(u32, u32, *anyopaque, u32) callconv(.winapi) i32;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 const Rect = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
 const GlyphRun = extern struct {
     face: *Com,
@@ -87,6 +88,8 @@ pub const Cache = struct {
     aliased: bool = false,
     bgr: bool = false,
     clear_level: f32 = 1,
+    /// Experimental A/B switch: whole-pixel pen positions and phase zero.
+    pixel_snap: bool = true,
     fonts: std.AutoHashMapUnmanaged(Key, *Com) = .empty,
     bytes: std.ArrayList(u8) = .empty,
     rgb: std.ArrayList(u8) = .empty,
@@ -150,6 +153,7 @@ pub const Cache = struct {
         self.aliased = smooth == 0 or p.method(7, *const fn (*Com) callconv(.winapi) u32)(p) == 1;
         self.cleartype = !self.aliased and kind == 2 and geometry != 0;
         if (self.aliased) self.blending = .{};
+        if (getenv("NANOUI_TEXT_PIXEL_SNAP")) |v| self.pixel_snap = !std.mem.eql(u8, std.mem.span(v), "0");
         self.factory = f;
         self.loader = l;
     }
@@ -207,6 +211,7 @@ pub const Cache = struct {
 
     pub fn positions(self: *Cache, gpa: std.mem.Allocator, rf: anytype, scale: f32) !u8 {
         const m = self.mode(try self.face(gpa, rf), rf.size, scale);
+        if (self.pixel_snap) return 1;
         if (m.rendering <= 3) return 1;
         if (self.cleartype) return 6;
         return switch (m.rendering) {
