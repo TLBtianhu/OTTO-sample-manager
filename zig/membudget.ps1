@@ -7,7 +7,9 @@
 # What it asserts (exit 1 on any failure):
 #   1. the GDI scroll form's WorkingSet <= 50 MiB   (the charter's resident target);
 #   2. the *effective* thumbnail budget l2 + preview <= 48 MiB
-#      (the charter's "row thumbnails + 256px preview share" cap).
+#   3. PCM/decode residency <= 6 MiB and ten-minute audio peak WS <= 50 MiB.
+#      The audio probe performs 20 open/close cycles and optional play+seek;
+#      full-decode is available as a reverse-proof override and must go red.
 #
 # Both numbers are printed next to their targets, so a green run says what it
 # measured. The budget comes from the app's own `otto-lite: cache budget ...`
@@ -29,6 +31,11 @@ param(
   [int]$Rows = 2000,
   [int]$Frames = 300,
   [int]$L2MiB = 0,
+  [string]$AudioFile = '',
+  [string]$PcmResidency = 'auto',
+  [int]$PcmCycles = 20,
+  [switch]$NoPcmPlay,
+  [string]$Ffmpeg = 'C:\Users\30680\.zcode\workspace\default\music-to-midi\tools\ffmpeg\bin\ffmpeg.exe',
   [switch]$DistinctFiles,
   [string]$Zig = 'C:\Users\30680\zig\zig-x86_64-windows-0.17.0\zig.exe'
 )
@@ -96,6 +103,25 @@ $helper = Join-Path $appDir 'zig-out\bin\otto-thumb-host.exe'
 if (-not (Test-Path $exe)) { throw "missing exe: $exe" }
 if (-not (Test-Path $helper)) { throw "missing helper: $helper (zig build produces both)" }
 
+# A real 48 kHz / stereo / s16 ten-minute FLAC is 109.86 MiB decoded.
+# Generate once and reuse it; the full-decode reverse proof must cross 50 MiB.
+if (-not $AudioFile) {
+  $fixtureDir = Join-Path $env:TEMP 'otto-pcm-budget-fixtures'
+  $AudioFile = Join-Path $fixtureDir '10m.flac'
+  if (-not (Test-Path $AudioFile)) {
+    if (-not (Test-Path $Ffmpeg)) { throw "10-minute audio missing and ffmpeg not found: $Ffmpeg" }
+    New-Item -ItemType Directory -Path $fixtureDir -Force | Out-Null
+    & $Ffmpeg -v error -y -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=600' -ac 2 -c:a flac $AudioFile
+    if ($LASTEXITCODE -ne 0) { throw "failed to generate 10-minute FLAC" }
+  }
+}
+if (-not (Test-Path $AudioFile)) { throw "audio probe file not found: $AudioFile" }
+$audioLibrary = Join-Path $benchRoot 'audio-library.json'
+$audioJsonPath = $AudioFile.Replace('\', '\\')
+$audioExt = [IO.Path]::GetExtension($AudioFile)
+$audioJson = '{"samples":{"audio_0":{"id":"audio_0","fileName":"long-audio","fileExt":"' + $audioExt + '","filePath":"' + $audioJsonPath + '","folderId":"folder_mem","importedAt":1000,"duration":600}},"groups":{"g_mem":{"id":"g_mem","name":"mem"}}}'
+[System.IO.File]::WriteAllText($audioLibrary, $audioJson)
+
 $argv = @('--bench-scroll', $library, "--frames=$Frames", '--scroll-notches=1')
 if ($L2MiB -gt 0) { $argv += "--l2-budget-mib=$L2MiB" }
 Write-Output ("== run: otto-lite {0} ==" -f ($argv -join ' '))
@@ -123,6 +149,53 @@ $l2Used = $null; $previewUsed = $null
 $m = [regex]::Match(($output -join "`n"), 'mem-item .*?l2_thumbs=([0-9.]+) preview256=([0-9.]+)')
 if ($m.Success) { $l2Used = [double]$m.Groups[1].Value; $previewUsed = [double]$m.Groups[2].Value }
 
+# PCM is a separate hard account. PeakWorkingSetSize is read inside the probe,
+# so releasing PCM cannot make an earlier over-budget decode look green.
+$audioArgv = @('--pcm-probe', $AudioFile, "--pcm-cycles=$PcmCycles", "--pcm-residency=$PcmResidency")
+if (-not $NoPcmPlay) { $audioArgv += '--pcm-play' }
+Write-Output ("== run: otto-lite {0} ==" -f ($audioArgv -join ' '))
+$audioOutput = @(& $exe @audioArgv 2>&1 | ForEach-Object {
+    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+  })
+$audioCode = $LASTEXITCODE
+$audioOutput | Where-Object { $_ -match '^pcm-probe: (summary|phase=playing)' } | ForEach-Object { Write-Output $_ }
+$audioText = $audioOutput -join "`n"
+$pcmSummary = [regex]::Match($audioText, 'pcm-probe: summary ')
+$pcmMode = ''; $pcmWave = $null; $pcmPlayUsed = $null; $pcmCap = $null; $pcmPeak = $null
+$m = [regex]::Match($audioText, 'mode=([^ ]+)')
+if ($m.Success) { $pcmMode = $m.Groups[1].Value }
+$m = [regex]::Match($audioText, 'wave_resident_max=(\d+)')
+if ($m.Success) { $pcmWave = [double]$m.Groups[1].Value }
+$m = [regex]::Match($audioText, 'play_resident_max=(\d+)')
+if ($m.Success) { $pcmPlayUsed = [double]$m.Groups[1].Value }
+$m = [regex]::Match($audioText, 'pcm_budget=(\d+)')
+if ($m.Success) { $pcmCap = [double]$m.Groups[1].Value }
+$m = [regex]::Match($audioText, 'pcm-probe: summary .*peak_ws_mib=([0-9.]+)')
+if ($m.Success) { $pcmPeak = [double]$m.Groups[1].Value }
+$pcmHeadlessPeak = $pcmPeak
+
+# Same lifecycle in the real (hidden, non-activating) preview panel + HWND.
+$uiArgv = @($audioLibrary, '--pcm-ui-probe', '--nanoui-hidden', "--pcm-cycles=$PcmCycles", "--pcm-residency=$PcmResidency")
+if (-not $NoPcmPlay) { $uiArgv += '--pcm-play' }
+Write-Output ("== run: otto-lite {0} ==" -f ($uiArgv -join ' '))
+$uiOutput = @(& $exe @uiArgv 2>&1 | ForEach-Object {
+    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+  })
+$audioUiCode = $LASTEXITCODE
+$uiOutput | Where-Object { $_ -match '^pcm-ui-probe: summary ' } | ForEach-Object { Write-Output $_ }
+$uiText = $uiOutput -join "`n"
+$pcmPeak = $null
+$m = [regex]::Match($uiText, 'pcm-ui-probe: summary .*peak_ws_mib=([0-9.]+)')
+if ($m.Success) { $pcmPeak = [double]$m.Groups[1].Value }
+$pcmUiSummary = [regex]::Match($uiText, 'pcm-ui-probe: summary ')
+$pcmUsed = if (($null -ne $pcmWave) -and ($null -ne $pcmPlayUsed)) { [math]::Max($pcmWave, $pcmPlayUsed) } else { $null }
+$pcmKnown = ($null -ne $pcmUsed) -and ($null -ne $pcmCap) -and ($null -ne $pcmPeak) -and $pcmSummary.Success -and $pcmUiSummary.Success
+$pcmOk = $pcmKnown -and ($pcmUsed -le $pcmCap)
+$pcmPeakOk = $pcmKnown -and ($pcmPeak -le 50.0) -and ($null -ne $pcmHeadlessPeak) -and ($pcmHeadlessPeak -le 50.0)
+# Auto must name a real downgrade for this over-budget full decode, not silently keep it.
+$pcmModeOk = $pcmKnown -and (($PcmResidency -ne 'auto') -or ($pcmMode -ne 'full-decode'))
+$pcmRunOk = ($audioCode -eq 0) -and ($audioUiCode -eq 0) -and $pcmKnown
+
 $targetWs = 50.0
 $targetCombined = 48
 $wsOk = ($null -ne $ws) -and ($ws -le $targetWs)
@@ -143,6 +216,12 @@ Write-Output '== membudget: assert the charter numbers =='
 Write-Output ("  ws       {0,7} MiB  target <= {1:N0} MiB   {2}" -f $wsText, $targetWs, $(if ($wsOk) { 'PASS' } else { 'FAIL' }))
 Write-Output ("  ws-no-L2 {0,7} MiB  (charter table: minus l2+preview; diagnostic)" -f $wsNoL2Text)
 Write-Output ("  budget   {0,7} MiB  target <= {1} MiB   {2}" -f $budgetText, $targetCombined, $(if ($budgetOk) { 'PASS' } else { 'FAIL' }))
+$pcmText = if ($null -eq $pcmUsed) { 'n/a' } else { '{0:N2}/{1:N0}' -f ($pcmUsed / 1MB), ($pcmCap / 1MB) }
+$pcmPeakText = if ($null -eq $pcmPeak) { 'n/a' } else { '{0:N2}' -f $pcmPeak }
+Write-Output ("  pcm      {0,7} MiB  mode={1}   {2}" -f $pcmText, $(if ($pcmMode) { $pcmMode } else { 'n/a' }), $(if ($pcmOk -and $pcmModeOk) { 'PASS' } else { 'FAIL' }))
+Write-Output ("  pcm-peak {0,7} MiB  target <= 50 MiB (real hidden HWND peak)   {1}" -f $pcmPeakText, $(if ($pcmPeakOk) { 'PASS' } else { 'FAIL' }))
+$pcmHeadlessText = if ($null -eq $pcmHeadlessPeak) { 'n/a' } else { '{0:N2}' -f $pcmHeadlessPeak }
+Write-Output ("  pcm-headless {0} MiB  (decoder-only peak; diagnostic)" -f $pcmHeadlessText)
 Write-Output ("  rows     {0} rows   row data {1}/row   (charter: 50000 x bytes/row)" -f $Rows, $rowText)
 if ($null -ne $bpr) {
   Write-Output ("  projection 50000 rows x {0:N1} B = {1:N2} MiB of row data" -f $bpr, (50000.0 * $bpr / 1048576.0))
@@ -152,12 +231,16 @@ if (-not $summaryOk) {
   Write-Output ("== membudget: FAIL (no scroll summary; exit {0}) ==" -f $code)
   exit 1
 }
-if ($wsOk -and $budgetOk) {
-  Write-Output ("== membudget: PASS ws={0:N2}/{1:N0} MiB budget={2}/{3} MiB ==" -f $ws, $targetWs, $budgetText, $targetCombined)
+if ($wsOk -and $budgetOk -and $pcmOk -and $pcmPeakOk -and $pcmModeOk -and $pcmRunOk) {
+  Write-Output ("== membudget: PASS ws={0:N2}/{1:N0} MiB budget={2}/{3} MiB pcm={4} MiB pcm-peak={5:N2}/50 MiB ==" -f $ws, $targetWs, $budgetText, $targetCombined, $pcmText, $pcmPeak)
   exit 0
 }
 $why = @()
 if (-not $wsOk) { $why += ('ws {0} > {1}' -f $wsText, $targetWs) }
 if (-not $budgetOk) { $why += ('l2+preview {0} > {1}' -f $budgetText, $targetCombined) }
+if (-not $pcmOk) { $why += ('pcm/decode {0} MiB exceeds independent budget' -f $pcmText) }
+if (-not $pcmPeakOk) { $why += ('long-audio peak {0} > 50 MiB' -f $pcmPeakText) }
+if (-not $pcmModeOk) { $why += ('long audio stayed full-decode instead of named downgrade') }
+if (-not $pcmRunOk) { $why += ('pcm probe failed or missing summary (exit {0})' -f $audioCode) }
 Write-Output ("== membudget: FAIL ({0}) ==" -f ($why -join '; '))
 exit 1

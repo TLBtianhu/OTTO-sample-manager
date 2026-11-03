@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const player = @import("player.zig");
+const pcm_source = @import("pcm_source.zig");
 
 /// 反向证明开关。改为 false：普通预览在 build、渐进预览在 finish 恢复建 Player。
 pub const enabled = true;
@@ -17,13 +18,29 @@ pub const CreateFn = *const fn (
     u16,
     u16,
     bool,
+    ?*pcm_source.Source,
+    u64,
 ) player.Error!*player.Player;
+
+fn createDefault(
+    allocator: std.mem.Allocator,
+    pcm: []const u8,
+    sample_rate: u32,
+    channels: u16,
+    bits: u16,
+    float: bool,
+    source: ?*pcm_source.Source,
+    total_frames: u64,
+) player.Error!*player.Player {
+    if (source) |value| return player.Player.createSource(allocator, value, sample_rate, channels, bits, total_frames);
+    return player.Player.create(allocator, pcm, sample_rate, channels, bits, float);
+}
 
 pub const State = enum(u8) { idle, starting, ready, failed };
 
 pub const Lazy = struct {
     allocator: ?std.mem.Allocator = null,
-    factory: CreateFn = player.Player.create,
+    factory: CreateFn = createDefault,
     state: State = .idle,
     failure: ?player.Error = null,
     starter: ?*Starter = null,
@@ -36,12 +53,14 @@ pub const Lazy = struct {
         channels: u16,
         bits: u16,
         float: bool,
+        source: ?*pcm_source.Source,
+        total_frames: u64,
     ) player.Error!*player.Player {
         const allocator = self.allocator orelse return error.OutOfMemory;
         self.state = .starting;
         self.failure = null;
         self.cancelled = false;
-        const created = self.factory(allocator, pcm, sample_rate, channels, bits, float) catch |err| {
+        const created = self.factory(allocator, pcm, sample_rate, channels, bits, float, source, total_frames) catch |err| {
             self.fail(err);
             return err;
         };
@@ -56,6 +75,8 @@ pub const Lazy = struct {
         channels: u16,
         bits: u16,
         float: bool,
+        source: ?*pcm_source.Source,
+        total_frames: u64,
     ) player.Error!void {
         if (self.starter != null) {
             self.cancelled = false;
@@ -73,6 +94,8 @@ pub const Lazy = struct {
             channels,
             bits,
             float,
+            source,
+            total_frames,
         ) catch |err| {
             self.fail(err);
             return err;
@@ -119,6 +142,8 @@ const Starter = struct {
     channels: u16,
     bits: u16,
     float: bool,
+    source: ?*pcm_source.Source,
+    total_frames: u64,
     thread: std.Thread = undefined,
     done: std.atomic.Value(bool) = .init(false),
     created: ?*player.Player = null,
@@ -132,6 +157,8 @@ const Starter = struct {
         channels: u16,
         bits: u16,
         float: bool,
+        source: ?*pcm_source.Source,
+        total_frames: u64,
     ) player.Error!*Starter {
         const self = try allocator.create(Starter);
         self.* = .{
@@ -142,6 +169,8 @@ const Starter = struct {
             .channels = channels,
             .bits = bits,
             .float = float,
+            .source = source,
+            .total_frames = total_frames,
         };
         self.thread = std.Thread.spawn(.{}, threadMain, .{self}) catch {
             allocator.destroy(self);
@@ -158,6 +187,8 @@ const Starter = struct {
             self.channels,
             self.bits,
             self.float,
+            self.source,
+            self.total_frames,
         ) catch |err| {
             self.failure = err;
             self.done.store(true, .release);

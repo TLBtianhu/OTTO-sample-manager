@@ -107,6 +107,7 @@ test {
     _ = @import("audio/waveform.zig");
     // 渐进式预览：真文件上"逐桶相等 / 取消 / 总帧数未知不假装渐进"。
     _ = @import("audio/progressive_test.zig");
+    _ = @import("audio/pcm_source_test.zig");
     // 连续切换 10 个文件：generation、取消、旧结果不覆盖、无泄漏。
     _ = @import("preview_switch_test.zig");
     // 解码层：zig-audio 的 WAV 全变体 / AIFF / 老编码，以及四态映射。

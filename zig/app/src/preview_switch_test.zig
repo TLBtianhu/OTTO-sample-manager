@@ -131,11 +131,13 @@ test "连续切换 10 个文件：最后一个赢、旧结果不覆盖、无泄�
     try testing.expectEqual(@as(u64, 10), panel.active_generation);
     try testing.expectEqual(panel.active_generation, panel.current_generation);
 
-    // 内容断言：viper.mp3 的时长/字节数是这一组里唯一的（40.933 s / 7,220,736 B）。
+    // 内容断言：viper.mp3 为 40.933 s / 7,220,736 B；长文件由有界源交付。
     switch (panel.current.?) {
         .audio => |session| {
             try testing.expectEqual(@as(u64, 40_933), session.duration_ms);
-            try testing.expectEqual(@as(usize, 7_220_736), session.pcm.len);
+            try testing.expectEqual(@as(u64, 7_220_736), session.total_frames * @as(u64, session.channels) * 2);
+            try testing.expect(session.source != null);
+            try testing.expect(session.pcmBytes() <= 2 * 1024 * 1024 + 4096);
             try testing.expectEqual(@as(u32, 240), session.waveform_version);
             // 打开/补全只交付 PCM 与波形；第一次播放之前不碰 WASAPI。
             try testing.expect(session.player == null);

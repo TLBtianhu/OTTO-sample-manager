@@ -13,6 +13,7 @@ const std = @import("std");
 const usage = @import("usage.zig");
 const options_parse = @import("options_parse.zig");
 const browse_types = @import("browse_types.zig");
+const residency = @import("audio/residency.zig");
 
 /// `--convert <in.json> <out.otto>` 的两个位置值。用 struct 而不是两个可选字段，
 /// 避免"有输入没输出"这种只可能来自解析 bug 的中间状态。
@@ -36,6 +37,13 @@ pub const Options = struct {
     preview_path: ?[]const u8 = null,
     /// `--play-test <file>`：解码 + 真播放 300ms + 断言位置前进，不开窗口。
     play_test_path: ?[]const u8 = null,
+    /// `--pcm-probe <file>`：20 次预览生命周期的 PCM/峰值测量。
+    pcm_probe_path: ?[]const u8 = null,
+    pcm_residency: residency.Mode = .auto,
+    pcm_cycles: u32 = 20,
+    pcm_play: bool = false,
+    /// 真实隐藏 HWND 中的 PCM 生命周期探针（不属于 headless 命令）。
+    pcm_ui_probe: bool = false,
     /// `--seek-at <ms>`：给 `--play-test` 用——播 200ms 后跳到这个位置，
     /// 断言位置在新位置附近并继续播到结束。单独给没有意义（只有 play-test 读它）。
     seek_at_ms: ?u64 = null,
@@ -195,6 +203,7 @@ pub const Options = struct {
             self.demo_dir != null or
             self.demo_rescan_dir != null or
             self.preview_path != null or
+            self.pcm_probe_path != null or
             self.play_test_path != null or
             self.filter != null or
             self.filter_ext != null or

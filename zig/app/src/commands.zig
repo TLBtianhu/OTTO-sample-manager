@@ -33,12 +33,15 @@ const transport_mod = @import("transport.zig");
 const update_cli = @import("update_cli.zig");
 const update_download = @import("update_download.zig");
 const version_mod = @import("version.zig");
+const pcm_probe = @import("pcm_probe.zig");
+const residency = @import("audio/residency.zig");
 
 pub fn run(
     init: std.process.Init,
     allocator: std.mem.Allocator,
     options: options_mod.Options,
 ) !?u8 {
+    residency.setOverride(options.pcm_residency);
     // 无窗口命令的**统一收尾**：缩略图 helper 是进程级单例，`helper_path` 的
     // 副本由 `thumb_host_win.startLocked` 分配，只有 `thumb_host.deinit()` 会释放。
     // GUI 在 `thumbs.deinit()` 里做同一件事；CLI 没有那一层，必须在这里收尾——
@@ -120,6 +123,9 @@ pub fn run(
     if (options.preview_path) |path| {
         return try demo_preview.run(init, init.gpa, path, options.no_shell_preview, !options.no_isolation);
     }
+
+    // PCM 驻留探针：同一进程反复开关，量峰值而不只看释放后的当前值。
+    if (options.pcm_probe_path) |path| return try pcm_probe.run(init, init.gpa, path, options.pcm_cycles, options.pcm_play);
 
     // 音频试听自检：真解码、真播放、真 sleep；没有端点时以 0 退出。
     if (options.play_test_path) |path| return try demo_play.run(init, init.gpa, path, options.seek_at_ms);

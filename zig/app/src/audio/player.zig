@@ -42,6 +42,7 @@
 const std = @import("std");
 const win = @import("win32.zig");
 const wasapi = @import("wasapi.zig");
+const pcm_source = @import("pcm_source.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -98,6 +99,8 @@ pub const Player = struct {
     allocator: std.mem.Allocator,
     /// 借用：归 AudioSession，Player 不释放。
     pcm: []const u8,
+    /// 非 null 时按帧从有界源读取；仍由 AudioSession 持有并晚于 Player 释放。
+    source: ?*pcm_source.Source = null,
     sample_rate: u32,
     channels: u16,
     bits: u16,
@@ -134,24 +137,50 @@ pub const Player = struct {
         bits: u16,
         float: bool,
     ) Error!*Player {
+        return createInternal(allocator, pcm, sample_rate, channels, bits, float, null, 0);
+    }
+
+    pub fn createSource(
+        allocator: std.mem.Allocator,
+        source: *pcm_source.Source,
+        sample_rate: u32,
+        channels: u16,
+        bits: u16,
+        total_frames: u64,
+    ) Error!*Player {
+        return createInternal(allocator, &.{}, sample_rate, channels, bits, false, source, total_frames);
+    }
+
+    fn createInternal(
+        allocator: std.mem.Allocator,
+        pcm: []const u8,
+        sample_rate: u32,
+        channels: u16,
+        bits: u16,
+        float: bool,
+        source: ?*pcm_source.Source,
+        source_frames: u64,
+    ) Error!*Player {
         if (!win.supported) return error.Unsupported;
         if (sample_rate == 0 or channels == 0 or channels > 2) return error.InvalidFormat;
         if (bits == 0 or bits > 32 or bits % 8 != 0) return error.InvalidFormat;
         if (float and bits != 32) return error.InvalidFormat;
 
         const block_align: u32 = @as(u32, channels) * (bits / 8);
-        if (pcm.len == 0 or pcm.len % @as(usize, block_align) != 0) return error.InvalidFormat;
+        if (source == null and (pcm.len == 0 or pcm.len % @as(usize, block_align) != 0)) return error.InvalidFormat;
+        if (source != null and source_frames == 0) return error.InvalidFormat;
 
         const self = try allocator.create(Player);
         errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .pcm = pcm,
+            .source = source,
             .sample_rate = sample_rate,
             .channels = channels,
             .bits = bits,
             .block_align = block_align,
-            .total_frames = pcm.len / @as(usize, block_align),
+            .total_frames = if (source != null) source_frames else pcm.len / @as(usize, block_align),
             .float = float,
         };
 
@@ -434,11 +463,22 @@ pub const Player = struct {
         const remaining = if (playback.cursor < self.total_frames) self.total_frames - playback.cursor else 0;
         const real: u32 = @intCast(@min(@as(u64, available), remaining));
         const real_bytes: usize = @as(usize, real) * self.block_align;
-        if (real_bytes > 0) {
-            const source: usize = @intCast(playback.cursor * self.block_align);
-            @memcpy(data[0..real_bytes], self.pcm[source..][0..real_bytes]);
-        }
         const queued_bytes: usize = @as(usize, available) * self.block_align;
+        if (real_bytes > 0) {
+            if (self.source) |source| {
+                source.read(playback.cursor, data[0..real_bytes]) catch |err| {
+                    std.debug.print("otto-lite: PCM 读取失败 error={s} frame={d}\n", .{ @errorName(err), playback.cursor });
+                    @memset(data[0..queued_bytes], 0);
+                    render.releaseBuffer(available);
+                    playback.running = false;
+                    self.playing.store(false, .release);
+                    return;
+                };
+            } else {
+                const source: usize = @intCast(playback.cursor * self.block_align);
+                @memcpy(data[0..real_bytes], self.pcm[source..][0..real_bytes]);
+            }
+        }
         if (real_bytes < queued_bytes) @memset(data[real_bytes..queued_bytes], 0);
         render.releaseBuffer(available);
 

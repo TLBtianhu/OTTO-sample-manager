@@ -360,6 +360,8 @@ fn noEndpoint(
     _: u16,
     _: u16,
     _: bool,
+    _: ?*@import("audio/pcm_source.zig").Source,
+    _: u64,
 ) player.Error!*player.Player {
     return error.NoAudioEndpoint;
 }
@@ -373,8 +375,13 @@ fn realPlayer(
     channels: u16,
     bits: u16,
     float: bool,
+    source: ?*@import("audio/pcm_source.zig").Source,
+    total_frames: u64,
 ) player.Error!*player.Player {
-    const created = try player.Player.create(allocator, pcm, sample_rate, channels, bits, float);
+    const created = if (source) |value|
+        try player.Player.createSource(allocator, value, sample_rate, channels, bits, total_frames)
+    else
+        try player.Player.create(allocator, pcm, sample_rate, channels, bits, float);
     real_players_created += 1;
     return created;
 }
@@ -432,12 +439,12 @@ test "AudioSession.seek：没有播放设备时也钳位并记住位置（下次
             try lazy_session.startPlayback();
             try testing.expect(lazy_session.isStartingAudio());
             if (index == 3) {
-                var spins: usize = 0;
-                while (lazy_session.isStartingAudio() and spins < 1000) : (spins += 1) {
+                var waits: usize = 0;
+                while (lazy_session.isStartingAudio() and waits < 2000) : (waits += 1) {
                     _ = lazy_session.pump();
-                    std.Thread.yield() catch {};
+                    std.Io.sleep(testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
                 }
-                try testing.expect(spins < 1000);
+                try testing.expect(waits < 2000);
                 try testing.expectEqual(error.NoAudioEndpoint, lazy_session.audioError().?);
             }
             // 其它奇数轮在创建途中直接 deinit：join worker，不能漏 Starter/Player。

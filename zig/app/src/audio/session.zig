@@ -94,6 +94,7 @@ pub fn build(
         .duration_ms = decoded.duration_ms,
         .position_ms = 0,
         .player = created,
+        .total_frames = decoded.frames,
         .lazy = .{ .allocator = allocator, .state = if (created != null) .ready else .idle },
         .peaks = peaks,
         .waveform = bitmap,

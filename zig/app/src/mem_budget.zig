@@ -1,9 +1,6 @@
-//! 缩略图内存预算的**唯一政策出处**：宪章「行内缩略图 + 256px 预览共享 ≤ 48 MiB」。
-//!
-//! 为什么要有这个文件：预算上限原先散在三处（`thumbs_types` 的默认值、
-//! `settings_store.max_budget_mib`、`settings_ui.parseBudget`），三处都能改，
-//! 于是设置面板能把 L2 拉到 1024 MiB、预览再按 1/4 分到 256 MiB，合计 1.25 GiB——
-//! 宪章那条 48 MiB 没有任何一行代码在检查。现在三处都从这里读。
+//! 驻留内存预算的唯一政策出处：L2、256px 预览，以及 PCM/解码缓冲。
+//! 图像两项合计 ≤48 MiB；PCM 独立 ≤6 MiB，长音频按峰值判，不看释放后的当前值。
+//! 设置与验收脚本都从这里取上限，不能把预算越线藏进未命名进程残差。
 //!
 //! 口径（与宪章一致）：
 //!   * L2（行内 64px 缩略图）≤ 32 MiB；
@@ -23,6 +20,24 @@ pub const max_preview_mib: usize = 16;
 
 pub const default_l2_mib: usize = 32;
 pub const default_preview_mib: usize = 16;
+
+/// PCM/解码缓冲是独立一项，不再藏进“预览”或进程残差。
+/// 真实窗口基线最差 42.57 MiB，6 MiB 给 50 MiB 总峰值留下安全余量。
+pub const pcm_max_bytes: usize = 6 * 1024 * 1024;
+pub const full_decode_max_bytes: usize = 2 * 1024 * 1024;
+pub const bounded_window_bytes: usize = 2 * 1024 * 1024;
+pub const streaming_pcm_bytes: usize = 64 * 1024;
+pub const waveform_only_min_bytes: u64 = 64 * 1024 * 1024;
+
+pub const Budget = struct { l2: usize, preview: usize, pcm: usize };
+
+pub fn snapshot(l2_mib: usize, pcm_bytes: usize) Budget {
+    return .{ .l2 = l2Bytes(l2_mib), .preview = l2Bytes(previewMib(l2_mib)), .pcm = pcm_bytes };
+}
+
+pub fn pcmWithinBudget(pcm_bytes: usize) bool {
+    return pcm_bytes <= pcm_max_bytes;
+}
 
 /// 预览一档按 L2 的一半分，夹在 4–16 MiB：一张 256×256 是 16 张 64×64 的重量，
 /// 分开计量才不会把整屏行内图挤出去。
@@ -61,6 +76,17 @@ test "夹取点：32 以内原样，超过 32 一律 32" {
     try std.testing.expect(!wasClamped(32));
     try std.testing.expect(wasClamped(128));
     try std.testing.expect(combinedMib(clampL2Mib(1024)) <= combined_max_mib);
+}
+
+test "PCM 独立预算：6 MiB 越线会红，超长档所需窗口在内" {
+    try expectPcmBudget(pcm_max_bytes, true);
+    try expectPcmBudget(pcm_max_bytes + 1, false);
+    try expectPcmBudget(bounded_window_bytes + streaming_pcm_bytes + 64 * 1024, true);
+    try std.testing.expectEqual(@as(usize, 6 * 1024 * 1024), snapshot(32, pcm_max_bytes).pcm);
+}
+
+fn expectPcmBudget(bytes: usize, expected: bool) !void {
+    try std.testing.expectEqual(expected, pcmWithinBudget(bytes));
 }
 
 test "小预算的预览不低于 4 MiB，但合计仍在上限内" {
