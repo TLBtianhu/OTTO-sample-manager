@@ -1,1552 +1,326 @@
-﻿# 全新用户测试：一个人第一次拿到 OTTO Lite，从"下载"到"卸载"再到"更新"，全程在临时目录里。
-#
-#   powershell -NoProfile -ExecutionPolicy Bypass -File zig\fresh-user.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File zig\fresh-user.ps1 -KeepTemp
-#   powershell -NoProfile -ExecutionPolicy Bypass -File zig\fresh-user.ps1 -Version 0.31.0
-#   powershell -NoProfile -ExecutionPolicy Bypass -File zig\fresh-user.ps1 -FaultDataLoss   # 反向对照
-#
-# 它模拟的不是"开发者顺手点一下"，而是一台从没见过这个项目的机器上的十步，
-# 外加第 11 步收尾核对（进程 / 环境变量 / 临时目录 / 真实用户目录，全部具名断言）：
-#
-#   1. 造全新目录        downloads / program / appdata / localappdata（都在 %TEMP%\otto-fresh-*）
-#   2. "下载"并验签      从 zig\dist 拷 setup.exe 到 downloads，用 zig\keys 的公钥验 minisign
-#   3. 静默安装          NSIS /S + /D=（不带引号、放最后、路径不含空格）
-#   4. 首次启动          --version 必须说 (installed) 且退出码 0
-#   5. 首次真实启动      隐藏窗口的设置面板 → %APPDATA%\OTTO 被创建（settings.json 等）
-#   6. 导入素材          --import（显式落盘）与 --import-into（按形态落盘）都要出 library.otto
-#   7. 静默卸载          程序消失；%APPDATA%\OTTO 逐个文件、逐个字节保留
-#   8. 装另一个版本      旧版本装上后，同一份用户数据照旧被沿用
-#   9. 覆盖式升级        同一个 program 目录上直接盖新版本：应用层换掉、数据层逐字节不动、
-#                        便携副本逐字节不动、回滚副本策略写成断言。第 7/8 步都是"先卸再装"，
-#                        这条路是"不卸载直接更新"——用户真的点更新时走的那条
-#  10. 编译产物零污染    zig-out\bin 全程零变化（三个文件的名字 / 大小 / 哈希）
-#
-# 第 9 步必须能被**故意弄红**：`-FaultDataLoss` 在覆盖安装之前把 library.otto 改名，
-# 数据层断言必须报红并 exit 1。它证明那几条断言真的在比对文件身份（名字 + 大小 +
-# SHA-256），而不是数据在不在都返回 PASS；去掉开关重跑必须绿。
-#
-# 为什么这件事必须是一条脚本，而不是一次手动验收：
-#
-#   手动验收只证明"这一次、这台机器、这个目录"能用。它没有可重跑的成本下限，也没有
-#   失败时的定位信息；更要紧的是，它无法证明"没碰真实用户目录"——手动验收最多是
-#   "我记得我没装到 Program Files"。这条脚本把"全新用户"做成一个**可重复的**声明：
-#   每次跑都从一个空目录开始，每次都断言 %APPDATA% / Program Files / zig-out 里的东西
-#   没被动过。一条会失败的断言，胜过一段"我验过了"的说明。
-#
-# 硬约束（都写成了代码，而不是注释里的愿望）：
-#
-#   * 不碰真实的 %APPDATA% / %LOCALAPPDATA% / Program Files：每个子进程都显式带
-#     APPDATA / LOCALAPPDATA / TEMP / TMP 覆盖（ProcessStartInfo.EnvironmentVariables），
-#     父进程的环境变量一次都不改；
-#   * 不弹窗：所有子进程 UseShellExecute=$false + CreateNoWindow=$true + 重定向两个流
-#     （CONVENTIONS 第 2 条）；会建窗口的那一步走 --nanoui-snapshot（隐藏 HWND）；
-#   * 退出前不留进程、不留临时目录（finally 里做，失败也做）；收尾的每一条
-#     也是具名断言（第 11 步，带超时轮询），失败会指名，而不是只剩一个 exit 1；
-#   * 失败即 exit 1：任何一条断言红了，整个脚本红。
-#
-# 安装为什么要 __COMPAT_LAYER：
-#
-#   installer.nsi 是 RequestExecutionLevel admin（它要写 HKLM 与全用户快捷方式）。
-#   从非提权会话用 CreateProcess 起它，Windows 直接返回 740（要求提升），**不会**弹
-#   UAC——CreateProcess 从不提示，只有 ShellExecute 会。脚本据此分两条路：
-#     * 提权会话：NSIS 原样跑，注册表 + 快捷方式一起断言（安装后存在、卸载后消失）；
-#     * 非提权会话：只给安装/卸载这两个 NSIS 进程加 __COMPAT_LAYER=RunAsInvoker，让清单里的 administrator
-#       降级为"当前用户"运行。程序文件照常装进临时 program\（这是本步要验的），
-#       两条需要管理员的写入（HKLM、$DESKTOP）被 /S 静默跳过。**这不是泄漏**：
-#       本机真实 Program Files 与注册表一个字节都不会被写。
-#
-# 本文件是 UTF-8 **带 BOM**：Windows PowerShell 5.1 把无 BOM 的 .ps1 当 ANSI 读，
-# 中文会被读坏（`click:设置` 这类参数会变成乱码，点不到按钮）。
-
+# OTTO 单根目录生命周期验收。只运行 OTTO_TEST 构建：不写真实注册表/快捷方式，不弹窗。
+# 正常：pwsh zig/fresh-user.ps1
+# 反向：pwsh zig/fresh-user.ps1 -FaultDataLoss（必须 exit 1，且数据保留断言为红）
 [CmdletBinding()]
 param(
   [string]$DistDir = '',
-  [string]$Samples = 'C:\src\otto-testkit\samples',
-  # 默认取 dist 里最新的 setup.exe；显式给了就必须存在。
   [string]$Version = '',
-  # 第 8 步要装的"另一个 v2 版本"；默认取比 $Version 小的最新一个。
   [string]$OldVersion = '',
-  # 反向对照（只在证明"断言会红"时用）：第 9 步覆盖安装之前把 library.otto 改名，
-  # 数据层断言必须红、整次运行必须 exit 1。正常验收不要带这个开关。
+  [string]$FromSetup = '',
+  [string]$ToSetup = '',
   [switch]$FaultDataLoss,
-  # 调试用：留下临时目录（路径会打在报告里）。默认删干净。
   [switch]$KeepTemp
 )
-
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-
-$script:repoRoot = Split-Path $PSScriptRoot -Parent
-$script:zigDir = $PSScriptRoot
 if (-not $DistDir) { $DistDir = Join-Path $PSScriptRoot 'dist' }
-$script:distDir = [IO.Path]::GetFullPath($DistDir)
-$script:samplesDir = [IO.Path]::GetFullPath($Samples)
-$script:publicKey = Join-Path $PSScriptRoot 'keys\otto-lite.key.pub'
-$script:verifyJs = Join-Path $PSScriptRoot 'tools\verify-minisign.js'
-# 编译产物：本脚本只*看*它，不构建、不写。第 10 步断言它零变化。
-$script:zigOutBin = Join-Path $PSScriptRoot 'app\zig-out\bin'
+$script:dist = [IO.Path]::GetFullPath($DistDir)
+$script:checks = [Collections.ArrayList]::new()
+$script:step = 0
+$script:stepCount = 6
+$script:clock = [Diagnostics.Stopwatch]::StartNew()
+$script:failedNames = @()
+$script:root = ''
+$script:reference = ''
+$script:temp = ''
 
-# 正文步骤数（不含第 0 步前置条件）：新增/删除步骤只改这一个数。
-$script:stepCount = 11
-
-$script:checks = New-Object System.Collections.ArrayList
-$script:currentStep = 0
-$script:stepTitles = @{}
-$script:stepTotal = @{}
-$script:stepFailed = @{}
-$script:stepSkipped = @{}
-$script:clock = [System.Diagnostics.Stopwatch]::StartNew()
-
-# 全程不写真实用户目录：这三个值只进子进程的环境块。
-$script:realAppData = $env:APPDATA
-$script:realTemp = $env:TEMP
-$script:realOtto = if ($env:APPDATA) { Join-Path $env:APPDATA 'OTTO' } else { '' }
-$script:programFiles = $env:ProgramFiles
-$script:programFilesX86 = ${env:ProgramFiles(x86)}
-
-$script:elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-  [Security.Principal.WindowsBuiltInRole]::Administrator)
-
-# 环境变量快照：父进程一次都不改，收尾时按快照恢复**并核对**（改了也能退回去）。
-$script:envBefore = @{}
-foreach ($name in @('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) {
-  $script:envBefore[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+function Add-Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
+  [void]$script:checks.Add([pscustomobject]@{ Step = $script:step; Name = $Name; Ok = $Ok })
+  if (-not $Ok) { $script:failedNames += $Name }
+  Write-Host ('  [{0}] {1}{2}' -f $(if ($Ok) { 'PASS' } else { 'FAIL' }), $Name,
+    $(if ($Detail) { '   ' + $Detail } else { '' }))
 }
-
-$script:tempRoot = ''
-$script:cleanup = New-Object psobject -Property @{
-  TempRemoved = $false
-  FreedBytes = 0
-  LeftoverProcesses = @()
-  TempNewEntries = @()
-  EnvRestored = $false
-  RealOttoUnchanged = $true
-  Error = ''
+function Step([int]$N, [string]$Title) {
+  $script:step = $N
+  Write-Host ("`n── 步骤 {0}/{1}：{2} ──" -f $N, $script:stepCount, $Title)
 }
-
-# ---------------------------------------------------------------------------
-# 输出与断言
-# ---------------------------------------------------------------------------
-
-function Write-Head([string]$Text) {
-  Write-Host ''
-  Write-Host $Text
-}
-
-# CJK 占两个控制台单元格：只按字符数补空格，中文列会歪。
-function Get-DisplayWidth([string]$Text) {
-  $width = 0
-  foreach ($ch in $Text.ToCharArray()) {
-    $code = [int]$ch
-    if (($code -ge 0x1100 -and $code -le 0x115F) -or
-        ($code -ge 0x2E80 -and $code -le 0xA4CF) -or
-        ($code -ge 0xAC00 -and $code -le 0xD7A3) -or
-        ($code -ge 0xF900 -and $code -le 0xFAFF) -or
-        ($code -ge 0xFE30 -and $code -le 0xFE6F) -or
-        ($code -ge 0xFF00 -and $code -le 0xFF60) -or
-        ($code -ge 0xFFE0 -and $code -le 0xFFE6)) {
-      $width += 2
-    } else {
-      $width += 1
-    }
-  }
-  return $width
-}
-
-function Format-Cells {
-  param([string[]]$Cells, [int[]]$Widths)
-  $parts = @()
-  for ($i = 0; $i -lt $Cells.Count; $i++) {
-    $pad = $Widths[$i] - (Get-DisplayWidth $Cells[$i])
-    if ($pad -lt 0) { $pad = 0 }
-    $parts += ($Cells[$i] + (' ' * $pad))
-  }
-  return (($parts -join '  ').TrimEnd())
-}
-
-function Start-Step([int]$Number, [string]$Title) {
-  $script:currentStep = $Number
-  $script:stepTitles[$Number] = $Title
-  $script:stepTotal[$Number] = 0
-  $script:stepFailed[$Number] = 0
-  $script:stepSkipped[$Number] = 0
-  if ($Number -eq 0) {
-    Write-Head ('── 前置条件：不满足就没法开始 ──')
-  } else {
-    Write-Head ('── 步骤 {0}/{1}：{2} ──' -f $Number, $script:stepCount, $Title)
-  }
-}
-
-# 一条断言。Detail 是"关键数字"：路径、大小、退出码、哈希前 12 位。
-function Add-Check {
-  param(
-    [string]$Name,
-    [bool]$Ok,
-    [string]$Detail = ''
-  )
-  $step = $script:currentStep
-  $script:stepTotal[$step] = $script:stepTotal[$step] + 1
-  if (-not $Ok) { $script:stepFailed[$step] = $script:stepFailed[$step] + 1 }
-  $null = $script:checks.Add((New-Object psobject -Property @{
-    Step = $step
-    Name = $Name
-    Ok = $Ok
-    Skip = $false
-  }))
-  $tag = if ($Ok) { 'PASS' } else { 'FAIL' }
-  $line = '  [{0}] {1}' -f $tag, $Name
-  if ($Detail) { $line += '   ' + $Detail }
-  if ($Ok) { Write-Host $line } else { Write-Host $line -ForegroundColor Red }
-}
-
-# [SKIP] 与 [PASS] 分开：跳过不是通过，也不计入失败（例如没有更旧的 dist）。
-function Add-Skip([string]$Name, [string]$Why) {
-  $step = $script:currentStep
-  $script:stepTotal[$step] = $script:stepTotal[$step] + 1
-  $script:stepSkipped[$step] = $script:stepSkipped[$step] + 1
-  $null = $script:checks.Add((New-Object psobject -Property @{
-    Step = $step
-    Name = $Name
-    Ok = $true
-    Skip = $true
-  }))
-  Write-Host ('  [SKIP] {0}   {1}' -f $Name, $Why)
-}
-
-# 纯信息行（不参与判定）：例如"旧版本能不能读新格式"——0.x 不承诺向下兼容。
-function Write-Info([string]$Text) {
-  Write-Host ('  [INFO] ' + $Text)
-}
-
-function Complete-Step {
-  $step = $script:currentStep
-  $total = $script:stepTotal[$step]
-  $failed = $script:stepFailed[$step]
-  $skipped = $script:stepSkipped[$step]
-  $suffix = ''
-  if ($skipped -gt 0) { $suffix = '，{0} 项 SKIP' -f $skipped }
-  if ($failed -eq 0) {
-    Write-Host ('  → 步骤 {0}/{1} PASS（{2} 项断言{3}）' -f $step, $script:stepCount, ($total - $skipped), $suffix) -ForegroundColor Green
-  } else {
-    Write-Host ('  → 步骤 {0}/{1} FAIL（{2}/{3} 项失败{4}）' -f $step, $script:stepCount, $failed, $total, $suffix) -ForegroundColor Red
-  }
-}
-
-function Write-FailureTail($Lines, [int]$Count = 8) {
-  $tail = @($Lines | Select-Object -Last $Count)
-  if ($tail.Count -eq 0) { return }
-  Write-Host ('  | （末 {0} 行输出）' -f $tail.Count)
-  foreach ($line in $tail) { Write-Host ('  | ' + $line) }
-}
-
-# ---------------------------------------------------------------------------
-# 文件与进程
-# ---------------------------------------------------------------------------
-
-function Get-FileSha([string]$Path) {
+function Get-Sha([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower()
+  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
-
-# 单文件的"名字 + 大小 + SHA-256"三元组：数据层断言的原子单位。
-# 升级前后的同类断言都拿它比对，Detail 直接印成"大小 + 哈希前 12 位"，
-# 红的时候一眼能看出是"文件没了"还是"大小/内容变了"。
-function Get-FileFact([string]$Path) {
-  $name = Split-Path $Path -Leaf
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    return (New-Object psobject -Property @{
-      Name = $name
-      Path = $Path
-      Exists = $false
-      Length = 0
-      Sha = ''
-      Detail = ('{0} 不存在' -f $name)
-    })
-  }
-  $item = Get-Item -LiteralPath $Path
-  $sha = Get-FileSha $Path
-  $short = ''
-  if ($sha.Length -ge 12) { $short = $sha.Substring(0, 12) } else { $short = $sha }
-  return (New-Object psobject -Property @{
-    Name = $name
-    Path = $Path
-    Exists = $true
-    Length = $item.Length
-    Sha = $sha
-    Detail = ('{0} {1:N0} B sha256={2}…' -f $name, $item.Length, $short)
-  })
-}
-
-function Get-TreeSize([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path)) { return 0 }
-  $sum = 0
-  foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-    $sum += $item.Length
-  }
-  return $sum
-}
-
-# 目录快照：相对路径 + 大小 + SHA-256。卸载前后的"逐个文件比对"就靠它。
-function Get-TreeSnapshot([string]$Path) {
+function Get-Tree([string]$Path) {
   $rows = @()
-  if (-not (Test-Path -LiteralPath $Path)) { return $rows }
-  foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object FullName)) {
-    $rel = $item.FullName.Substring($Path.Length).TrimStart('\')
-    $rows += (New-Object psobject -Property @{
-      Rel = $rel
-      Length = $item.Length
-      Sha = (Get-FileSha $item.FullName)
-    })
-  }
-  return $rows
-}
-
-# 轻量快照（相对路径 + 大小，不读内容）：用来核对**真实** %APPDATA%\OTTO。
-# 不哈希是故意的：机器上如果正好有一个 OTTO 在跑，它会重写自己的 settings.json，
-# 哈希会让这条守卫随机变红；而"我们写进去一个新文件"仍然会被名字/大小抓住。
-function Get-TreeLightSnapshot([string]$Path) {
-  $rows = @()
-  if (-not (Test-Path -LiteralPath $Path)) { return $rows }
-  foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object FullName)) {
-    $rel = $item.FullName.Substring($Path.Length).TrimStart('\')
-    $rows += [string]::Format('{0}|{1}', $rel, $item.Length)
-  }
-  return $rows
-}
-
-# 两份快照逐条比对：新增 / 消失 / 内容变了，三类都要看得见。
-function Compare-TreeSnapshot($Before, $After) {
-  $beforeMap = @{}
-  foreach ($row in @($Before)) { $beforeMap[$row.Rel] = $row }
-  $afterMap = @{}
-  foreach ($row in @($After)) { $afterMap[$row.Rel] = $row }
-  $added = @()
-  $removed = @()
-  $changed = @()
-  foreach ($key in @($beforeMap.Keys)) {
-    if (-not $afterMap.ContainsKey($key)) { $removed += $key; continue }
-    if ($beforeMap[$key].Sha -ne $afterMap[$key].Sha) { $changed += $key }
-  }
-  foreach ($key in @($afterMap.Keys)) {
-    if (-not $beforeMap.ContainsKey($key)) { $added += $key }
-  }
-  return (New-Object psobject -Property @{
-    Ok = (($added.Count -eq 0) -and ($removed.Count -eq 0) -and ($changed.Count -eq 0))
-    Added = $added
-    Removed = $removed
-    Changed = $changed
-  })
-}
-
-# 进程一律这么起：没有窗口、两个流都读走、命令行先回显（CONVENTIONS 第 2 / 5 条）。
-function Invoke-Native {
-  param(
-    [string]$ExePath,
-    [string]$ExeArguments,
-    [string]$WorkDir = '',
-    [hashtable]$EnvMap = $null,
-    [int]$TimeoutSeconds = 180
-  )
-  Write-Host ('  $ "{0}" {1}' -f $ExePath, $ExeArguments)
-  if (-not (Test-Path -LiteralPath $ExePath)) {
-    throw ('找不到可执行文件：{0}' -f $ExePath)
-  }
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $ExePath
-  $psi.Arguments = $ExeArguments
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
-  if ($WorkDir) { $psi.WorkingDirectory = $WorkDir }
-  if ($null -ne $EnvMap) {
-    foreach ($key in @($EnvMap.Keys)) { $psi.EnvironmentVariables[[string]$key] = [string]$EnvMap[$key] }
-  }
-
-  $watch = [System.Diagnostics.Stopwatch]::StartNew()
-  $proc = [System.Diagnostics.Process]::Start($psi)
-  $outTask = $proc.StandardOutput.ReadToEndAsync()
-  $errTask = $proc.StandardError.ReadToEndAsync()
-  $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
-  if (-not $exited) {
-    try { $proc.Kill() } catch { }
-    $watch.Stop()
-    throw ('子进程超时（{0} s 未退出）：{1}' -f $TimeoutSeconds, $ExePath)
-  }
-  $outText = [string]$outTask.Result
-  $errText = [string]$errTask.Result
-  $code = $proc.ExitCode
-  $proc.Dispose()
-  $watch.Stop()
-
-  $lines = @()
-  foreach ($chunk in @($outText, $errText)) {
-    foreach ($line in ($chunk -split "`r?`n")) {
-      if ($line.Trim().Length -gt 0) { $lines += [string]$line }
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $rows }
+  foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force | Sort-Object FullName)) {
+    $rows += [pscustomobject]@{
+      Rel = $file.FullName.Substring($Path.Length).TrimStart('\')
+      Length = $file.Length
+      Sha = Get-Sha $file.FullName
     }
   }
-  return (New-Object psobject -Property @{
-    Code = $code
-    Out = $outText
-    Err = $errText
-    Lines = [string[]]$lines
-    Text = [string]::Join("`n", [string[]]$lines)
-    Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2)
-  })
+  return $rows
 }
-
-# 子进程统一的环境块：把 %APPDATA% / %LOCALAPPDATA% / %TEMP% 指到临时树里。
-# 每一个子进程都带它——这是"绝不写真实用户目录"的实现方式，而不是靠自觉。
+function Compare-Tree($Before, $After) {
+  $a = @{}; $b = @{}
+  foreach ($row in @($Before)) { if ($null -ne $row) { $a[$row.Rel] = $row } }
+  foreach ($row in @($After)) { if ($null -ne $row) { $b[$row.Rel] = $row } }
+  $added = @($b.Keys | Where-Object { -not $a.ContainsKey($_) })
+  $removed = @($a.Keys | Where-Object { -not $b.ContainsKey($_) })
+  $changed = @($a.Keys | Where-Object {
+    $b.ContainsKey($_) -and ($a[$_].Sha -ne $b[$_].Sha -or $a[$_].Length -ne $b[$_].Length)
+  })
+  return [pscustomobject]@{
+    Ok = $added.Count -eq 0 -and $removed.Count -eq 0 -and $changed.Count -eq 0
+    Added = $added; Removed = $removed; Changed = $changed
+  }
+}
+function Show-Diff($Diff) {
+  if ($Diff.Added.Count) { Write-Host ('         多出：' + ($Diff.Added -join '、')) }
+  if ($Diff.Removed.Count) { Write-Host ('         消失：' + ($Diff.Removed -join '、')) }
+  if ($Diff.Changed.Count) { Write-Host ('         内容变化：' + ($Diff.Changed -join '、')) }
+}
 function Get-ChildEnv {
+  return @{ APPDATA = $script:fakeAppData; LOCALAPPDATA = $script:fakeLocal;
+    TEMP = $script:fakeTemp; TMP = $script:fakeTemp }
+}
+function Invoke-Native([string]$Exe, [string]$Arguments, [int]$TimeoutSeconds = 90) {
+  Write-Host ('  $ "{0}" {1}' -f $Exe, $Arguments)
+  $psi = [Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $Exe; $psi.Arguments = $Arguments
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+  foreach ($entry in (Get-ChildEnv).GetEnumerator()) {
+    $psi.EnvironmentVariables[$entry.Key] = [string]$entry.Value
+  }
+  $p = [Diagnostics.Process]::Start($psi)
+  $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+  if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+    $p.Kill(); throw "子进程超时：$Exe"
+  }
+  $result = [pscustomobject]@{ Code = $p.ExitCode; Out = [string]$out.Result;
+    Err = [string]$err.Result; Text = ([string]$out.Result + [string]$err.Result) }
+  $p.Dispose(); return $result
+}
+function Install-Test([string]$Setup, [string]$Target) {
+  # /D 必须最后；即使根含空格也不加引号，NSIS 会把剩余部分整体当作根。
+  $run = Invoke-Native $Setup ('/S /D=' + $Target) 120
+  Add-Check '静默安装成功（/S + 自定义 /D= 根）' ($run.Code -eq 0) "exit=$($run.Code) root=$Target"
+  return $run
+}
+function Wait-Gone([string]$Path) {
+  for ($i = 0; $i -lt 200; $i++) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    Start-Sleep -Milliseconds 50
+  }
+  return (-not (Test-Path -LiteralPath $Path))
+}
+function Uninstall-Test([string]$Root, [string]$Choice = '') {
+  $uninstaller = Join-Path $Root 'app\Uninstall.exe'
+  $arguments = '/S'
+  if ($Choice) { $arguments += ' /OTTO_TEST_CLEAN=' + $Choice }
+  $run = Invoke-Native $uninstaller $arguments 120
+  $gone = Wait-Gone (Join-Path $Root 'app')
+  Add-Check $(if ($Choice) { "勾选 $Choice 的卸载执行成功" } else { '默认静默卸载执行成功' }) (
+    $run.Code -eq 0 -and $gone) "exit=$($run.Code) appGone=$gone"
+}
+function New-DataAndCache([string]$Root, [bool]$RunApp) {
+  $exe = Join-Path $Root 'app\otto-lite.exe'
+  if ($RunApp) {
+    $shot = Join-Path $script:temp 'shots\settings.png'
+    New-Item -ItemType Directory -Force -Path (Split-Path $shot -Parent) | Out-Null
+    $panel = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $shot, 'click:设置;at:218,196;click:关闭'
+    $gui = Invoke-Native $exe $panel
+    Add-Check '隐藏窗口写入真实 settings.json（不弹窗、不抢焦点）' (
+      $gui.Code -eq 0 -and (Test-Path -LiteralPath (Join-Path $Root 'data\settings.json') -PathType Leaf)
+    ) "exit=$($gui.Code)"
+    $import = Invoke-Native $exe ('--import-into "{0}"' -f (Split-Path $script:sample -Parent))
+    Add-Check '真实导入生成 <根>\data\library.otto' (
+      $import.Code -eq 0 -and (Test-Path -LiteralPath (Join-Path $Root 'data\library.otto') -PathType Leaf)
+    ) "exit=$($import.Code)"
+  }
+  foreach ($pair in @(
+    @('data\acceptance-marker.bin', [byte[]](1,2,3,4,5)),
+    @('cache\thumbs\acceptance-marker.bin', [byte[]](9,8,7,6,5,4))
+  )) {
+    $path = Join-Path $Root $pair[0]
+    New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+    [IO.File]::WriteAllBytes($path, $pair[1])
+  }
+}
+function Get-Versions {
   $map = @{}
-  $map['APPDATA'] = $script:fakeAppData
-  $map['LOCALAPPDATA'] = $script:fakeLocalAppData
-  $map['TEMP'] = $script:fakeTemp
-  $map['TMP'] = $script:fakeTemp
+  foreach ($f in @(Get-ChildItem -LiteralPath $script:dist -Filter 'otto-lite-*-test-setup.exe' -File -ErrorAction SilentlyContinue)) {
+    $m = [regex]::Match($f.Name, '^otto-lite-(\d+\.\d+\.\d+)-test-setup\.exe$')
+    if ($m.Success) { $map[$m.Groups[1].Value] = $f.FullName }
+  }
   return $map
 }
-
-# 只给 NSIS 的进程（setup.exe / Uninstall.exe）加兼容层。
-# 见文件头：它们的清单写着 requireAdministrator，非提权会话里 CreateProcess 会返回 740，
-# 兼容层把这一级降成"当前用户"（不会弹 UAC，也没有别的降级办法）。
-# 应用本身与 node 都不加——它们本来就按调用者的权限跑，加一层只会让人怀疑"是不是靠它才跑通"。
-function Get-InstallerEnv {
-  $map = Get-ChildEnv
-  if (-not $script:elevated) { $map['__COMPAT_LAYER'] = 'RunAsInvoker' }
-  return $map
-}
-
-# 当前树里还活着的进程（按可执行文件路径判断，不用 Get-Process 的 .Path——
-# 它对受保护进程会抛访问被拒，把整次清理带崩）。
-function Get-ProcessUnder {
-  param([string]$Root)
-  $found = @()
+function New-Sample {
+  # 极小、合法的 PCM WAV，避免依赖机器上的外部素材目录。
+  $path = Join-Path $script:temp 'fixture.wav'
+  $stream = [IO.File]::Create($path); $w = [IO.BinaryWriter]::new($stream)
   try {
-    foreach ($proc in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
-      $path = $proc.ExecutablePath
-      if (-not $path) { continue }
-      if ($path.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
-        $found += (New-Object psobject -Property @{ Id = [int]$proc.ProcessId; Name = [string]$proc.Name; Path = [string]$path })
-      }
-    }
-  } catch {
-    $found += (New-Object psobject -Property @{ Id = -1; Name = '<CIM 查询失败>'; Path = $_.Exception.Message })
-  }
-  return $found
+    $w.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $w.Write([uint32]68)
+    $w.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt ')); $w.Write([uint32]16)
+    $w.Write([uint16]1); $w.Write([uint16]1); $w.Write([uint32]8000)
+    $w.Write([uint32]16000); $w.Write([uint16]2); $w.Write([uint16]16)
+    $w.Write([Text.Encoding]::ASCII.GetBytes('data')); $w.Write([uint32]32)
+    for ($i = 0; $i -lt 16; $i++) { $w.Write([int16]($i * 100)) }
+  } finally { $w.Dispose(); $stream.Dispose() }
+  return $path
 }
-
-# 等一个路径消失（NSIS 卸载器会把自己复制到 %TEMP% 再跑，父进程先返回，
-# 所以"Uninstall.exe /S 退出"不等于"卸载做完了"）。
-function Wait-PathGone {
-  param([string]$Path, [int]$TimeoutSeconds = 60)
-  $watch = [System.Diagnostics.Stopwatch]::StartNew()
-  while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-    if (-not (Test-Path -LiteralPath $Path)) {
-      $watch.Stop()
-      return (New-Object psobject -Property @{ Gone = $true; Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2) })
-    }
-    Start-Sleep -Milliseconds 100
-  }
-  $watch.Stop()
-  return (New-Object psobject -Property @{ Gone = $false; Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2) })
-}
-
-function Wait-NoProcessUnder {
-  param([string]$Root, [int]$TimeoutSeconds = 20)
-  $watch = [System.Diagnostics.Stopwatch]::StartNew()
-  $last = @()
-  while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-    $last = @(Get-ProcessUnder -Root $Root)
-    if ($last.Count -eq 0) {
-      $watch.Stop()
-      return (New-Object psobject -Property @{ Clear = $true; Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); Left = @() })
-    }
-    Start-Sleep -Milliseconds 100
-  }
-  $watch.Stop()
-  return (New-Object psobject -Property @{ Clear = $false; Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); Left = $last })
-}
-
-# ---------------------------------------------------------------------------
-# 版本与产物
-# ---------------------------------------------------------------------------
-
-function Get-DistVersions {
-  $map = @{}
-  foreach ($item in @(Get-ChildItem -LiteralPath $script:distDir -File -Filter 'otto-lite-*-setup.exe' -ErrorAction SilentlyContinue)) {
-    $m = [regex]::Match($item.Name, '^otto-lite-(\d+\.\d+\.\d+)-setup\.exe$')
-    if (-not $m.Success) { continue }
-    $map[$m.Groups[1].Value] = [version]$m.Groups[1].Value
-  }
-  # [version] 排序：0.9.0 < 0.10.0（字符串排序会反着来，这正是要防的）。
-  return @($map.Keys | Sort-Object { $map[$_] } -Descending)
-}
-
-function Get-SetupPath([string]$TargetVersion) {
-  return (Join-Path $script:distDir ('otto-lite-{0}-setup.exe' -f $TargetVersion))
-}
-
-# ---------------------------------------------------------------------------
-# 安装 / 卸载
-# ---------------------------------------------------------------------------
-
-function Install-Package {
-  param(
-    [string]$SetupPath,
-    [string]$Target,
-    [string]$Label
-  )
-  # /D= 是 NSIS 的最后一个参数、不带引号、路径里不能有空格——三条都是 NSIS 的硬规则：
-  # 带引号会被当成路径的一部分，放在前面会被别的参数吃掉。
-  $arguments = '/S /D=' + $Target
-  Write-Host ('  [{0}] 参数：/S + /D=（不带引号、放最后；路径不含空格）' -f $Label)
-  return (Invoke-Native -ExePath $SetupPath -ExeArguments $arguments -EnvMap (Get-InstallerEnv) -TimeoutSeconds 180)
-}
-
-function Uninstall-Package {
-  param([string]$ProgramDir)
-  $uninstaller = Join-Path $ProgramDir 'Uninstall.exe'
-  $result = Invoke-Native -ExePath $uninstaller -ExeArguments '/S' -EnvMap (Get-InstallerEnv) -TimeoutSeconds 180
-  $gone = Wait-PathGone -Path $ProgramDir -TimeoutSeconds 60
-  $idle = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 20
-  return (New-Object psobject -Property @{
-    Code = $result.Code
-    ExitSeconds = $result.Seconds
-    Gone = $gone.Gone
-    GoneSeconds = $gone.Seconds
-    Processes = $idle
-  })
-}
-
-# ---------------------------------------------------------------------------
-# 验签
-# ---------------------------------------------------------------------------
-
-function Test-ArtifactSignature {
-  param(
-    [string]$SignaturePath,
-    [string]$ArtifactPath
-  )
-  $node = Get-Command node -ErrorAction SilentlyContinue
-  if ($null -eq $node) { throw '找不到 node（verify-minisign.js 需要 Node.js）' }
-  $arguments = '"{0}" "{1}" "{2}" "{3}"' -f $script:verifyJs, $script:publicKey, $SignaturePath, $ArtifactPath
-  return (Invoke-Native -ExePath $node.Source -ExeArguments $arguments -TimeoutSeconds 120)
-}
-
-# 设置面板：点"设置"→ 把不透明度滑到 60%（255*0.6=153）→ 点"关闭"。
-# 面板布局是固定的（和 verify-distribution.ps1 / opacity.ps1 用的同一条）。
-$script:panelScript = 'click:设置;at:218,196;click:关闭'
-
-# ---------------------------------------------------------------------------
-# 设置文件断言（五个字段 + opacity=153）
-# ---------------------------------------------------------------------------
-
-function Test-SettingsFile {
-  param([string]$Path, [int]$Opacity = 153)
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    return (New-Object psobject -Property @{ Ok = $false; Detail = ('缺少 {0}' -f $Path) })
-  }
-  try {
-    $raw = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
-    $obj = $raw | ConvertFrom-Json
-  } catch {
-    return (New-Object psobject -Property @{ Ok = $false; Detail = ('JSON 无效：{0}' -f $_.Exception.Message) })
-  }
-  $names = @($obj.PSObject.Properties | ForEach-Object { $_.Name })
-  $want = @('always_on_top', 'update_url', 'l2_budget_mib', 'l3_budget_mib', 'opacity')
-  $missing = @($want | Where-Object { $names -notcontains $_ })
-  $ok = ($missing.Count -eq 0) -and ([int]$obj.opacity -eq $Opacity)
-  $detail = 'opacity={0} 字段={1}' -f $obj.opacity, ($names -join ',')
-  if ($missing.Count -gt 0) { $detail += ' 缺=' + ($missing -join ',') }
-  return (New-Object psobject -Property @{ Ok = $ok; Detail = $detail })
-}
-
-function Test-OttoMagic {
-  param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    return (New-Object psobject -Property @{ Ok = $false; Detail = ('缺少 {0}' -f $Path) })
-  }
-  $bytes = [IO.File]::ReadAllBytes($Path)
-  if ($bytes.Length -lt 8) {
-    return (New-Object psobject -Property @{ Ok = $false; Detail = ('太短：{0} B' -f $bytes.Length) })
-  }
-  $magic = [Text.Encoding]::ASCII.GetString($bytes, 0, 7)
-  $ok = ($magic -eq 'OTTOLIB') -and ($bytes[7] -eq 0)
-  return (New-Object psobject -Property @{ Ok = $ok; Detail = ('{0} B magic={1}<NUL>' -f $bytes.Length, $magic) })
-}
-
-# ---------------------------------------------------------------------------
-# 目录树打印（卸载前后的"文件名 + 大小"表）
-# ---------------------------------------------------------------------------
-
-function Write-TreeTable {
-  param([string]$Path, [string]$Title)
-  if (-not (Test-Path -LiteralPath $Path)) {
-    Write-Host ('  {0}：<不存在> {1}' -f $Title, $Path)
-    return
-  }
-  $rows = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object FullName)
-  Write-Host ('  {0}：{1}（{2} 个文件，{3:N0} B）' -f $Title, $Path, $rows.Count, (Get-TreeSize $Path))
-  foreach ($row in $rows) {
-    $rel = $row.FullName.Substring($Path.Length).TrimStart('\')
-    Write-Host ('    {0,-28} {1,10:N0} B' -f $rel, $row.Length)
-  }
-}
-
-# ---------------------------------------------------------------------------
-# 第 9 步：覆盖式升级（同一个 program 目录上直接盖新版本）
-# ---------------------------------------------------------------------------
-#
-# 这一步回答的是"更新"本身，而不是"再装一次"：用户手里的旧版还在原地，他双击新版的
-# setup.exe，安装器把应用层盖掉，用户数据一个字节都不该动。第 7/8 步走的都是
-# "先卸载再装"，覆盖安装这条路径之前没被走过——而它才是用户点"更新"时走的那条。
-#
-# 断言分六组（对应跨项目复核 §5 的 P1）：
-#   1. 覆盖安装   同一个 program 目录、不先卸载，setup.exe exit 0
-#   2. 应用层     --version 变新；文件清单（名字 + 大小 + SHA-256）与全新安装逐字节相同；
-#                 只有一套 exe；没有名字带旧版本号的残留
-#   3. 数据层     library.otto / settings.json 名字 + 大小 + SHA-256 逐个一致；
-#                 整个 %APPDATA%\OTTO 逐文件一致；新版本还能读出同一份库
-#   4. 回滚副本   策略必须显式且可判定：零副本（文件清单 == 全新安装）或恰好一份
-#   5. 便携版     旁边那个便携副本（含它自己的 data\library.otto）逐字节不变，
-#                 版本号仍是旧的——安装版升级器不认领便携版
-#   6. 收尾       覆盖升级之后仍然卸得干净，数据仍然逐字节一致
-#
-# 与 -FaultDataLoss 的关系见文件头：开关打开时，本步的"数据层"那几条必须红。
-# 那个开关没有任何分支会把它"洗白"——它只在主流程末尾把整次运行按失败处理。
-
-function Invoke-OverwriteUpgrade {
-  param(
-    [string]$FromVersion,
-    [string]$ToVersion
-  )
-
-  $programDir = $script:programDir
-  $newSetup = Get-SetupPath $ToVersion
-  $oldSetup = Get-SetupPath $FromVersion
-  $installedExe = Join-Path $programDir 'otto-lite.exe'
-  $libraryPath = Join-Path $script:ottoData 'library.otto'
-  $settingsPath = Join-Path $script:ottoData 'settings.json'
-
-  Start-Step 9 ('覆盖式升级：{0} → {1}（同一个 program 目录，不先卸载）' -f $FromVersion, $ToVersion)
-
-  # ---- 起点：旧版本必须已经装在这个目录里 ----
-  # 第 8 步末尾把它卸掉了（为了断言"旧版本也能卸干净"），这里重新装回来：
-  # 升级的前提是"旧版在位"，这一步把前提也变成具名断言，而不是靠上下文默认。
-  $seed = Install-Package -SetupPath $oldSetup -Target $programDir -Label ('升级起点 setup.exe ' + $FromVersion)
-  Add-Check ('升级起点：{0} 装进 program 目录（exit 0）' -f $FromVersion) ($seed.Code -eq 0) (
-    'exit={0}；{1} s' -f $seed.Code, $seed.Seconds)
-  if ($seed.Code -ne 0) { Write-FailureTail $seed.Lines 8 }
-
-  $seedRun = Invoke-Native -ExePath $installedExe -ExeArguments '--version' -WorkDir $programDir -EnvMap (Get-ChildEnv)
-  $seedLine = $seedRun.Out.Trim()
-  Add-Check ('升级前 --version 说 {0} (installed)（要覆盖的确实是旧版本）' -f $FromVersion) (
-    ($seedRun.Code -eq 0) -and ($seedLine -eq ('otto-lite {0} (installed)' -f $FromVersion))) (
-      '输出了 “{0}”' -f $seedLine)
-
-  # ---- 起点数据必须由旧版生成：验证 v2 旧库 → v2 新版的数据保留 ----
-  # 第 6 步已经由新版写过数据；这里在临时用户目录里清掉库，让旧版重新导入并写回设置。
-  # 后面的字节不变断言针对“安装器本身”；新进程读取同一份 v2 数据由 --library-info 验收。
-  if (Test-Path -LiteralPath $libraryPath) { Remove-Item -LiteralPath $libraryPath -Force }
-  $seedImport = Invoke-Native -ExePath $installedExe -ExeArguments ('--import-into "{0}"' -f $script:importSrc) -WorkDir $programDir -EnvMap (Get-ChildEnv)
-  Add-Check '升级起点由旧版重新导入 v2 library.otto' (
-    ($seedImport.Code -eq 0) -and (Test-Path -LiteralPath $libraryPath -PathType Leaf)) (
-      'exit={0}；{1}' -f $seedImport.Code, $seedImport.Text.Trim())
-  $seedShot = Join-Path $script:shotsDir 'upgrade-seed-v2-settings.png'
-  $seedPanelArgs = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $seedShot, $script:panelScript
-  $seedPanel = Invoke-Native -ExePath $installedExe -ExeArguments $seedPanelArgs -WorkDir $programDir -EnvMap (Get-ChildEnv)
-  Add-Check '升级起点由旧版设置面板写回 settings.json' ($seedPanel.Code -eq 0) (
-    'exit={0}；{1}' -f $seedPanel.Code, $seedPanel.Seconds)
-  $seedBytes = [IO.File]::ReadAllBytes($libraryPath)
-  $seedSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-  Add-Check '升级起点确为 OTTOLIB v2 + settings v2' (
-    ($seedBytes.Length -ge 10) -and ([BitConverter]::ToUInt16($seedBytes, 8) -eq 2) -and ([int]$seedSettings.version -eq 2)) (
-      'library.version={0}；settings.version={1}' -f [BitConverter]::ToUInt16($seedBytes, 8), $seedSettings.version)
-
-  # ---- 便携副本：program 旁边的兄弟目录，带自己的 data\ ----
-  # 便携版不是"另一份安装"，它是用户从发布页下的 zip 解出来的一坨：数据跟程序走。
-  # 安装版升级器如果按注册表/安装目录乱认领，最容易误伤的就是它旁边这一份。
-  $portableDir = $script:portableDir
-  $portableExe = Join-Path $portableDir 'otto-lite.exe'
-  $portableZip = Join-Path $script:distDir ('otto-lite-{0}-portable.zip' -f $FromVersion)
-  $portableReady = $false
-  $portableSnapshot = @()
-  if (Test-Path -LiteralPath $portableZip -PathType Leaf) {
-    New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [IO.Compression.ZipFile]::ExtractToDirectory($portableZip, $portableDir)
-    $portableReady = $true
-    Add-Check ('便携副本就位（把 dist 里的 {0} portable.zip 解到 program 旁边）' -f $FromVersion) (
-      Test-Path -LiteralPath $portableExe -PathType Leaf) (
-        '{0} 个文件 / {1:N0} B' -f @(Get-ChildItem -LiteralPath $portableDir -Recurse -File -Force).Count, (Get-TreeSize $portableDir))
-    Add-Check '便携副本带 otto-portable.flag（形态由标记决定，不靠路径猜）' (
-      Test-Path -LiteralPath (Join-Path $portableDir 'otto-portable.flag') -PathType Leaf) 'otto-portable.flag'
-    $portableVersionRun = Invoke-Native -ExePath $portableExe -ExeArguments '--version' -WorkDir $portableDir -EnvMap (Get-ChildEnv)
-    Add-Check ('便携副本 --version 说 {0} (portable)' -f $FromVersion) (
-      ($portableVersionRun.Code -eq 0) -and
-      ($portableVersionRun.Out.Trim() -eq ('otto-lite {0} (portable)' -f $FromVersion))) (
-        '输出了 “{0}”' -f $portableVersionRun.Out.Trim())
-    $portableImport = Invoke-Native -ExePath $portableExe -ExeArguments ('--import-into "{0}"' -f $script:importSrc) -WorkDir $portableDir -EnvMap (Get-ChildEnv)
-    $portableLib = Join-Path $portableDir 'data\library.otto'
-    Add-Check '便携副本的数据落在 exe 旁边（data\library.otto），不写 %APPDATA%' (
-      ($portableImport.Code -eq 0) -and (Test-Path -LiteralPath $portableLib -PathType Leaf)) $portableLib
-    $portableSnapshot = @(Get-TreeSnapshot $portableDir)
-    Write-Info ('便携副本：{0} 个文件 / {1:N0} B（升级前后逐字节比对）' -f @($portableSnapshot).Count, (Get-TreeSize $portableDir))
-  } else {
-    Add-Skip '便携副本就位' ('dist 里没有 otto-lite-{0}-portable.zip' -f $FromVersion)
-    Add-Skip '便携副本带 otto-portable.flag' '没有便携包'
-    Add-Skip '便携副本 --version 说 (portable)' '没有便携包'
-    Add-Skip '便携副本的数据落在 exe 旁边' '没有便携包'
-    Add-Skip '便携副本逐字节不变' '没有便携包'
-    Add-Skip '便携副本的 --version 仍是旧版' '没有便携包'
-  }
-
-  # ---- 基线：升级前的应用层与数据层 ----
-  $programBefore = @(Get-TreeSnapshot $programDir)
-  $dataBefore = @(Get-TreeSnapshot $script:ottoData)
-  $libraryBefore = Get-FileFact $libraryPath
-  $settingsBefore = Get-FileFact $settingsPath
-  Add-Check '基线：library.otto 与 settings.json 在升级前都在' (
-    $libraryBefore.Exists -and $settingsBefore.Exists) (
-      '{0}；{1}' -f $libraryBefore.Detail, $settingsBefore.Detail)
-
-  # ---- 反向对照的注入口：把库改名（模拟"升级过程中数据丢了"）----
-  # 位置是有讲究的：必须在基线快照**之后**、setup.exe **之前**。基线里还认这个名字，
-  # 覆盖安装之后名字没了——数据层断言对比的正是"文件身份"，于是必须红。
-  if ($FaultDataLoss -and $libraryBefore.Exists) {
-    $lostPath = $libraryPath + '.lost'
-    Move-Item -LiteralPath $libraryPath -Destination $lostPath -Force
-    Write-Host ('  [FAULT] 已把 library.otto 改名成 {0}（-FaultDataLoss：下面的数据层断言必须红）' -f (Split-Path $lostPath -Leaf)) -ForegroundColor Yellow
-  }
-
-  # ---- 1. 覆盖安装：同一个目录，不先卸载 ----
-  Add-Check '覆盖安装前旧版仍在 program 目录里（没有偷偷先卸载）' (
-    Test-Path -LiteralPath $installedExe -PathType Leaf) $installedExe
-  $upgrade = Install-Package -SetupPath $newSetup -Target $programDir -Label ('覆盖升级 setup.exe ' + $ToVersion)
-  Add-Check '覆盖安装退出码 0（不先卸载，直接盖）' ($upgrade.Code -eq 0) (
-    'exit={0}；{1} s' -f $upgrade.Code, $upgrade.Seconds)
-  if ($upgrade.Code -ne 0) { Write-FailureTail $upgrade.Lines 8 }
-
-  # ---- 2. 应用层被替换 ----
-  $afterVersion = Invoke-Native -ExePath $installedExe -ExeArguments '--version' -WorkDir $programDir -EnvMap (Get-ChildEnv)
-  $afterLine = $afterVersion.Out.Trim()
-  Add-Check ('覆盖之后 --version 变成 {0} (installed)' -f $ToVersion) (
-    ($afterVersion.Code -eq 0) -and ($afterLine -eq ('otto-lite {0} (installed)' -f $ToVersion))) (
-      '输出了 “{0}”' -f $afterLine)
-
-  $programAfter = @(Get-TreeSnapshot $programDir)
-  $pristine = @($script:pristineNewFiles)
-  if ($pristine.Count -eq 0) {
-    Add-Skip '没有旧版残留、没有备份副本（文件清单 == 全新安装）' '步骤 3 没有捕获到全新安装的清单'
-    Add-Skip '每个文件与全新安装逐字节一致（应用层真的被替换）' '步骤 3 没有捕获到全新安装的清单'
-  } else {
-    $residue = Compare-TreeSnapshot $pristine $programAfter
-    Add-Check '没有旧版残留、没有备份副本（文件清单 == 全新安装）' (
-      (@($residue.Added).Count -eq 0) -and (@($residue.Removed).Count -eq 0)) (
-        '覆盖后 {0} 个文件 / 全新安装 {1} 个' -f @($programAfter).Count, $pristine.Count)
-    if (@($residue.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f (@($residue.Added) -join '、')) }
-    if (@($residue.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f (@($residue.Removed) -join '、')) }
-    Add-Check '每个文件与全新安装逐字节一致（应用层真的被替换，不是留着旧的）' (
-      @($residue.Changed).Count -eq 0) ('{0} 个文件逐个比 SHA-256' -f @($programAfter).Count)
-    if (@($residue.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f (@($residue.Changed) -join '、')) }
-  }
-
-  $exes = @(Get-ChildItem -LiteralPath $programDir -Recurse -File -Filter '*.exe' -Force -ErrorAction SilentlyContinue)
-  $ottoExes = @($exes | Where-Object { $_.Name -match '^otto-lite.*\.exe$' })
-  Add-Check '只有一套程序：otto-lite*.exe 恰好一个（没有两份 exe）' ($ottoExes.Count -eq 1) (
-    'otto-lite*.exe={0}；目录里共 {1} 个 exe：{2}' -f $ottoExes.Count, $exes.Count, (($exes | ForEach-Object { $_.Name }) -join '、'))
-  $staleExes = @($exes | Where-Object { $_.Name -match [regex]::Escape($FromVersion) })
-  $staleDetail = '0 个'
-  if ($staleExes.Count -gt 0) { $staleDetail = (($staleExes | ForEach-Object { $_.Name }) -join '、') }
-  Add-Check ('没有名字带旧版本号 {0} 的 exe 残留' -f $FromVersion) ($staleExes.Count -eq 0) $staleDetail
-  $staleAny = @($programAfter | Where-Object { $_.Rel -match [regex]::Escape($FromVersion) })
-  $staleAnyDetail = '0 个'
-  if ($staleAny.Count -gt 0) { $staleAnyDetail = (($staleAny | ForEach-Object { $_.Rel }) -join '、') }
-  Add-Check ('整个 program 里都没有名字带 {0} 的东西（文件或目录）' -f $FromVersion) ($staleAny.Count -eq 0) $staleAnyDetail
-
-  # ---- 3. 数据层不被动 ----
-  $libraryAfter = Get-FileFact $libraryPath
-  Add-Check '数据层：library.otto 名字 + 大小 + SHA-256 逐字节一致' (
-    $libraryBefore.Exists -and $libraryAfter.Exists -and
-    ($libraryAfter.Length -eq $libraryBefore.Length) -and
-    ($libraryAfter.Sha -eq $libraryBefore.Sha)) (
-      '升级前 {0} → 升级后 {1}' -f $libraryBefore.Detail, $libraryAfter.Detail)
-
-  $settingsAfter = Get-FileFact $settingsPath
-  Add-Check '数据层：settings.json 名字 + 大小 + SHA-256 逐字节一致' (
-    $settingsBefore.Exists -and $settingsAfter.Exists -and
-    ($settingsAfter.Length -eq $settingsBefore.Length) -and
-    ($settingsAfter.Sha -eq $settingsBefore.Sha)) (
-      '升级前 {0} → 升级后 {1}' -f $settingsBefore.Detail, $settingsAfter.Detail)
-
-  $dataAfter = @(Get-TreeSnapshot $script:ottoData)
-  $dataDiff = Compare-TreeSnapshot $dataBefore $dataAfter
-  Add-Check '数据层：整个 %APPDATA%\OTTO 逐文件一致（没多写、没少写）' $dataDiff.Ok (
-    '升级前 {0} 个文件 / 升级后 {1} 个' -f @($dataBefore).Count, @($dataAfter).Count)
-  if (-not $dataDiff.Ok) {
-    if (@($dataDiff.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f (@($dataDiff.Removed) -join '、')) }
-    if (@($dataDiff.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f (@($dataDiff.Added) -join '、')) }
-    if (@($dataDiff.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f (@($dataDiff.Changed) -join '、')) }
-  }
-
-  # 数据不但要"字节还在"，还要"新版本真能读"：覆盖升级前的 v2 库升级后条数不变。
-  $wantSamples = 0
-  if ($script:importCount -gt 0) { $wantSamples = [int]$script:importCount }
-  $infoRun = Invoke-Native -ExePath $installedExe -ExeArguments ('--library-info "{0}"' -f $libraryPath) -EnvMap (Get-ChildEnv)
-  $samplesAfter = -1
-  $mi = [regex]::Match($infoRun.Text, 'samples=(\d+)')
-  if ($mi.Success) { $samplesAfter = [int]$mi.Groups[1].Value }
-  $samplesOk = ($infoRun.Code -eq 0) -and ($samplesAfter -ge 1)
-  if ($wantSamples -gt 0) { $samplesOk = $samplesOk -and ($samplesAfter -eq $wantSamples) }
-  Add-Check '升级后的新版本能读出同一份库（--library-info samples 对得上）' $samplesOk (
-    'exit={0}；samples={1}（期望 {2}）' -f $infoRun.Code, $samplesAfter, $wantSamples)
-
-  # ---- 4. 回滚副本策略：必须显式 ----
-  # 只认"一看就是回滚副本"的名字，正常文件不会被误判：
-  #   uninstall-old.exe / *.old / *.bak / backup\
-  # 允许的两种策略：
-  #   * 0 份（本项目当前的选择）：安装器不留旧版，回滚 = 重装旧版 setup.exe；
-  #     证据是上面那条"文件清单 == 全新安装"——连一个多余文件都没有；
-  #   * 恰好 1 份：安装器保留了旧版，但只能保留一份（多份既占地方又说不清哪份是当前的）。
-  # 若将来改成"保留一份"，上面那条"清单 == 全新安装"会先红——这是**故意的绊线**：
-  # 换策略的人必须回到这一步，把那条断言一起改，而不是让策略悄悄变掉。
-  $rollback = @($programAfter | Where-Object {
-    $_.Rel -match '(?i)(uninstall[-_. ]?old|\.old$|\.bak$|(^|\\)backup(\\|$))'
-  })
-  $rollbackPolicy = 'none'
-  if ($rollback.Count -eq 1) { $rollbackPolicy = 'one' } elseif ($rollback.Count -gt 1) { $rollbackPolicy = 'many' }
-  $script:rollbackPolicy = $rollbackPolicy
-  $rollbackDetail = '策略 = none（零副本：旧版不保留，回滚靠重装旧版 setup.exe）'
-  if ($rollback.Count -eq 1) {
-    $rollbackDetail = '策略 = one（保留 1 份：{0}）' -f $rollback[0].Rel
-  } elseif ($rollback.Count -gt 1) {
-    $rollbackDetail = '策略 = many（保留 {0} 份：{1}）' -f $rollback.Count, (($rollback | ForEach-Object { $_.Rel }) -join '、')
-  }
-  Add-Check '回滚副本策略显式且可判定：0 份（零副本）或恰好 1 份' ($rollback.Count -le 1) $rollbackDetail
-  Write-Info ('回滚副本策略：{0}' -f $rollbackDetail)
-
-  # ---- 5. 便携版不受影响 ----
-  if ($portableReady) {
-    $portableAfter = @(Get-TreeSnapshot $portableDir)
-    $portableDiff = Compare-TreeSnapshot $portableSnapshot $portableAfter
-    Add-Check '便携副本逐字节不变（安装版升级器没有认领它）' $portableDiff.Ok (
-      '升级前后都是 {0} 个文件 / {1:N0} B' -f @($portableAfter).Count, (Get-TreeSize $portableDir))
-    if (-not $portableDiff.Ok) {
-      if (@($portableDiff.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f (@($portableDiff.Removed) -join '、')) }
-      if (@($portableDiff.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f (@($portableDiff.Added) -join '、')) }
-      if (@($portableDiff.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f (@($portableDiff.Changed) -join '、')) }
-    }
-    $portableVersionAfter = Invoke-Native -ExePath (Join-Path $portableDir 'otto-lite.exe') -ExeArguments '--version' -WorkDir $portableDir -EnvMap (Get-ChildEnv)
-    $portableLineAfter = $portableVersionAfter.Out.Trim()
-    Add-Check ('便携副本的 --version 仍是 {0} (portable)' -f $FromVersion) (
-      ($portableVersionAfter.Code -eq 0) -and
-      ($portableLineAfter -eq ('otto-lite {0} (portable)' -f $FromVersion))) (
-        '输出了 “{0}”' -f $portableLineAfter)
-    $portableLibAfter = Get-FileFact (Join-Path $portableDir 'data\library.otto')
-    Add-Check '便携副本自己的库文件还在、还是 OTTOLIB' (
-      $portableLibAfter.Exists -and (Test-OttoMagic -Path $portableLibAfter.Path).Ok) $portableLibAfter.Detail
-    $appdataLeak = @($dataAfter | Where-Object { $_.Rel -match '(?i)portable' })
-    Add-Check '便携版没有把东西漏进 %APPDATA%\OTTO（两种形态的路径不交叉）' ($appdataLeak.Count -eq 0) (
-      '升级后 %APPDATA%\OTTO 里 {0} 个文件，没有一个名字带 portable' -f @($dataAfter).Count)
-  }
-
-  # ---- 6. 收尾：升级之后仍然卸得干净，数据仍然在 ----
-  $dataNextToExe = Test-Path -LiteralPath (Join-Path $programDir 'data')
-  $settingsNextToExe = Test-Path -LiteralPath (Join-Path $programDir 'settings.json')
-  $flagNextToExe = Test-Path -LiteralPath (Join-Path $programDir 'otto-portable.flag')
-  Add-Check '程序目录里没有 data\ / settings.json / otto-portable.flag' (
-    (-not $dataNextToExe) -and (-not $settingsNextToExe) -and (-not $flagNextToExe)) $programDir
-
-  $procs = @(Get-ProcessUnder -Root $script:tempRoot)
-  Add-Check '覆盖安装之后没有残留进程' ($procs.Count -eq 0) ('{0} 个' -f $procs.Count)
-
-  $uninstall = Uninstall-Package -ProgramDir $programDir
-  Add-Check '覆盖升级之后仍然卸得干净（新版的 Uninstall.exe 认得这棵树）' (
-    ($uninstall.Code -eq 0) -and $uninstall.Gone) (
-      'exit={0}；{1} s 后目录消失' -f $uninstall.Code, $uninstall.GoneSeconds)
-
-  $dataAfterUninstall = @(Get-TreeSnapshot $script:ottoData)
-  $finalDiff = Compare-TreeSnapshot $dataBefore $dataAfterUninstall
-  Add-Check '升级 + 卸载之后用户数据仍然逐字节一致' $finalDiff.Ok (
-    '{0} 个文件' -f @($dataAfterUninstall).Count)
-  if (-not $finalDiff.Ok) {
-    if (@($finalDiff.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f (@($finalDiff.Removed) -join '、')) }
-    if (@($finalDiff.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f (@($finalDiff.Added) -join '、')) }
-    if (@($finalDiff.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f (@($finalDiff.Changed) -join '、')) }
-  }
-  Write-Info ('走完这一趟，program 里有过的文件：升级前 {0} 个 → 覆盖后 {1} 个' -f @($programBefore).Count, @($programAfter).Count)
-
-  Complete-Step
-}
-
-# ---------------------------------------------------------------------------
-# 第 0 步：前置条件（不满足就没法开始，直接 exit 1）
-# ---------------------------------------------------------------------------
-
-function Invoke-Preconditions {
-  Start-Step 0 '前置条件'
-  $have = Test-Path -LiteralPath $script:distDir -PathType Container
-  Add-Check 'zig\dist 存在' $have $script:distDir
-  if (-not $have) { Complete-Step; return $false }
-
-  $versions = Get-DistVersions
-  Add-Check 'dist 里有 setup.exe 产物' ($versions.Count -gt 0) ('{0} 个版本：{1}' -f $versions.Count, (($versions | Select-Object -First 3) -join ' / '))
-  if ($versions.Count -eq 0) { Complete-Step; return $false }
-
-  if ($Version) {
-    $setup = Get-SetupPath $Version
-    Add-Check ('指定版本 {0} 的 setup.exe 存在' -f $Version) (Test-Path -LiteralPath $setup -PathType Leaf) $setup
-    if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { Complete-Step; return $false }
-  }
-
-  $haveKey = Test-Path -LiteralPath $script:publicKey -PathType Leaf
-  Add-Check 'minisign 公钥存在' $haveKey $script:publicKey
-  $haveJs = Test-Path -LiteralPath $script:verifyJs -PathType Leaf
-  Add-Check 'verify-minisign.js 存在' $haveJs $script:verifyJs
-  $node = Get-Command node -ErrorAction SilentlyContinue
-  Add-Check 'node 可用（验签要用）' ($null -ne $node) ($(if ($null -ne $node) { $node.Source } else { '找不到 node' }))
-  $haveSamples = Test-Path -LiteralPath $script:samplesDir -PathType Container
-  Add-Check '样例素材目录存在（第 6 步要导入）' $haveSamples $script:samplesDir
-  $haveZigOut = Test-Path -LiteralPath $script:zigOutBin -PathType Container
-  if ($haveZigOut) {
-    Add-Check 'zig-out\bin 存在（第 10 步要比对它）' $true $script:zigOutBin
-  } else {
-    Add-Skip 'zig-out\bin 存在（第 10 步要比对它）' '没有编译产物，步骤 10 只能 SKIP（先 zig build）'
-  }
-  Complete-Step
-
-  $failed = $script:stepFailed[0]
-  return ($failed -eq 0)
-}
-
-# ---------------------------------------------------------------------------
-# 收尾
-# ---------------------------------------------------------------------------
-
-# 放在 finally 里：杀残留进程 → 恢复环境变量 → 删临时树 → 核对 %TEMP% 没有多出东西。
-function Invoke-Cleanup {
-  try {
-    # 可能有延迟：NSIS 卸载器的自删除副本在父进程退出后还要跑一会儿。
-    # 先等 10 s（每 100 ms 看一次）；到点还活着就是红——先记账再强杀，
-    # 强杀只是为了不给系统留进程，不洗白这条失败。
-    $idle = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 10
-    $script:cleanup.LeftoverProcesses = @()
-    if (-not $idle.Clear) {
-      $script:cleanup.LeftoverProcesses = @($idle.Left)
-      foreach ($proc in @($idle.Left)) {
-        try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { }
-      }
-      $null = Wait-NoProcessUnder -Root $script:tempRoot -TimeoutSeconds 5
-    }
-
-    foreach ($name in @('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) {
-      $before = $script:envBefore[$name]
-      if ([string]::IsNullOrEmpty($before)) {
-        [Environment]::SetEnvironmentVariable($name, $null, 'Process')
-      } else {
-        [Environment]::SetEnvironmentVariable($name, $before, 'Process')
-      }
-    }
-    $restored = $true
-    foreach ($name in @('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) {
-      if ([Environment]::GetEnvironmentVariable($name, 'Process') -ne $script:envBefore[$name]) { $restored = $false }
-    }
-    $script:cleanup.EnvRestored = $restored
-
-    if ($script:tempRoot -and (Test-Path -LiteralPath $script:tempRoot)) {
-      if ($KeepTemp) {
-        $script:cleanup.TempRemoved = $false
-      } else {
-        $script:cleanup.FreedBytes = Get-TreeSize $script:tempRoot
-        # 带超时的轮询：卸载器/索引器/杀毒软件可能还握着句柄。轮询只容忍延迟，
-        # 10 s 后还在就是红——严格性没有降低。
-        $script:cleanup.TempRemoved = $false
-        $watch = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($watch.Elapsed.TotalSeconds -lt 10) {
-          Remove-Item -LiteralPath $script:tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-          if (-not (Test-Path -LiteralPath $script:tempRoot)) { $script:cleanup.TempRemoved = $true; break }
-          Start-Sleep -Milliseconds 100
-        }
-        $script:cleanup.TempRemoved = $script:cleanup.TempRemoved -or (-not (Test-Path -LiteralPath $script:tempRoot))
-      }
-    } else {
-      $script:cleanup.TempRemoved = $true
-    }
-  } catch {
-    $script:cleanup.Error = $_.Exception.Message
-  }
-}
-
-# 收尾核对：与正文同一套断言（有名字、计入总数、失败时指名）。
-# 可能有延迟的三条（进程 / 临时目录 / 真实 %TEMP%）已经在 Invoke-Cleanup 里
-# 轮询到 10 s；这里只把结论变成具名断言，超时后照样红。
-function Write-CleanupReport {
-  $leftCount = @($script:cleanup.LeftoverProcesses).Count
-  $leftDetail = '10 s 内没有残留进程'
-  if ($leftCount -gt 0) {
-    $leftDetail = '10 s 后仍活着：' + ((@($script:cleanup.LeftoverProcesses) | ForEach-Object {
-      '{0}(pid={1})' -f $_.Name, $_.Id }) -join '、')
-  }
-  Add-Check '收尾：没有残留进程（NSIS 的自删除副本也算）' ($leftCount -eq 0) $leftDetail
-
-  $envDetail = '与启动时一致'
-  if (-not $script:cleanup.EnvRestored) {
-    $envDetail = (@('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP') | ForEach-Object {
-      '{0}={1}' -f $_, [Environment]::GetEnvironmentVariable($_, 'Process') }) -join '；'
-  }
-  Add-Check '收尾：环境变量已恢复（APPDATA / LOCALAPPDATA / TEMP / TMP）' $script:cleanup.EnvRestored $envDetail
-
-  if ($KeepTemp) {
-    Add-Skip '收尾：临时目录已删除' ('-KeepTemp：故意保留 {0}' -f $script:tempRoot)
-  } else {
-    Add-Check '收尾：临时目录已删除' $script:cleanup.TempRemoved ('释放 {0:N1} MB' -f ($script:cleanup.FreedBytes / 1MB))
-  }
-
-  # 真实 %TEMP% 也带超时轮询：NSIS 的自删除副本就落在 %TEMP% 里，消失得比卸载器晚。
-  # 只核对**我们要负责的**名字（otto-fresh-* / NSIS 的 ns*.tmp、~ns*.tmp）：
-  # %TEMP% 是公共目录，别的程序随时往里写（这台机器上出现过 VS 的 18 MB catalog
-  # 临时副本），把它们算成我们的红只会制造"断言全过、exit 1"的假红。
-  $newEntries = @()
-  if ($script:realTemp) {
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($true) {
-      $afterTemp = @(Get-ChildItem -LiteralPath $script:realTemp -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-      $newEntries = @($afterTemp | Where-Object {
-        if ($script:tempBefore -contains $_) { return $false }
-        return ($_ -like 'otto-fresh-*') -or ($_ -like 'ns*.tmp') -or ($_ -like '~ns*.tmp')
-      })
-      if (($newEntries.Count -eq 0) -or ($watch.Elapsed.TotalSeconds -ge 10)) { break }
-      Start-Sleep -Milliseconds 100
-    }
-  }
-  $script:cleanup.TempNewEntries = $newEntries
-  $tempDetail = [string]$script:realTemp
-  if ($newEntries.Count -gt 0) { $tempDetail = '多出：' + ($newEntries -join '、') }
-  Add-Check '收尾：真实 %TEMP% 没有多出东西' ($newEntries.Count -eq 0) $tempDetail
-
-  # 硬约束的最后一道：真实的 %APPDATA%\OTTO 一个文件都不该变。
-  $realAfter = @(Get-TreeLightSnapshot $script:realOtto)
-  $realSame = (@(Compare-Object -ReferenceObject @($script:realOttoBefore) -DifferenceObject @($realAfter)).Count -eq 0)
-  $script:cleanup.RealOttoUnchanged = $realSame
-  Add-Check '收尾：真实 %APPDATA%\OTTO 未被触碰' $realSame ('{0} 个文件，名字与大小一致' -f $realAfter.Count)
-  if (-not $realSame) {
-    $delta = @(Compare-Object -ReferenceObject @($script:realOttoBefore) -DifferenceObject @($realAfter))
-    foreach ($row in $delta) { Write-Host ('         {0} {1}' -f $row.SideIndicator, $row.InputObject) }
-  }
-
-  Add-Check '收尾：清理过程没有抛异常' ([string]::IsNullOrEmpty($script:cleanup.Error)) (
-    $(if ($script:cleanup.Error) { $script:cleanup.Error } else { '没有异常' }))
-}
-
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
-
-$script:tempRoot = Join-Path $env:TEMP ('otto-fresh-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-$script:downloads = Join-Path $script:tempRoot 'downloads'
-$script:programDir = Join-Path $script:tempRoot 'program'
-$script:fakeAppData = Join-Path $script:tempRoot 'appdata'
-$script:fakeLocalAppData = Join-Path $script:tempRoot 'localappdata'
-$script:fakeTemp = Join-Path $script:tempRoot 'temp'
-$script:shotsDir = Join-Path $script:tempRoot 'shots'
-$script:importSrc = Join-Path $script:tempRoot 'import-src'
-$script:outOtto = Join-Path $script:tempRoot 'out.otto'
-$script:ottoData = Join-Path $script:fakeAppData 'OTTO'
-# 第 9 步的便携副本：program 的兄弟目录，故意放在同一个临时树里（同盘、可整体清理）。
-$script:portableDir = Join-Path $script:tempRoot 'portable'
-
-$script:tempBefore = @()
-if ($script:realTemp) {
-  $script:tempBefore = @(Get-ChildItem -LiteralPath $script:realTemp -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-}
-# 真实用户目录的基线：收尾时要求它一个文件都没变（硬约束）。
-$script:realOttoBefore = @(Get-TreeLightSnapshot $script:realOtto)
-
-Write-Host 'OTTO Lite 全新用户测试'
-Write-Host ('仓库：{0}' -f $script:repoRoot)
-Write-Host ('临时根：{0}' -f $script:tempRoot)
-if ($script:elevated) {
-  Write-Host '会话：已提权（NSIS 原样运行：注册表 + 全用户快捷方式一并断言）'
-} else {
-  Write-Host '会话：非提权（__COMPAT_LAYER=RunAsInvoker；NSIS 的 HKLM / 全用户快捷方式两条写入被 /S 静默跳过）'
-}
-
-$script:setupPath = ''
-$script:oldSetupPath = ''
-$script:testVersion = ''
-$script:oldVersion = ''
-$script:zigOutBefore = @()
-$script:dataBeforeUninstall = @()
-# 第 3 步捕获的"全新安装 0.40.0 的文件清单"；第 9 步拿它当覆盖安装的对照组。
-$script:pristineNewFiles = @()
-# 第 9 步判定的回滚副本策略（none / one / many）：只用于报告与汇总行，不参与判定。
-$script:rollbackPolicy = 'n/a'
-# 第 6 步导入的素材数；第 9 步拿它核对"新版本读同一份库还能读出这么多"。
-$script:importCount = 0
 
 try {
-  if (-not (Invoke-Preconditions)) {
-    throw '前置条件不满足，测试无法开始'
+  Step 1 '隔离环境、产物与用户级安装契约'
+  $versions = Get-Versions
+  Add-Check '至少两个单根测试安装器（v1 与新版）' ($versions.Count -ge 2 -or ($FromSetup -and $ToSetup)) (
+    '用 package.ps1 -TestSetupOut 生成 otto-lite-<版本>-test-setup.exe')
+  if ($versions.Count -lt 2 -and (-not $FromSetup -or -not $ToSetup)) { throw '缺少升级起止安装器' }
+  if (-not $ToSetup) {
+    if (-not $Version) { $Version = @($versions.Keys | Sort-Object { [version]$_ } -Descending)[0] }
+    $ToSetup = $versions[$Version]
   }
-
-  $versions = @(Get-DistVersions)
-  if ($Version) { $script:testVersion = $Version } else { $script:testVersion = $versions[0] }
-  $script:setupPath = Get-SetupPath $script:testVersion
-  Write-Host ('被测版本：{0}' -f $script:testVersion)
-
-  # 第 10 步的基线：必须在任何安装 / 运行之前取。
-  if (Test-Path -LiteralPath $script:zigOutBin) {
-    $script:zigOutBefore = @(Get-TreeSnapshot $script:zigOutBin)
+  if (-not $FromSetup) {
+    if (-not $OldVersion) {
+      $OldVersion = @($versions.Keys | Where-Object { $_ -ne $Version } |
+        Sort-Object { [version]$_ } -Descending | Select-Object -First 1)
+    }
+    $FromSetup = $versions[$OldVersion]
   }
+  Add-Check 'v1 / 新版安装器都存在' ((Test-Path -LiteralPath $FromSetup -PathType Leaf) -and
+    (Test-Path -LiteralPath $ToSetup -PathType Leaf)) "$FromSetup -> $ToSetup"
+  if (-not (Test-Path -LiteralPath $FromSetup) -or -not (Test-Path -LiteralPath $ToSetup)) { throw '安装器路径无效' }
+  if (-not $Version) { $Version = [regex]::Match((Split-Path $ToSetup -Leaf), '\d+\.\d+\.\d+').Value }
+  if (-not $OldVersion) { $OldVersion = [regex]::Match((Split-Path $FromSetup -Leaf), '\d+\.\d+\.\d+').Value }
 
-  # -------------------------------------------------------------------------
-  # 1. 造全新目录
-  # -------------------------------------------------------------------------
-  Start-Step 1 '造全新目录（下载 / 程序 / 用户数据 / 本地数据）'
-  foreach ($dir in @($script:downloads, $script:programDir, $script:fakeAppData, $script:fakeLocalAppData, $script:fakeTemp)) {
+  $nsi = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'installer.nsi') -Raw
+  $un = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'installer-uninstall.nsh') -Raw
+  Add-Check '默认根是用户级 Programs\OTTO，且无需管理员' (
+    $nsi.Contains('InstallDir "$LOCALAPPDATA\Programs\OTTO"') -and
+    $nsi.Contains('RequestExecutionLevel user') -and -not $nsi.Contains('RequestExecutionLevel admin'))
+  Add-Check '图形目录页与 HKCU 卸载注册均启用' (
+    $nsi.Contains('!insertmacro MUI_PAGE_DIRECTORY') -and $nsi.Contains('WriteRegStr HKCU'))
+  Add-Check '卸载页默认主程序勾选、data/cache 不勾选' (
+    $un.Contains('${NSD_Check} $OttoMainCheck') -and
+    $un.Contains('${NSD_Uncheck} $OttoDataCheck') -and
+    $un.Contains('${NSD_Uncheck} $OttoCacheCheck'))
+  Add-Check '全选有独立再次确认；静默页有安全默认' (
+    $un.Contains('OTTO_UN_ALL_CONFIRM') -and $un.Contains('MessageBox MB_YESNO') -and
+    $un.Contains('${If} ${Silent}'))
+
+  $script:temp = Join-Path $env:TEMP ('otto-install-root-' + [guid]::NewGuid().ToString('N'))
+  $script:root = Join-Path $script:temp 'custom root' # 同时验证 /D= 支持空格。
+  $script:reference = Join-Path $script:temp 'reference'
+  $script:fakeAppData = Join-Path $script:temp 'fake-roaming'
+  $script:fakeLocal = Join-Path $script:temp 'fake-local'
+  $script:fakeTemp = Join-Path $script:temp 'fake-temp'
+  foreach ($dir in @($script:temp, $script:fakeAppData, $script:fakeLocal, $script:fakeTemp)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
   }
-  $allExist = $true
-  foreach ($dir in @($script:downloads, $script:programDir, $script:fakeAppData, $script:fakeLocalAppData)) {
-    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { $allExist = $false }
+  $script:sample = New-Sample
+  $legacy = Join-Path $script:fakeAppData 'OTTO'
+  New-Item -ItemType Directory -Force -Path $legacy | Out-Null
+  [IO.File]::WriteAllText((Join-Path $legacy 'settings.json'), '{"opacity":1,"legacy":true}')
+  [IO.File]::WriteAllBytes((Join-Path $legacy 'library.otto'), [byte[]](0x4f,0x4c,0x44))
+  $script:legacyBefore = @(Get-Tree $legacy)
+  Add-Check '旧 APPDATA 库已放置为毒丸；新根尚不存在' (
+    (Test-Path -LiteralPath $legacy) -and -not (Test-Path -LiteralPath $script:root))
+
+  Step 2 '安装 v1，首次运行生成新库、设置与缓存'
+  Install-Test $FromSetup $script:root | Out-Null
+  foreach ($name in @('otto-lite.exe', 'otto-thumb-host.exe', 'Uninstall.exe')) {
+    Add-Check "app 中有 $name" (Test-Path -LiteralPath (Join-Path $script:root "app\$name") -PathType Leaf)
   }
-  Add-Check '四个目录都建好（downloads / program / appdata / localappdata）' $allExist $script:tempRoot
+  Add-Check '安装器不创建 data 或 cache' (
+    -not (Test-Path -LiteralPath (Join-Path $script:root 'data')) -and
+    -not (Test-Path -LiteralPath (Join-Path $script:root 'cache')))
+  New-DataAndCache $script:root $true
+  $script:data = Join-Path $script:root 'data'; $script:cache = Join-Path $script:root 'cache'
+  $script:dataBefore = @(Get-Tree $script:data); $script:cacheBefore = @(Get-Tree $script:cache)
+  Add-Check 'v1 数据基线包含真实库、设置和标记' (
+    (Test-Path -LiteralPath (Join-Path $script:data 'library.otto')) -and
+    (Test-Path -LiteralPath (Join-Path $script:data 'settings.json')) -and $script:dataBefore.Count -ge 3)
+  Add-Check '缓存在根的兄弟目录，不在 data\cache' (
+    $script:cacheBefore.Count -ge 1 -and -not (Test-Path -LiteralPath (Join-Path $script:data 'cache')))
+  Add-Check '旧结构没有迁移到新库（首次运行只使用新根）' (
+    -not (Test-Path -LiteralPath (Join-Path $script:data 'library.json')))
 
-  $underTemp = $script:tempRoot.StartsWith([IO.Path]::GetFullPath($script:realTemp), [StringComparison]::OrdinalIgnoreCase)
-  Add-Check '整个临时根在 %TEMP% 下（不碰真实 APPDATA / Program Files）' $underTemp ('%TEMP% = {0}' -f $script:realTemp)
-
-  $noSpace = ($script:programDir -notmatch '\s')
-  Add-Check '安装路径不含空格（NSIS 的 /D= 不带引号）' $noSpace $script:programDir
-
-  $awayFromReal = $true
-  foreach ($real in @($script:realOtto, $script:programFiles, $script:programFilesX86)) {
-    if (-not $real) { continue }
-    if ($script:programDir.StartsWith([IO.Path]::GetFullPath($real), [StringComparison]::OrdinalIgnoreCase)) { $awayFromReal = $false }
-    if ($script:fakeAppData.StartsWith([IO.Path]::GetFullPath($real), [StringComparison]::OrdinalIgnoreCase)) { $awayFromReal = $false }
+  Step 3 '覆盖升级：app 全量替换，data/cache 逐字节不变'
+  Install-Test $ToSetup $script:reference | Out-Null
+  $referenceApp = @(Get-Tree (Join-Path $script:reference 'app'))
+  [IO.File]::WriteAllText((Join-Path $script:root 'app\obsolete-v1.txt'), 'must disappear')
+  if ($FaultDataLoss) {
+    Move-Item -LiteralPath (Join-Path $script:data 'settings.json') -Destination (Join-Path $script:data 'settings.json.lost') -Force
+    Write-Host '  [FAULT] 已模拟升级丢失 settings.json；下面的保留断言必须红。'
   }
-  Add-Check '安装目录与假 APPDATA 都不在真实 %APPDATA% / Program Files 里' $awayFromReal (
-    '真实 %APPDATA%\OTTO = {0}' -f $script:realOtto)
-  Add-Check '目录是空的（全新用户，没有可继承的状态）' (@(Get-ChildItem -LiteralPath $script:programDir -Force).Count -eq 0) (
-    'program\ 里 {0} 个条目' -f @(Get-ChildItem -LiteralPath $script:programDir -Force).Count)
-  Complete-Step
+  Install-Test $ToSetup $script:root | Out-Null
+  $appDiff = Compare-Tree $referenceApp @(Get-Tree (Join-Path $script:root 'app'))
+  Add-Check '覆盖后的 app 与新版全新安装逐文件、逐字节一致' $appDiff.Ok (
+    "files=$($referenceApp.Count) changed=$($appDiff.Changed.Count) added=$($appDiff.Added.Count) removed=$($appDiff.Removed.Count)")
+  if (-not $appDiff.Ok) { Show-Diff $appDiff }
+  Add-Check 'v1 遗留文件被 app 全量替换清除' (-not (Test-Path -LiteralPath (Join-Path $script:root 'app\obsolete-v1.txt')))
+  $dataAfter = @(Get-Tree $script:data); $cacheAfter = @(Get-Tree $script:cache)
+  # 无故障时 beforeUpgrade == dataBefore；故障时用它证明比较器确实能红。
+  $dataDiff = Compare-Tree $script:dataBefore $dataAfter
+  $cacheDiff = Compare-Tree $script:cacheBefore $cacheAfter
+  Add-Check '覆盖升级后整个 data 逐字节不变' $dataDiff.Ok (
+    "before=$($script:dataBefore.Count) after=$($dataAfter.Count) added=$($dataDiff.Added.Count) removed=$($dataDiff.Removed.Count) changed=$($dataDiff.Changed.Count)")
+  Add-Check '覆盖升级后整个 cache 逐字节不变' $cacheDiff.Ok (
+    "before=$($script:cacheBefore.Count) after=$($cacheAfter.Count) added=$($cacheDiff.Added.Count) removed=$($cacheDiff.Removed.Count) changed=$($cacheDiff.Changed.Count)")
+  if (-not $dataDiff.Ok) { Show-Diff $dataDiff }; if (-not $cacheDiff.Ok) { Show-Diff $cacheDiff }
+  $versionRun = Invoke-Native (Join-Path $script:root 'app\otto-lite.exe') '--version'
+  Add-Check '新版 exe 已就位且仍识别为 installed' (
+    $versionRun.Code -eq 0 -and $versionRun.Out.Trim() -eq "otto-lite $Version (installed)") $versionRun.Out.Trim()
+  $legacyDiff = Compare-Tree $script:legacyBefore @(Get-Tree $legacy)
+  Add-Check '旧 %APPDATA%\OTTO 毒丸逐字节不变' $legacyDiff.Ok
 
-  # -------------------------------------------------------------------------
-  # 2. "下载"并验签
-  # -------------------------------------------------------------------------
-  Start-Step 2 '“下载”：拷 setup.exe 到 downloads，用公钥验签'
-  $setupSource = $script:setupPath
-  Add-Check 'dist 里的 setup.exe 存在' (Test-Path -LiteralPath $setupSource -PathType Leaf) $setupSource
-  $sigSource = $setupSource + '.sig'
-  Add-Check '同目录有 .sig 签名' (Test-Path -LiteralPath $sigSource -PathType Leaf) $sigSource
+  Step 4 '默认 /S 卸载：只删 app，data/cache 保留'
+  Uninstall-Test $script:reference
+  Uninstall-Test $script:root
+  $defaultDataDiff = Compare-Tree $script:dataBefore @(Get-Tree $script:data)
+  $defaultCacheDiff = Compare-Tree $script:cacheBefore @(Get-Tree $script:cache)
+  Add-Check '默认卸载后 app 不存在，data 仍逐字节保留' (
+    -not (Test-Path -LiteralPath (Join-Path $script:root 'app')) -and $defaultDataDiff.Ok)
+  Add-Check '默认卸载后 cache 仍逐字节保留' $defaultCacheDiff.Ok
+  if (-not $defaultDataDiff.Ok) { Show-Diff $defaultDataDiff }
 
-  $localSetup = Join-Path $script:downloads 'otto-lite-setup.exe'
-  Copy-Item -LiteralPath $setupSource -Destination $localSetup -Force
-  Copy-Item -LiteralPath $sigSource -Destination ($localSetup + '.sig') -Force
-  $srcHash = Get-FileSha $setupSource
-  $dlHash = Get-FileSha $localSetup
-  $dlSize = (Get-Item -LiteralPath $localSetup).Length
-  Add-Check '“下载”的字节与 dist 一致（SHA-256）' ($srcHash -eq $dlHash -and $dlHash.Length -eq 64) (
-    'sha256={0}… {1:N0} B' -f $dlHash.Substring(0, 12), $dlSize)
+  Step 5 '只有明确选择才删除 data/cache'
+  Install-Test $ToSetup $script:root | Out-Null
+  $cacheBeforeDataChoice = @(Get-Tree $script:cache)
+  Uninstall-Test $script:root 'data'
+  $cacheAfterDataChoice = Compare-Tree $cacheBeforeDataChoice @(Get-Tree $script:cache)
+  Add-Check '勾选 data：data 删除、cache 保留' (
+    -not (Test-Path -LiteralPath $script:data) -and $cacheAfterDataChoice.Ok)
 
-  $verify = Test-ArtifactSignature -SignaturePath ($localSetup + '.sig') -ArtifactPath $localSetup
-  Add-Check 'minisign 验签通过（exit 0）' ($verify.Code -eq 0) ('exit={0}；{1}' -f $verify.Code, ($verify.Lines -join ' '))
-  if ($verify.Code -ne 0) { Write-FailureTail $verify.Lines 6 }
+  Install-Test $ToSetup $script:root | Out-Null
+  New-Item -ItemType Directory -Force -Path $script:data | Out-Null
+  [IO.File]::WriteAllText((Join-Path $script:data 'keep.json'), '{"kept":true}')
+  $beforeCacheChoice = @(Get-Tree $script:data)
+  Uninstall-Test $script:root 'cache'
+  $dataAfterCacheChoice = Compare-Tree $beforeCacheChoice @(Get-Tree $script:data)
+  Add-Check '勾选 cache：cache 删除、data 保留' (
+    -not (Test-Path -LiteralPath $script:cache) -and $dataAfterCacheChoice.Ok)
 
-  # 反向对照：证明验签真的在看字节，而不是恒返回 0。
-  $tamper = Join-Path $script:downloads 'tampered.exe'
-  Copy-Item -LiteralPath $localSetup -Destination $tamper -Force
-  $stream = [IO.File]::Open($tamper, [IO.FileMode]::Append, [IO.FileAccess]::Write)
-  try { $stream.WriteByte(0x00) } finally { $stream.Dispose() }
-  $tamperResult = Test-ArtifactSignature -SignaturePath ($localSetup + '.sig') -ArtifactPath $tamper
-  Add-Check '改一个字节的副本验签必须失败（反向对照）' ($tamperResult.Code -ne 0) (
-    'exit={0}（期望非 0）' -f $tamperResult.Code)
-  Remove-Item -LiteralPath $tamper -Force -ErrorAction SilentlyContinue
-  Complete-Step
+  Install-Test $ToSetup $script:root | Out-Null
+  New-DataAndCache $script:root $false
+  Uninstall-Test $script:root 'all'
+  Add-Check '全选：app/data/cache 全部删除' (
+    -not (Test-Path -LiteralPath (Join-Path $script:root 'app')) -and
+    -not (Test-Path -LiteralPath $script:data) -and -not (Test-Path -LiteralPath $script:cache))
+  $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($script:temp, [StringComparison]::OrdinalIgnoreCase) })
+  Add-Check '验收结束无残留进程' ($left.Count -eq 0) "count=$($left.Count)"
 
-  # -------------------------------------------------------------------------
-  # 3. 静默安装
-  # -------------------------------------------------------------------------
-  Start-Step 3 '静默安装到 program（/S + /D=）'
-  $install = Install-Package -SetupPath $localSetup -Target $script:programDir -Label 'setup.exe'
-  Add-Check '安装器退出码 0' ($install.Code -eq 0) ('exit={0}；{1} s' -f $install.Code, $install.Seconds)
-  if ($install.Code -ne 0) { Write-FailureTail $install.Lines 8 }
-
-  $expected = @('otto-lite.exe', 'otto-thumb-host.exe', 'Uninstall.exe', 'README.txt')
-  foreach ($name in $expected) {
-    $path = Join-Path $script:programDir $name
-    $exists = Test-Path -LiteralPath $path -PathType Leaf
-    $size = 0
-    if ($exists) { $size = (Get-Item -LiteralPath $path).Length }
-    Add-Check ('安装目录里有 {0}' -f $name) ($exists -and $size -gt 0) ('{0:N0} B' -f $size)
-  }
-  $dataNextToExe = Test-Path -LiteralPath (Join-Path $script:programDir 'data')
-  Add-Check '安装目录里没有 data\（数据不写 Program Files）' (-not $dataNextToExe) 'program\data 不存在'
-  Add-Check 'setup.exe 装完仍留在 downloads（安装器不自我消化）' (Test-Path -LiteralPath $localSetup -PathType Leaf) $localSetup
-  $installProcs = @(Get-ProcessUnder -Root $script:tempRoot)
-  Add-Check '安装后没有残留进程' ($installProcs.Count -eq 0) ('{0} 个' -f $installProcs.Count)
-
-  # 第 9 步的对照组：这一份是"干净目录里装出来的新版应用层"。
-  # 覆盖安装之后拿它逐文件比 —— 名字集合相同（没有旧版残留 / 没有备份副本）、
-  # 每个文件哈希相同（旧版文件真的被替换掉了），两条都不用硬编码文件名清单。
-  $script:pristineNewFiles = @(Get-TreeSnapshot $script:programDir)
-  Add-Check '记下全新安装的文件清单（第 9 步的对照组）' (@($script:pristineNewFiles).Count -ge 3) (
-    '{0} 个文件 / {1:N0} B' -f @($script:pristineNewFiles).Count, (Get-TreeSize $script:programDir))
-  if ($script:elevated) {
-    $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OTTO Lite'
-    $regOk = Test-Path -LiteralPath $key
-    Add-Check '（提权会话）卸载项写进了 HKLM' $regOk $key
-    if ($regOk) {
-      $displayVersion = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).DisplayVersion
-      Add-Check '（提权会话）DisplayVersion 与被测版本一致' ($displayVersion -eq $script:testVersion) ('{0}' -f $displayVersion)
-    }
-  } else {
-    Add-Skip '（提权会话）卸载项写进了 HKLM' '非提权：NSIS 的 HKLM 写入被兼容层静默跳过，Program Files 与注册表零写入'
-  }
-  Complete-Step
-
-  # -------------------------------------------------------------------------
-  # 4. 首次启动：--version
-  # -------------------------------------------------------------------------
-  Start-Step 4 '首次启动 --version（无窗口）'
-  $installedExe = Join-Path $script:programDir 'otto-lite.exe'
-  $versionRun = Invoke-Native -ExePath $installedExe -ExeArguments '--version' -WorkDir $script:programDir -EnvMap (Get-ChildEnv)
-  $versionLine = $versionRun.Out.Trim()
-  $expectedLine = 'otto-lite {0} (installed)' -f $script:testVersion
-  Add-Check '--version 退出码 0' ($versionRun.Code -eq 0) ('exit={0}；{1} s' -f $versionRun.Code, $versionRun.Seconds)
-  Add-Check '形态是 installed 且版本一致' ($versionLine -eq $expectedLine) ('输出了 “{0}”' -f $versionLine)
-  Add-Check '--version 不创建用户数据目录（第一次启动不该凭空造状态）' (-not (Test-Path -LiteralPath $script:ottoData)) (
-    '%APPDATA%\OTTO 在 --version 之后仍不存在')
-  Complete-Step
-
-  # -------------------------------------------------------------------------
-  # 5. 首次真实启动（隐藏窗口）：设置面板 → appdata\OTTO
-  # -------------------------------------------------------------------------
-  Start-Step 5 '首次真实启动（隐藏窗口）：设置写进 %APPDATA%\OTTO'
-  $shot = Join-Path $script:shotsDir 'first-run.png'
-  New-Item -ItemType Directory -Force -Path $script:shotsDir | Out-Null
-  $panelArgs = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $shot, $script:panelScript
-  $panelRun = Invoke-Native -ExePath $installedExe -ExeArguments $panelArgs -WorkDir $script:programDir -EnvMap (Get-ChildEnv)
-  Add-Check '设置面板那一跑退出码 0' ($panelRun.Code -eq 0) ('exit={0}；{1} s' -f $panelRun.Code, $panelRun.Seconds)
-  Add-Check '窗口是隐藏的（--nanoui-snapshot 收了截图）' (Test-Path -LiteralPath $shot -PathType Leaf) (
-    'png {0:N0} B' -f (Get-Item -LiteralPath $shot -ErrorAction SilentlyContinue).Length)
-
-  $ottoExists = Test-Path -LiteralPath $script:ottoData -PathType Container
-  Add-Check '%APPDATA%\OTTO 被创建' $ottoExists $script:ottoData
-  $settingsPath = Join-Path $script:ottoData 'settings.json'
-  $settings = Test-SettingsFile -Path $settingsPath
-  Add-Check 'settings.json 存在且可解析（五个字段 + opacity=153）' $settings.Ok $settings.Detail
-  $settingsV2 = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-  Add-Check '新版设置写 v2：version + view.expanded_folders + layout 尺寸' (
-    ([int]$settingsV2.version -eq 2) -and ($null -ne $settingsV2.view) -and
-    ($null -ne $settingsV2.view.expanded_folders) -and
-    ([int]$settingsV2.layout.width -eq 380) -and ([int]$settingsV2.layout.height -eq 700)) (
-      'version={0}；layout={1}x{2}' -f $settingsV2.version, $settingsV2.layout.width, $settingsV2.layout.height)
-  $cacheDir = Join-Path $script:ottoData 'cache\thumbs'
-  Add-Check 'cache\thumbs 也建在 %APPDATA%\OTTO 下' (Test-Path -LiteralPath $cacheDir -PathType Container) $cacheDir
-  $dataNextToExe = Test-Path -LiteralPath (Join-Path $script:programDir 'data')
-  $settingsNextToExe = Test-Path -LiteralPath (Join-Path $script:programDir 'settings.json')
-  Add-Check '程序目录里没有 data\ 也没有 settings.json' ((-not $dataNextToExe) -and (-not $settingsNextToExe)) $script:programDir
-  Write-TreeTable -Path $script:ottoData -Title '首次启动后的用户数据'
-  Complete-Step
-
-  # -------------------------------------------------------------------------
-  # 6. 导入素材
-  # -------------------------------------------------------------------------
-  Start-Step 6 '导入素材：--import 与 --import-into 都要出 library.otto'
-  New-Item -ItemType Directory -Force -Path $script:importSrc | Out-Null
-  $picked = @()
-  foreach ($name in @('img00.png', 'img01.png')) {
-    $candidate = Join-Path $script:samplesDir $name
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $picked += $candidate }
-  }
-  if ($picked.Count -eq 0) {
-    # 样例目录不在约定的文件上时，退到"前两个普通文件"，不让这一步无谓地红。
-    $picked = @(Get-ChildItem -LiteralPath $script:samplesDir -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.Length -gt 0 } | Sort-Object Name | Select-Object -First 2 | ForEach-Object { $_.FullName })
-  }
-  foreach ($file in $picked) { Copy-Item -LiteralPath $file -Destination $script:importSrc -Force }
-  $importCount = @(Get-ChildItem -LiteralPath $script:importSrc -File).Count
-  # 第 9 步要核对"新版本读同一份库还能读出这么多"，所以放在 script 作用域。
-  $script:importCount = $importCount
-  Add-Check '准备了 1–2 个素材' ($importCount -ge 1 -and $importCount -le 2) ('{0} 个：{1}' -f $importCount, (($picked | ForEach-Object { Split-Path $_ -Leaf }) -join '、'))
-
-  $importArgs = '--import "{0}" --save "{1}"' -f $script:importSrc, $script:outOtto
-  $importRun = Invoke-Native -ExePath $installedExe -ExeArguments $importArgs -WorkDir $script:programDir -EnvMap (Get-ChildEnv)
-  Add-Check '--import 退出码 0' ($importRun.Code -eq 0) ('exit={0}；{1} s' -f $importRun.Code, $importRun.Seconds)
-  $summary = ($importRun.Lines | Where-Object { $_ -match '^scanned=' } | Select-Object -Last 1)
-  if (-not $summary) { $summary = '' }
-  $added = 0
-  $wroteBytes = 0
-  $m = [regex]::Match($summary, '^scanned=(\d+) added=(\d+).* bytes=(\d+)')
-  if ($m.Success) { $added = [int]$m.Groups[2].Value; $wroteBytes = [int]$m.Groups[3].Value }
-  Add-Check '--import 的摘要说导入了 2 个素材' ($summary -ne '' -and $added -eq $importCount) (
-    ('摘要：{0}' -f $summary))
-  $outMagic = Test-OttoMagic -Path $script:outOtto
-  Add-Check '--import 的 --save 产出 OTTOLIB 文件' $outMagic.Ok $outMagic.Detail
-  $outSize = 0
-  if (Test-Path -LiteralPath $script:outOtto -PathType Leaf) { $outSize = (Get-Item -LiteralPath $script:outOtto).Length }
-  Add-Check '落盘字节数与摘要一致' ($wroteBytes -gt 0 -and $outSize -eq $wroteBytes) ('{0:N0} B' -f $outSize)
-
-  # 真正的"全新用户"路径：不带 --save，让程序按运行形态自己决定落点。
-  $intoArgs = '--import-into "{0}"' -f $script:importSrc
-  $intoRun = Invoke-Native -ExePath $installedExe -ExeArguments $intoArgs -WorkDir $script:programDir -EnvMap (Get-ChildEnv)
-  Add-Check '--import-into 退出码 0' ($intoRun.Code -eq 0) ('exit={0}；{1} s' -f $intoRun.Code, $intoRun.Seconds)
-  $intoSummary = ($intoRun.Lines | Where-Object { $_ -match '^scanned=' } | Select-Object -Last 1)
-  if (-not $intoSummary) { $intoSummary = '' }
-  $libraryOtto = Join-Path $script:ottoData 'library.otto'
-  Add-Check 'library.otto 出现在 %APPDATA%\OTTO' (Test-Path -LiteralPath $libraryOtto -PathType Leaf) $libraryOtto
-  Add-Check '--import-into 的摘要指向 %APPDATA%\OTTO\library.otto' (
-    $intoSummary -match ('wrote=' + [regex]::Escape($libraryOtto))) $intoSummary
-  $libMagic = Test-OttoMagic -Path $libraryOtto
-  Add-Check 'library.otto 是真正的 OTTOLIB 文件' $libMagic.Ok $libMagic.Detail
-
-  $infoRun = Invoke-Native -ExePath $installedExe -ExeArguments ('--library-info "{0}"' -f $libraryOtto) -EnvMap (Get-ChildEnv)
-  $samplesCount = -1
-  $mi = [regex]::Match($infoRun.Text, 'samples=(\d+)')
-  if ($mi.Success) { $samplesCount = [int]$mi.Groups[1].Value }
-  Add-Check '装有新导入库的 --library-info 说 samples=2' (($infoRun.Code -eq 0) -and ($samplesCount -eq $importCount)) (
-    'exit={0}；samples={1}' -f $infoRun.Code, $samplesCount)
-  $dataNextToExe = Test-Path -LiteralPath (Join-Path $script:programDir 'data')
-  Add-Check '导入没有往程序目录写东西' (-not $dataNextToExe) 'program\data 不存在'
-  Complete-Step
-
-  # -------------------------------------------------------------------------
-  # 7. 静默卸载
-  # -------------------------------------------------------------------------
-  Start-Step 7 '静默卸载：程序消失，用户数据逐个文件保留'
-  $script:dataBeforeUninstall = @(Get-TreeSnapshot $script:ottoData)
-  Write-TreeTable -Path $script:ottoData -Title '卸载前'
-  $uninstall = Uninstall-Package -ProgramDir $script:programDir
-  Add-Check '卸载器退出码 0' ($uninstall.Code -eq 0) ('exit={0}；父进程 {1} s' -f $uninstall.Code, $uninstall.ExitSeconds)
-  Add-Check 'program 目录整个消失' $uninstall.Gone ('{0} s 后不存在' -f $uninstall.GoneSeconds)
-  if (-not $uninstall.Gone) {
-    $left = @(Get-ChildItem -LiteralPath $script:programDir -Force -ErrorAction SilentlyContinue)
-    Write-Host ('         残留：{0}' -f (($left | ForEach-Object { $_.Name }) -join '、'))
-  }
-  $clean = $uninstall.Processes
-  $processDetail = ''
-  if ($clean.Clear) {
-    $processDetail = '{0} s 内退出' -f $clean.Seconds
-  } else {
-    $processDetail = '还活着：' + (($clean.Left | ForEach-Object { $_.Name }) -join '、')
-  }
-  Add-Check '卸载后没有残留进程（NSIS 的自删除副本也算）' $clean.Clear $processDetail
-
-  $ottoStill = Test-Path -LiteralPath $script:ottoData -PathType Container
-  Add-Check '%APPDATA%\OTTO 仍然存在' $ottoStill $script:ottoData
-  $dataAfterUninstall = @(Get-TreeSnapshot $script:ottoData)
-  $diff = Compare-TreeSnapshot $script:dataBeforeUninstall $dataAfterUninstall
-  Add-Check '用户数据逐个文件一致（名字 + 大小 + SHA-256）' $diff.Ok (
-    '卸载前 {0} 个文件 / 卸载后 {1} 个文件' -f @($script:dataBeforeUninstall).Count, @($dataAfterUninstall).Count)
-  if (-not $diff.Ok) {
-    if (@($diff.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f ($diff.Removed -join '、')) }
-    if (@($diff.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f ($diff.Added -join '、')) }
-    if (@($diff.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f ($diff.Changed -join '、')) }
-  }
-  $cacheStill = Test-Path -LiteralPath (Join-Path $script:ottoData 'cache\thumbs') -PathType Container
-  Add-Check '缓存目录也留着' $cacheStill 'cache\thumbs'
-  Write-TreeTable -Path $script:ottoData -Title '卸载后'
-  Complete-Step
-
-  # -------------------------------------------------------------------------
-  # 8. 装另一个版本
-  # -------------------------------------------------------------------------
-  Start-Step 8 '装另一个版本：旧数据被沿用'
-  $candidates = @($versions | Where-Object { [version]$_ -lt [version]$script:testVersion })
-  if ($OldVersion) { $script:oldVersion = $OldVersion } elseif ($candidates.Count -gt 0) { $script:oldVersion = $candidates[0] }
-  if (-not $script:oldVersion) {
-    Add-Skip '装另一个（更旧的）版本' 'zig\dist 里没有比被测版本更旧的 setup.exe'
-    Complete-Step
-  } else {
-    $script:oldSetupPath = Get-SetupPath $script:oldVersion
-    Add-Check ('更旧版本的 setup.exe 存在（{0}）' -f $script:oldVersion) (Test-Path -LiteralPath $script:oldSetupPath -PathType Leaf) $script:oldSetupPath
-    $oldSig = $script:oldSetupPath + '.sig'
-    if (Test-Path -LiteralPath $oldSig -PathType Leaf) {
-      $oldVerify = Test-ArtifactSignature -SignaturePath $oldSig -ArtifactPath $script:oldSetupPath
-      Add-Check ('旧版本 setup.exe 验签通过（{0}）' -f $script:oldVersion) ($oldVerify.Code -eq 0) ('exit={0}' -f $oldVerify.Code)
-    } else {
-      Add-Skip '旧版本 setup.exe 验签' '这个版本没有 .sig'
-    }
-
-    $reinstall = Install-Package -SetupPath $script:oldSetupPath -Target $script:programDir -Label ('setup.exe ' + $script:oldVersion)
-    Add-Check '旧版本安装退出码 0' ($reinstall.Code -eq 0) ('exit={0}；{1} s' -f $reinstall.Code, $reinstall.Seconds)
-    $oldExe = Join-Path $script:programDir 'otto-lite.exe'
-    $oldVersionRun = Invoke-Native -ExePath $oldExe -ExeArguments '--version' -WorkDir $script:programDir -EnvMap (Get-ChildEnv)
-    $oldLine = $oldVersionRun.Out.Trim()
-    Add-Check ('旧版本的 --version 说 {0} (installed)' -f $script:oldVersion) (
-      ($oldVersionRun.Code -eq 0) -and ($oldLine -eq ('otto-lite {0} (installed)' -f $script:oldVersion))) (
-        '输出了 “{0}”' -f $oldLine)
-
-    $dataAfterOld = @(Get-TreeSnapshot $script:ottoData)
-    $oldDiff = Compare-TreeSnapshot $script:dataBeforeUninstall $dataAfterOld
-    Add-Check '旧版本沿用同一份用户数据（名字 + 大小 + SHA-256 未变）' $oldDiff.Ok (
-      '{0} 个文件' -f @($dataAfterOld).Count)
-    if (-not $oldDiff.Ok) {
-      if (@($oldDiff.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f ($oldDiff.Removed -join '、')) }
-      if (@($oldDiff.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f ($oldDiff.Added -join '、')) }
-      if (@($oldDiff.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f ($oldDiff.Changed -join '、')) }
-    }
-    $dataNextToExe = Test-Path -LiteralPath (Join-Path $script:programDir 'data')
-    Add-Check '旧版本也没有在程序目录里造 data\' (-not $dataNextToExe) $script:programDir
-
-    # 0.x 不承诺向下兼容（CHARTER 十）：旧版本能不能解析新格式只报告，不判定。
-    $oldInfo = Invoke-Native -ExePath $oldExe -ExeArguments ('--library-info "{0}"' -f $libraryOtto) -EnvMap (Get-ChildEnv)
-    Write-Info ('旧版本读 library.otto：exit={0} {1}' -f $oldInfo.Code, ($oldInfo.Text -replace "`r?`n", ' / ').Trim())
-
-    $cleanupRun = Uninstall-Package -ProgramDir $script:programDir
-    Add-Check '旧版本也能卸干净' ($cleanupRun.Code -eq 0 -and $cleanupRun.Gone) (
-      'exit={0}；{1} s 后目录消失' -f $cleanupRun.Code, $cleanupRun.GoneSeconds)
-    $afterFinal = @(Get-TreeSnapshot $script:ottoData)
-    $finalDiff = Compare-TreeSnapshot $script:dataBeforeUninstall $afterFinal
-    Add-Check '两次卸载之后用户数据仍然逐字节一致' $finalDiff.Ok ('{0} 个文件' -f @($afterFinal).Count)
-    Complete-Step
-  }
-
-  # -------------------------------------------------------------------------
-  # 9. 覆盖式升级（第 7/8 步都是"先卸再装"；这里是"不卸载直接盖"）
-  # -------------------------------------------------------------------------
-  if (-not $script:oldVersion) {
-    Start-Step 9 '覆盖式升级（同一个 program 目录上直接盖新版本）'
-    Add-Skip '覆盖式升级' '没有更旧的版本可以当升级起点（zig\dist 只有一个版本）'
-    Complete-Step
-  } else {
-    Invoke-OverwriteUpgrade -FromVersion $script:oldVersion -ToVersion $script:testVersion
-  }
-
-  # -------------------------------------------------------------------------
-  # 10. 编译产物零污染
-  # -------------------------------------------------------------------------
-  Start-Step 10 '编译产物零污染（zig-out\bin 全程不变）'
-  if (-not (Test-Path -LiteralPath $script:zigOutBin)) {
-    Add-Skip 'zig-out\bin 内容零变化' '没有编译产物可以比对'
-    Complete-Step
-  } else {
-    $after = @(Get-TreeSnapshot $script:zigOutBin)
-    $before = @($script:zigOutBefore)
-    $purity = Compare-TreeSnapshot $before $after
-    Add-Check 'zig-out\bin 内容零变化（名字 + 大小 + SHA-256）' $purity.Ok (
-      '{0} 个文件 / {1:N0} B' -f $after.Count, (Get-TreeSize $script:zigOutBin))
-    if (-not $purity.Ok) {
-      if (@($purity.Added).Count -gt 0) { Write-Host ('         多出：{0}' -f ($purity.Added -join '、')) }
-      if (@($purity.Removed).Count -gt 0) { Write-Host ('         消失：{0}' -f ($purity.Removed -join '、')) }
-      if (@($purity.Changed).Count -gt 0) { Write-Host ('         内容变了：{0}' -f ($purity.Changed -join '、')) }
-    }
-    foreach ($row in $after) { Write-Host ('    {0,-24} {1,12:N0} B  {2}…' -f $row.Rel, $row.Length, $row.Sha.Substring(0, 12)) }
-    $dataNextToExe = Test-Path -LiteralPath (Join-Path $script:zigOutBin 'data')
-    $settingsNextToExe = Test-Path -LiteralPath (Join-Path $script:zigOutBin 'settings.json')
-    Add-Check 'zig-out\bin 里没有 data\ / settings.json' ((-not $dataNextToExe) -and (-not $settingsNextToExe)) $script:zigOutBin
-    Complete-Step
-  }
+  Step 6 '汇总'
 } catch {
-  Write-Host ''
-  Write-Host ('  [FAIL] 未预期错误：{0}' -f $_.Exception.Message) -ForegroundColor Red
-  if ($_.ScriptStackTrace) { Write-Host ('         ' + ($_.ScriptStackTrace -split "`r?`n")[0]) }
-  if ($script:currentStep -gt 0) {
-    $script:stepTotal[$script:currentStep] = $script:stepTotal[$script:currentStep] + 1
-    $script:stepFailed[$script:currentStep] = $script:stepFailed[$script:currentStep] + 1
-    $null = $script:checks.Add((New-Object psobject -Property @{
-      Step = $script:currentStep
-      Name = '未预期错误（脚本中止）'
-      Ok = $false
-      Skip = $false
-    }))
-  }
+  Add-Check '验收脚本未预期异常' $false $_.Exception.Message
 } finally {
-  Invoke-Cleanup
+  if ($script:temp -and (Test-Path -LiteralPath $script:temp) -and -not $KeepTemp) {
+    Remove-Item -LiteralPath $script:temp -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
-
-# ---------------------------------------------------------------------------
-# 11. 收尾核对（与正文同一套断言：有名字、计入总数、失败时指名）
-# ---------------------------------------------------------------------------
-Start-Step 11 '收尾核对（进程 / 环境变量 / 临时目录 / 真实用户目录）'
-Write-CleanupReport
-Complete-Step
-
-# ---------------------------------------------------------------------------
-# 汇总
-# ---------------------------------------------------------------------------
+$all = @($script:checks); $failed = @($all | Where-Object { -not $_.Ok })
 $script:clock.Stop()
-$allChecks = @($script:checks)
-$failed = @($allChecks | Where-Object { -not $_.Ok })
-$skipped = @($allChecks | Where-Object { $_.Skip })
-$passed = @($allChecks | Where-Object { $_.Ok -and -not $_.Skip })
-
-Write-Head '── 汇总 ──'
-$tableRows = @()
-$header = @('步骤', '内容', '结果', '断言')
-$widths = @(0, 0, 0, 0)
-for ($i = 0; $i -lt $header.Count; $i++) { $widths[$i] = Get-DisplayWidth $header[$i] }
-foreach ($number in @(0..$script:stepCount)) {
-  if (-not $script:stepTitles.ContainsKey($number)) { continue }
-  $total = $script:stepTotal[$number]
-  $bad = $script:stepFailed[$number]
-  $skipCount = $script:stepSkipped[$number]
-  $verdict = 'PASS'
-  if ($bad -gt 0) { $verdict = 'FAIL' }
-  elseif ($total -eq $skipCount) { $verdict = 'SKIP' }
-  $name = $script:stepTitles[$number]
-  if ($number -eq 0) { $name = '前置条件' }
-  $note = '{0}/{1} 项' -f ($total - $skipCount), $total
-  if ($bad -gt 0) { $note = '{0} 项失败 / {1} 项' -f $bad, $total }
-  $label = if ($number -eq 0) { '0' } else { [string]$number }
-  $cells = @($label, $name, $verdict, $note)
-  for ($i = 0; $i -lt $cells.Count; $i++) {
-    $width = Get-DisplayWidth $cells[$i]
-    if ($width -gt $widths[$i]) { $widths[$i] = $width }
-  }
-  $tableRows += , $cells
-}
-Write-Host ('  ' + (Format-Cells $header $widths))
-foreach ($cells in $tableRows) { Write-Host ('  ' + (Format-Cells $cells $widths)) }
-Write-Host ('  {0}' -f ('─' * 60))
-Write-Host ('  断言：{0} PASS / {1} FAIL / {2} SKIP' -f $passed.Count, $failed.Count, $skipped.Count)
-if ($failed.Count -gt 0) {
-  Write-Host ('  红在：{0}' -f ((@($failed | Select-Object -First 6) | ForEach-Object { $_.Name }) -join ' / ')) -ForegroundColor Red
-}
-Write-Host ('  总耗时：{0:N1} s' -f $script:clock.Elapsed.TotalSeconds)
-
-$stepsDesigned = $script:stepCount
-$stepsPassed = 0
-foreach ($number in @(1..$script:stepCount)) {
-  if (-not $script:stepTitles.ContainsKey($number)) { continue }
-  if ($script:stepFailed[$number] -eq 0) { $stepsPassed++ }
-}
-
-$failedLabel = 'none'
-if ($failed.Count -gt 0) {
-  $failedLabel = (@($failed | Select-Object -First 3 | ForEach-Object { $_.Name }) -join '|')
-  if ($failed.Count -gt 3) { $failedLabel += ('|+{0}' -f ($failed.Count - 3)) }
-}
-
-# -FaultDataLoss 是"证明断言会红"的开关：这一跑**必须**红。
-# 如果它反而全绿，那说明数据层断言没在比对真实文件——按失败处理，并单独点名。
-$faultEscaped = ($FaultDataLoss -and $failed.Count -eq 0)
-if ($faultEscaped) { $failedLabel = 'FAULT-NOT-CAUGHT' }
-
-$ok = (($failed.Count -eq 0) -and (-not $FaultDataLoss))
-Write-Host ''
-$oldLabel = ''
-if ($script:oldVersion) { $oldLabel = $script:oldVersion } else { $oldLabel = 'none' }
+Write-Host ("`n断言：{0} PASS / {1} FAIL；data基线={2} 文件；cache基线={3} 文件；耗时={4:N1}s" -f
+  ($all.Count - $failed.Count), $failed.Count, @($script:dataBefore).Count,
+  @($script:cacheBefore).Count, $script:clock.Elapsed.TotalSeconds)
 if ($FaultDataLoss) {
-  Write-Host '  [FAULT] -FaultDataLoss：这次运行故意在覆盖安装之前把 library.otto 改名，'
-  Write-Host '  [FAULT] 第 9 步的数据层断言必须红；这是反向对照，不是验收失败。'
-  if ($faultEscaped) {
-    Write-Host '  [FAULT] 可是它全绿了 —— 说明那些断言没有在比对真实文件，按失败处理。' -ForegroundColor Red
-  }
+  Write-Host '反向证明：-FaultDataLoss 故意删除设置；本次必须 FAIL，若全绿才说明验收失效。'
 }
-if ($ok) {
-  Write-Host ('全新用户测试通过：{0} 步 / {1} 项断言' -f $stepsPassed, $passed.Count) -ForegroundColor Green
-  # 机器可读的一行：health.ps1 的 -Fresh 只认这一行。前缀与字段名是 ASCII；
-  # 只有 FAIL 行的 names= 里可能出现中文断言名。
-  Write-Host ('fresh-user: PASS steps={0}/{1} checks={2}/{3} skip={4} version={5} old={6} rollback={7} sec={8:N1}' -f
-    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $skipped.Count, $script:testVersion, $oldLabel, $script:rollbackPolicy, $script:clock.Elapsed.TotalSeconds)
-  Write-Host ('被测版本 {0}{1}；回滚副本策略 {2}' -f $script:testVersion, $(if ($script:oldVersion) { '；另一个版本 ' + $script:oldVersion } else { '' }), $script:rollbackPolicy)
-  exit 0
-} else {
-  Write-Host ('全新用户测试失败：{0} 项断言红了' -f $failed.Count) -ForegroundColor Red
-  Write-Host ('fresh-user: FAIL steps={0}/{1} checks={2}/{3} failed={4} names={5} version={6} old={7} rollback={8} sec={9:N1}' -f
-    $stepsPassed, $stepsDesigned, $passed.Count, $allChecks.Count, $failed.Count, $failedLabel, $script:testVersion, $oldLabel, $script:rollbackPolicy, $script:clock.Elapsed.TotalSeconds)
-  exit 1
-}
+$ok = $failed.Count -eq 0 -and -not $FaultDataLoss
+$summary = 'fresh-user: {0} steps={1}/{2} checks={3}/{4} skip=0 version={5} old={6} failed={7} sec={8:N1}' -f
+  $(if ($ok) { 'PASS' } else { 'FAIL' }), $(if ($ok) { 6 } else { 0 }), 6,
+  ($all.Count - $failed.Count), $all.Count, $Version, $OldVersion, $failed.Count, $script:clock.Elapsed.TotalSeconds
+Write-Host $summary
+if ($failed.Count) { Write-Host ('红在：' + (($script:failedNames | Select-Object -First 6) -join ' / ')) }
+exit $(if ($ok) { 0 } else { 1 })

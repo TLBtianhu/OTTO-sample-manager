@@ -18,7 +18,9 @@ param(
   [string]$AppDir = '',
   [string]$OutDir = '',
   [string]$SignKey = 'C:\Users\30680\otto-keys\otto-lite.key',
-  [switch]$NoSign
+  [switch]$NoSign,
+  # 可选：额外产出仅供 fresh-user 的测试安装器（无注册表/快捷方式，支持无界面清理选项）。
+  [string]$TestSetupOut = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,7 +113,7 @@ OTTO Lite $Version（便携版）
 双击 otto-lite.exe 使用。数据保存在本目录的 data\ 下；把整个文件夹删掉就是干净卸载。
 
 不要删除 otto-portable.flag：它是"我是便携版"的唯一判据。删了程序会按安装版处理，
-把数据写到 %APPDATA%\OTTO。
+只有放在 `<安装根>\app\otto-lite.exe` 的标准安装位置才能找到安装版数据。
 
 同目录的 otto-thumb-host.exe 是缩略图隔离进程（第三方 Shell handler 在它里面跑，
 崩了不会带走主程序）。不要删，也不要只拷 otto-lite.exe 出去——缺了它程序会拒绝启动。
@@ -154,9 +156,11 @@ Copy-Item $helper (Join-Path $installerStage 'otto-thumb-host.exe')
 $installedReadme = @"
 OTTO Lite $Version（安装版）
 
-程序安装在 Program Files\OTTO Lite，安装目录只放程序文件，不写任何用户数据。
-用户数据（库、分组、标签）保存在 %APPDATA%\OTTO\，每个用户各自一份。
-卸载会删除程序与快捷方式，但保留 %APPDATA%\OTTO；要彻底清理请手动删除该目录。
+默认安装根是 %LOCALAPPDATA%\Programs\OTTO\（安装器中可改，不需要管理员权限）。
+程序只安装在 <根>\app\；设置与素材库在 <根>\data\，可再生的缓存位于 <根>\cache\。
+安装器与覆盖升级都不会创建或改动 data\cache；旧 %APPDATA%\OTTO 不读取、不迁移。
+卸载默认只删除 app\；在卸载选项页明确勾选后才会删除 data\ 或 cache\。
+静默卸载（Uninstall.exe /S）始终只删除主程序，保留全部用户数据。
 
 同目录的 otto-thumb-host.exe 是缩略图隔离进程（第三方 Shell handler 在它里面跑），
 不要单独删除：缺了它主程序会拒绝启动。
@@ -197,6 +201,23 @@ Write-Output '== 构建 NSIS 安装包 =='
 & $Nsis @nsisArgs
 if ($LASTEXITCODE -ne 0) { throw "makensis 失败（退出码 $LASTEXITCODE）" }
 if (-not (Test-Path $setup)) { throw "安装包没有生成: $setup" }
+
+if ($TestSetupOut) {
+  $testSetup = [IO.Path]::GetFullPath($TestSetupOut)
+  if ($testSetup -eq [IO.Path]::GetFullPath($setup)) { throw 'TestSetupOut 不能覆盖正式安装包' }
+  $testParent = Split-Path $testSetup -Parent
+  New-Item -ItemType Directory -Force -Path $testParent | Out-Null
+  $scriptArg = $nsisArgs[-1]
+  $testArgs = @($nsisArgs | Where-Object { $_ -notlike '/DOUT_FILE=*' -and $_ -ne $scriptArg })
+  # makensis 会忽略脚本文件名之后的 /D：测试定义必须放在 installer.nsi 前面。
+  $testArgs += '/DOTTO_TEST'
+  $testArgs += "/DOUT_FILE=$testSetup"
+  $testArgs += $scriptArg
+  Write-Output '== 构建无界面生命周期验收专用安装包（不签名、不发布）=='
+  & $Nsis @testArgs
+  if ($LASTEXITCODE -ne 0) { throw "测试 makensis 失败（退出码 $LASTEXITCODE）" }
+  if (-not (Test-Path $testSetup)) { throw "测试安装包没有生成: $testSetup" }
+}
 Remove-Item $installerStage -Recurse -Force
 
 # ---------------------------------------------------------------------------

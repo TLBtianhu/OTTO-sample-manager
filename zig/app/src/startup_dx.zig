@@ -4,11 +4,11 @@
 //! 或根模块的 panic handler 被调用，才会写日志并弹窗。日志全部使用栈缓冲，避免
 //! 在 OutOfMemory / panic 路径上再依赖一个可能已经无法工作的分配器。
 //!
-//! 路径有意与设置文件的形态规则一致，但安装版诊断使用 LOCALAPPDATA（不是 roaming）：
+//! 路径与设置文件的形态规则一致：
 //!   * dev       %LOCALAPPDATA%\OTTO\dev\crash.log（缺省时沿用 %TEMP%\OTTO-dev）
 //!   * portable  <exe>\data\crash.log
-//!   * installed %LOCALAPPDATA%\OTTO\crash.log
-//! Program Files 永远不会成为 installed 的日志目标。
+//!   * installed <安装根>\data\crash.log（exe 位于 <安装根>\app）
+//! 安装版的 `app` 子目录只承载程序，永远不会成为日志目标。
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -63,7 +63,7 @@ fn fatal(init: std.process.Init, error_name: []const u8, detail: ?[]const u8) no
     std.process.exit(1);
 }
 
-/// 纯路径规则，运行时不分配。无 LOCALAPPDATA 的 installed 返回 null，绝不猜程序目录。
+/// 纯路径规则，运行时不分配。installed 的 app 路径非法时返回 null，绝不猜旧目录。
 pub fn crashLogPathFor(
     buffer: []u8,
     mode: mode_mod.Mode,
@@ -77,8 +77,10 @@ pub fn crashLogPathFor(
             return std.fmt.bufPrint(buffer, "{s}\\data\\crash.log", .{dir}) catch null;
         },
         .installed => {
-            const base = nonEmpty(local_appdata) orelse return null;
-            return std.fmt.bufPrint(buffer, "{s}\\OTTO\\crash.log", .{base}) catch null;
+            const app_dir = std.fs.path.dirname(exe_path) orelse return null;
+            if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(app_dir), mode_mod.install_app_dir_name)) return null;
+            const root = std.fs.path.dirname(app_dir) orelse return null;
+            return std.fmt.bufPrint(buffer, "{s}\\data\\crash.log", .{root}) catch null;
         },
         .dev => {
             if (nonEmpty(local_appdata)) |base| {

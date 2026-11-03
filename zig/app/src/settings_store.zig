@@ -5,7 +5,7 @@
 //!   * dev：`%LOCALAPPDATA%\OTTO\dev\settings.json`——开发者的本地目录，
 //!     删掉不影响源码；**编译产物本身不承载运行数据**。
 //!   * portable：`<exe 目录>\data\settings.json`。
-//!   * installed：`%APPDATA%\OTTO\settings.json`。
+//!   * installed：`<安装根>\data\settings.json`（exe 位于 `<安装根>\app`）。
 //!
 //! 三种都写 `<dataDir>\settings.json`（与库文件同一个数据目录）；dataDir 拿不到
 //! 时退回内存态，绝不猜路径。
@@ -172,7 +172,7 @@ pub const Settings = struct {
 // ---------------------------------------------------------------------------
 
 /// 纯路径：形态 → 数据目录下的 `settings.json`。
-/// dataDir 拿不到（installed 没有 %APPDATA%，dev 没有 LOCALAPPDATA/TEMP）返回 null。
+/// dataDir 拿不到（installed 的 app 路径非法，dev 没有 LOCALAPPDATA/TEMP）返回 null。
 pub fn pathFor(
     allocator: std.mem.Allocator,
     mode: mode_mod.Mode,
@@ -184,8 +184,8 @@ pub fn pathFor(
     return try std.fs.path.join(allocator, &.{ data_dir, file_name });
 }
 
-/// 本进程的设置路径。判定与 `%APPDATA%` / `%LOCALAPPDATA%` 都走 `mode.zig`
-/// 的同一条路径——这里不重新发明"什么算 portable"。
+/// 本进程的设置路径。形态与数据目录都走 `mode.zig` 的同一条路径，
+/// 这里不重新发明“什么算 portable”。
 pub fn resolvePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
@@ -495,11 +495,11 @@ test "路径：dev 在 %LOCALAPPDATA%，便携版在 data 目录" {
     defer testing.allocator.free(portable);
     try testing.expectEqualStrings("D:\\tools\\otto\\data\\settings.json", portable);
 
-    const installed = (try pathFor(testing.allocator, .installed, "C:\\Program Files\\OTTO Lite\\otto-lite.exe", .{
-        .appdata = "C:\\Users\\me\\AppData\\Roaming",
+    const installed = (try pathFor(testing.allocator, .installed, "D:\\OTTO\\app\\otto-lite.exe", .{
+        .appdata = "C:\\legacy-must-not-be-read",
     })).?;
     defer testing.allocator.free(installed);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Roaming\\OTTO\\settings.json", installed);
+    try testing.expectEqualStrings("D:\\OTTO\\data\\settings.json", installed);
 }
 
 test "dev 没有 LOCALAPPDATA 时设置退到 %TEMP%\\OTTO-dev，不写回 exe 目录" {
