@@ -30,11 +30,13 @@ const bench_win = @import("bench_win.zig");
 const mem_report = @import("mem_report.zig");
 const thumbs_mod = @import("thumbs.zig");
 const trace = @import("trace.zig");
+const core = @import("otto_core");
+const preview_panel = @import("preview_panel.zig");
+const sample_facts = @import("sample_facts.zig");
 
 /// 页粒度由报表那边定义（报表按页折算字节），探针只借用同一个数。
 const page_bytes = mem_report.page_bytes;
 const max_marks = 12;
-
 
 /// `*anyopaque`, not nanoui's `HWND` opaque: the probe must pass nanoui's handle
 /// to its own `user32` declarations, and two opaque types are distinct.
@@ -108,6 +110,9 @@ pub const Context = struct {
 
 pub const Probe = struct {
     active: bool = false,
+    audio_only: bool = false,
+    audio_play: bool = false,
+    audio_cycles: u32 = 20,
     io: std.Io = undefined,
     idle_s: f64 = 10,
     marks: [max_marks]Sample = undefined,
@@ -115,7 +120,13 @@ pub const Probe = struct {
 
     /// 读一次内存立刻返回；`--mem-probe` 没开时**一次系统调用都不做**。
     pub fn begin(init: std.process.Init, options: anytype) Probe {
-        var self: Probe = .{ .active = options.mem_probe, .idle_s = options.mem_probe_idle };
+        var self: Probe = .{
+            .active = options.mem_probe or options.pcm_ui_probe,
+            .audio_only = options.pcm_ui_probe,
+            .audio_play = options.pcm_play,
+            .audio_cycles = options.pcm_cycles,
+            .idle_s = options.mem_probe_idle,
+        };
         if (!self.active) return self;
         self.io = init.io;
         self.add("start", .{});
@@ -136,7 +147,7 @@ pub const Probe = struct {
 
     /// 剩下的几个时刻（D3D、8/50/100 张缩略图、空闲 10 秒）都在这里跑，然后退出。
     /// 窗口必须已经隐藏：这里绝不 show、绝不抢焦点。
-    pub fn finish(self: *Probe, window: *nanoui.Window, thumbs: *thumbs_mod.Thumbs) void {
+    pub fn finish(self: *Probe, window: *nanoui.Window, thumbs: *thumbs_mod.Thumbs, panel: *preview_panel.Panel, samples: []const core.model.Sample) void {
         const hwnd = window.hwnd orelse {
             std.debug.print("mem-probe: 没有 HWND（忘了 --nanoui-hidden？）\n", .{});
             std.process.exit(1);
@@ -157,6 +168,7 @@ pub const Probe = struct {
         _ = SendMessageW(hwnd, WM_PAINT, 0, 0);
         self.mark("d3d", ctx);
         self.presentCost(surface, hwnd);
+        if (self.audio_only) self.finishAudio(panel, samples);
 
         self.scrollTo(thumbs, surface, hwnd, 8);
         self.mark("thumbs8", ctx);
@@ -178,9 +190,124 @@ pub const Probe = struct {
         std.process.exit(0);
     }
 
-    /// `WM_PAINT` 往返的 p50：同一帧重复上屏 20 次，测的是"present 这条路的开销"
+    /// 真实预览 Panel 的开关/播放/seek；判据使用进程历史峰值而非释放后的值。
+    fn finishAudio(self: *Probe, panel: *preview_panel.Panel, samples: []const core.model.Sample) void {
+        const sample = findAudio(samples) orelse {
+            std.debug.print("pcm-ui-probe: 库中没有音频样本\n", .{});
+            std.process.exit(1);
+        };
+        const baseline = audioMemory();
+        var wave_ws_max = baseline;
+        var play_ws_max: usize = 0;
+        var wave_resident: usize = 0;
+        var play_resident: usize = 0;
+        var after_min = baseline;
+        var after_max = baseline;
+        var released: u32 = 0;
+        var played = false;
+        var decoded_pcm: u64 = 0;
+        var mode: []const u8 = "n/a";
+
+        for (0..@max(1, self.audio_cycles)) |index| {
+            panel.sync(null, .{});
+            panel.sync(sample, sample_facts.Duration.of(sample));
+            var ready = false;
+            for (0..60_000) |_| {
+                _ = panel.poll();
+                if (panel.current != null) {
+                    ready = true;
+                    break;
+                }
+                sleepMs(self.io, 1);
+            }
+            if (!ready) {
+                std.debug.print("pcm-ui-probe: 预览超时\n", .{});
+                std.process.exit(1);
+            }
+            switch (panel.current.?) {
+                .audio => |*session| {
+                    session.waitComplete();
+                    _ = session.pump();
+                    decoded_pcm = session.total_frames * @as(u64, session.channels) * 2;
+                    mode = session.pcm_residency.label();
+                    wave_resident = @max(wave_resident, session.pcmBytes());
+                    wave_ws_max = @max(wave_ws_max, audioMemory());
+                    if (self.audio_play and index == 0) {
+                        session.play() catch |err| {
+                            if (err != error.NoAudioEndpoint) {
+                                std.debug.print("pcm-ui-probe: play failed error={s}\n", .{@errorName(err)});
+                                std.process.exit(1);
+                            }
+                            std.debug.print("pcm-ui-probe: NoAudioEndpoint\n", .{});
+                        };
+                        if (session.player != null) {
+                            played = true;
+                            sleepMs(self.io, 300);
+                            session.seek(session.duration_ms / 2) catch |err| {
+                                std.debug.print("pcm-ui-probe: seek failed error={s}\n", .{@errorName(err)});
+                                std.process.exit(1);
+                            };
+                            sleepMs(self.io, 300);
+                            play_resident = @max(play_resident, session.pcmBytes());
+                            play_ws_max = @max(play_ws_max, audioMemory());
+                            session.stop();
+                        }
+                    }
+                },
+                else => {
+                    std.debug.print("pcm-ui-probe: 选中项没有音频预览\n", .{});
+                    std.process.exit(1);
+                },
+            }
+            panel.sync(null, .{});
+            released += 1;
+            const after = audioMemory();
+            after_min = @min(after_min, after);
+            after_max = @max(after_max, after);
+        }
+        std.debug.print(
+            "pcm-ui-probe: summary mode={s} cycles={d} released={d} decoded_pcm={d} wave_resident_max={d} play_resident_max={d} baseline_ws_mib={d:.2} wave_ws_max_mib={d:.2} play_ws_max_mib={d:.2} peak_ws_mib={d:.2} after_ws_min_mib={d:.2} after_ws_max_mib={d:.2} played={}\n",
+            .{
+                mode,
+                @max(1, self.audio_cycles),
+                released,
+                decoded_pcm,
+                wave_resident,
+                play_resident,
+                audioMb(baseline),
+                audioMb(wave_ws_max),
+                audioMb(play_ws_max),
+                audioMb(audioPeakMemory()),
+                audioMb(after_min),
+                audioMb(after_max),
+                played,
+            },
+        );
+        std.process.exit(0);
+    }
+
     /// （D3D：UpdateSubresource + Present；GDI：SetDIBitsToDevice），不是帧构建。
     /// `--gdi` 与默认的取舍靠它，而不是靠猜。
+    fn findAudio(samples: []const core.model.Sample) ?*const core.model.Sample {
+        const extensions = [_][]const u8{ ".wav", ".mp3", ".flac", ".ogg", ".oga", ".opus", ".aiff", ".aif", ".m4a", ".aac", ".wma" };
+        for (samples) |*sample| {
+            for (extensions) |ext| if (std.ascii.eqlIgnoreCase(sample.file_ext, ext)) return sample;
+        }
+        return null;
+    }
+
+    fn audioMemory() usize {
+        return if (bench_win.resident()) |value| value.working_set else 0;
+    }
+
+    fn audioPeakMemory() usize {
+        return if (bench_win.resident()) |value| value.peak_working_set else 0;
+    }
+
+    fn audioMb(bytes: usize) f64 {
+        return @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
+    }
+
     fn presentCost(self: *Probe, surface: anytype, hwnd: HWND) void {
         _ = self;
         surface.frame();
@@ -335,7 +462,6 @@ fn reportFonts(surface: anytype) void {
 
 /// 驻留页表已搬到 `mem_report.zig`（分解表与探针共用一份实现）：
 /// `mem_report.residentPages` / `mem_report.splitPages`。
-
 const th32cs_snapthread: u32 = 0x00000004;
 
 const ThreadEntry = extern struct {

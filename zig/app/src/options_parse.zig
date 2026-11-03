@@ -93,35 +93,7 @@ pub fn demo(options: *options_mod.Options, args: anytype, index: *usize, arg: []
 
 /// 预览与播放探针。`--seek-at` 只有 `--play-test` 读，单独给没有意义但仍是合法参数。
 pub fn preview(options: *options_mod.Options, args: anytype, index: *usize, arg: []const u8) Error!bool {
-    if (std.mem.eql(u8, arg, "--preview")) {
-        options.preview_path = try value(args, index);
-        return true;
-    }
-    if (std.mem.startsWith(u8, arg, "--preview=")) {
-        options.preview_path = arg["--preview=".len..];
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--play-test")) {
-        options.play_test_path = try value(args, index);
-        return true;
-    }
-    if (std.mem.startsWith(u8, arg, "--play-test=")) {
-        options.play_test_path = arg["--play-test=".len..];
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--seek-at")) {
-        options.seek_at_ms = try parseMillis(try value(args, index));
-        return true;
-    }
-    if (std.mem.startsWith(u8, arg, "--seek-at=")) {
-        options.seek_at_ms = try parseMillis(arg["--seek-at=".len..]);
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--no-shell-preview")) {
-        options.no_shell_preview = true;
-        return true;
-    }
-    return false;
+    return @import("options_preview.zig").preview(options, args, index, arg);
 }
 
 // ---------------------------------------------------------------------------

@@ -121,6 +121,9 @@ pub const Options = struct {
     expected_format: ?zig_audio.Format = null,
     /// 测试/探针入口的流式统计；生产路径传 null（日志里本来就有 reads/avg_read）。
     stats_out: ?*file_reader_mod.Stats = null,
+    /// `null` = 保留整段；否则调用方消费后按档位丢弃或另存有界首窗。
+    /// 预留也受此限制，长文件不会先按声明长度提交一整份 PCM。
+    retain_bytes: ?usize = null,
 };
 
 /// 读文件 + 解码整段，产出 `session.Decoded`。成功时 `pcm` 归调用方
@@ -172,6 +175,7 @@ pub const Stream = struct {
     container_frames: ?u64 = null,
     opened: bool = false,
     stats_out: ?*file_reader_mod.Stats = null,
+    retain_bytes: ?usize = null,
 
     pub fn init(
         self: *Stream,
@@ -179,7 +183,7 @@ pub const Stream = struct {
         path: []const u8,
         options: Options,
     ) Error!void {
-        self.* = .{ .allocator = allocator, .path = path, .stats_out = options.stats_out };
+        self.* = .{ .allocator = allocator, .path = path, .stats_out = options.stats_out, .retain_bytes = options.retain_bytes };
         errdefer self.deinit();
 
         // 64 KiB 句柄适配器：库按需拉取，压缩文件不再整份搬进内存。
@@ -207,12 +211,13 @@ pub const Stream = struct {
         self.channels = if (self.source_channels > 2) 2 else info.channels;
         self.out_block_bytes = @as(usize, self.channels) * 2;
         self.container_frames = info.total_frames;
-        try reservePcm(
+        try reservePcmLimit(
             allocator,
             &self.pcm,
             info.total_frames,
             self.file_reader.compressedBytes(),
             self.out_block_bytes,
+            self.retain_bytes,
         );
     }
 
@@ -239,6 +244,25 @@ pub const Stream = struct {
         return self.decoder.info.total_frames;
     }
 
+    /// 短文件在读完第一块后切回整段保留；此时尚未发生大容量预留。
+    pub fn retainAll(self: *Stream) Error!void {
+        self.retain_bytes = null;
+        try reservePcm(self.allocator, &self.pcm, self.decoder.info.total_frames, self.file_reader.compressedBytes(), self.out_block_bytes);
+    }
+
+    pub fn setRetention(self: *Stream, limit: usize) void {
+        self.retain_bytes = limit;
+    }
+
+    pub fn decodedBytes(self: *const Stream) usize {
+        return @intCast(self.frames * @as(u64, self.out_block_bytes));
+    }
+
+    /// 峰值/顺序播放已经消费的块无需保留，也不为维护窗口做整块 memmove。
+    pub fn discardConsumed(self: *Stream) void {
+        self.pcm.clearRetainingCapacity();
+    }
+
     /// 解一块：追加到 `pcm`，返回新增的**帧数**（0 = EOF）。多声道在这里下混。
     /// 错误与 `zig_audio`/IO 的错误集一致；`errdefer` 在调用方，半截 PCM 不会被
     /// 当成成功交出去。
@@ -260,19 +284,19 @@ pub const Stream = struct {
             const dst = try self.pcm.addManyAsSlice(self.allocator, frames * 4);
             downmix.pcm16Into(dst, std.mem.sliceAsBytes(out[0..got]), self.decoder.info.channels);
         }
-        if (self.pcm.items.len > max_pcm_bytes) return error.TooLarge;
-        self.frames = @intCast(self.pcm.items.len / self.out_block_bytes);
+        if (self.retain_bytes == null and self.pcm.items.len > max_pcm_bytes) return error.TooLarge;
+        self.frames += got / self.source_channels;
         return got / self.source_channels;
     }
 
     /// 终检 + 把 PCM 交出去。所有权转移之后 `self.pcm` 为空，`deinit` 不会重复释放。
     pub fn finish(self: *Stream) Error!session_mod.Decoded {
-        if (self.pcm.items.len == 0) return error.Empty;
+        if (self.frames == 0) return error.Empty;
         // 库承诺 `read` 只按整帧交付；下混后也必须是整帧。
         if (self.pcm.items.len % self.out_block_bytes != 0) return error.Corrupt;
 
         const info = self.decoder.info;
-        const frames: u64 = @intCast(self.pcm.items.len / self.out_block_bytes);
+        const frames = self.frames;
         const pcm_bytes = try self.pcm.toOwnedSlice(self.allocator);
 
         // 流式证据：compressed 是压缩文件大小（与峰值无关），peak_buf 是适配器唯一的
@@ -283,12 +307,13 @@ pub const Stream = struct {
         if (self.stats_out) |out| out.* = stats;
         const avg_read = if (stats.reads == 0) 0 else stats.bytes / stats.reads;
         std.debug.print(
-            "otto-lite: zig-audio decode file={s} container={s} compressed={d} pcm={d} peak_buf={d} reads={d} avg_read={d} rate={d} ch={d} src_ch={d} bits=16 frames={d} duration={d}ms source_bits={d} container_frames={?d} eof_frames={?d}\n",
+            "otto-lite: zig-audio decode file={s} container={s} compressed={d} pcm={d} decoded_pcm={d} peak_buf={d} reads={d} avg_read={d} rate={d} ch={d} src_ch={d} bits=16 frames={d} duration={d}ms source_bits={d} container_frames={?d} eof_frames={?d}\n",
             .{
                 self.path,
                 @tagName(info.format),
                 self.file_reader.compressedBytes(),
                 pcm_bytes.len,
+                self.decodedBytes(),
                 file_reader_mod.buffer_size,
                 stats.reads,
                 avg_read,
@@ -326,14 +351,27 @@ pub fn reservePcm(
     compressed_bytes: u64,
     out_block_bytes: usize,
 ) Error!void {
+    return reservePcmLimit(allocator, pcm, declared_frames, compressed_bytes, out_block_bytes, null);
+}
+
+fn reservePcmLimit(
+    allocator: std.mem.Allocator,
+    pcm: *std.ArrayList(u8),
+    declared_frames: ?u64,
+    compressed_bytes: u64,
+    out_block_bytes: usize,
+    retain_bytes: ?usize,
+) Error!void {
     if (declared_frames) |frames| {
         const bytes = std.math.mul(u64, frames, @as(u64, @intCast(out_block_bytes))) catch return error.TooLarge;
-        if (bytes > @as(u64, max_pcm_bytes)) return error.TooLarge;
-        return pcm.ensureTotalCapacityPrecise(allocator, @intCast(bytes));
+        if (retain_bytes == null and bytes > @as(u64, max_pcm_bytes)) return error.TooLarge;
+        const target = if (retain_bytes) |limit| @min(bytes, @as(u64, @intCast(limit + chunk_samples * 2))) else bytes;
+        return pcm.ensureTotalCapacityPrecise(allocator, @intCast(target));
     }
 
     const estimated = std.math.mul(u64, compressed_bytes, estimate_expansion) catch return;
-    const target = @min(estimated, estimate_cap_bytes);
+    var target = @min(estimated, estimate_cap_bytes);
+    if (retain_bytes) |limit| target = @min(target, @as(u64, @intCast(limit + chunk_samples * 2)));
     // 空文件不预留：`Empty` 会在读完时给出，而不是在这里分配 0 字节。
     if (target == 0) return;
     try pcm.ensureTotalCapacityPrecise(allocator, @intCast(target));

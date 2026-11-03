@@ -591,7 +591,7 @@ fn run(init: std.process.Init) !void {
     // snapshot 模式没有消息循环（`--nanoui-wait=<秒>` 才会跑事件循环、tick 重画）。
     nanoui.App.after(tick_ms, &state, State.tick);
     // 探针：D3D、8/50/100 张缩略图、空闲 10 秒，打完表就退出（不 join 工作线程）。
-    if (probe.active) probe.finish(state.window.?, boot.thumbs);
+    if (probe.active) probe.finish(state.window.?, boot.thumbs, state.preview, state.samples);
     try boot.app.run();
     // 离屏快照也走正常关闭顺序；正常 GUI 关闭时回调已把 state.window 清空。
     if (state.window) |window| window.destroyNow();

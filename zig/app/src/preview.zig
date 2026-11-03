@@ -36,33 +36,11 @@
 //! `file_missing` 不在最初的三档里，但它与 `failed` 同属"认领后失败"：文件没了
 //! 要刷新索引，不是"没有预览组件"。
 //!
-//! ## 所有权（谁分配、谁释放）
-//!
-//!   * `Outcome` 的载荷由**调用方传进 `open` 的那个 allocator** 分配，
-//!     并且必须用**同一个 allocator** 调 `Outcome.deinit` 释放；
-//!   * `image.pixels` 与 `text` 归 `Outcome` 所有；
-//!   * `audio` 拥有 PCM、峰值与波形；`Player` 只在第一次播放时按需创建。
-//!     `AudioSession.deinit` 停播、join 并释放它们（含尚未完成的创建线程）；
-//!   * `audio.progress` 临时拥有还没交出的 PCM / 峰值，完成时移进会话；
-//!     `deinit` 先 cancel（join 线程）再 destroy。契约层只认识 `AudioProgress`
-//!     vtable，不认识 `zig_audio` 或线程实现（实现见 `audio/progressive.zig`）；
-//!   * `frames` 本阶段仍是占位，不持有任何系统句柄或内存；
-//!     `Outcome.deinit` 仍会走它的 `deinit`，将来接上会话时不需要改调用方；
-//!   * `Registry.open` **不复制** `sample`：调用期间它必须有效。`preview_panel`
-//!     为此把样本值拷贝 + 深拷贝三个字符串再交给工作线程。
-//!
-//! ## 线程
-//!
-//! `Provider.open` 是**同步阻塞**调用：缩略图 provider 会进第三方 COM handler，
-//! 可能卡住或崩溃。**不要在 UI 线程上调它**；`preview_panel.Panel` 把它放在一条
-//! 工作线程上，视图只读一份已经落地的 `Outcome`（同一约定见 `thumbs.zig`）。
-//! `Provider.isolation` 是"provider 默认在哪里执行不可信工作"的声明；Shell 缩略图
-//! provider 的 `open` 本身仍在主进程，但像素提取默认只交给 helper（`thumb_host`）。
-//! helper 不可用是 `none.failed`；只有 `Request.allow_isolation = false`
-//! （用户显式 `--no-isolation`）才进程内取图，超时/崩溃永不回主进程重试。
-//!
-//! 音频还有**第二条**线程：`audio/player.Player` 的播放线程由它自己拥有，
-//! 只通过 `std.atomic.Value(u64)` 把播放位置交给 UI；播放线程不碰任何视图对象。
+//! ## 线程与所有权
+//! `open` 在工作线程同步执行；载荷由调用方 allocator 分配并由 `Outcome.deinit` 释放。
+//! 音频会话拥有 PCM（或有界帧源）、峰值与波形；Player 按需创建。渐进任务先 cancel/join，
+//! 再释放引擎；Player 创建工作线程也先 join，最后才释放它借用的 PCM/帧源。
+//! Shell 的不可信取图默认走 helper，只有显式 `--no-isolation` 才进程内执行。
 //!
 //! ## 注册顺序
 //!
@@ -81,6 +59,8 @@ const core = @import("otto_core");
 const audio_player = @import("audio/player.zig");
 const lazy_player = @import("audio/lazy_player.zig");
 const peaks_mod = @import("audio/peaks.zig");
+const pcm_source = @import("audio/pcm_source.zig");
+const residency = @import("audio/residency.zig");
 
 /// provider 声明的"我产出的载荷是什么"。注意：这是 **provider 的属性**，不是
 /// 样本的媒体类型——同一个 Shell 缩略图 provider 可以服务图片、视频、三维文件，
@@ -200,6 +180,10 @@ pub const AudioSession = struct {
     duration_ms: u64,
     position_ms: u64 = 0,
     player: ?*audio_player.Player = null,
+    /// 长音频的有界帧源；与 pcm 二选一，由会话拥有。
+    source: ?*pcm_source.Source = null,
+    pcm_residency: residency.Mode = .full_decode,
+    total_frames: u64 = 0,
     /// 按需创建的状态/工作线程。实际会话在装配时写入 allocator；测试可替换 factory。
     lazy: lazy_player.Lazy = .{},
     /// 波形峰值，长度 = 桶数（`audio/peaks.zig` 的 `default_buckets`）；空音频为 0。
@@ -222,7 +206,7 @@ pub const AudioSession = struct {
             _ = try self.finishStart(true);
             return;
         }
-        if (self.pcm.len == 0) {
+        if (self.pcm.len == 0 and self.source == null) {
             if (self.progress) |progress| {
                 self.lazy.state = .starting;
                 progress.vtable.requestPlay(progress.ctx, true);
@@ -237,6 +221,8 @@ pub const AudioSession = struct {
             self.channels,
             self.bits,
             self.sample_float,
+            self.source,
+            self.total_frames,
         );
         try self.adoptCreated(created);
     }
@@ -248,7 +234,7 @@ pub const AudioSession = struct {
             self.lazy.cancelled = false;
             return;
         }
-        if (self.pcm.len == 0) {
+        if (self.pcm.len == 0 and self.source == null) {
             const progress = self.progress orelse return error.NoAudioPlayer;
             self.lazy.state = .starting;
             self.lazy.failure = null;
@@ -257,7 +243,7 @@ pub const AudioSession = struct {
             return;
         }
         if (self.lazy.allocator == null) return error.NoAudioPlayer;
-        try self.lazy.startAsync(self.pcm, self.sample_rate, self.channels, self.bits, self.sample_float);
+        try self.lazy.startAsync(self.pcm, self.sample_rate, self.channels, self.bits, self.sample_float, self.source, self.total_frames);
     }
 
     fn playExisting(self: *AudioSession, player: *audio_player.Player) audio_player.Error!void {
@@ -326,6 +312,7 @@ pub const AudioSession = struct {
     /// 已经解出的 PCM 字节数（渐进式解码中会增长；完成后等于 `pcm.len`）。
     pub fn pcmBytes(self: *const AudioSession) usize {
         if (self.pcm.len != 0) return self.pcm.len;
+        if (self.source) |source| return source.residentBytes();
         const progress = self.progress orelse return 0;
         return progress.vtable.decodedBytes(progress.ctx);
     }
@@ -401,6 +388,9 @@ pub const AudioSession = struct {
         self.peaks = .{};
         if (self.pcm.len != 0) allocator.free(self.pcm);
         self.pcm = &.{};
+        if (self.source) |source| pcm_source.destroyBoxed(source, allocator);
+        self.source = null;
+        self.total_frames = 0;
         self.position_ms = 0;
     }
 };

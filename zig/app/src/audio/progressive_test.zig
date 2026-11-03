@@ -83,6 +83,8 @@ fn noEndpoint(
     _: u16,
     _: u16,
     _: bool,
+    _: ?*@import("pcm_source.zig").Source,
+    _: u64,
 ) player.Error!*player.Player {
     return error.NoAudioEndpoint;
 }
@@ -135,12 +137,12 @@ test "渐进峰值与整段一次算逐桶相等（真 WAV / 真 MP3+Xing）" {
         _ = started.session.pump();
         try testing.expect(!started.session.isDecoding());
         if (case_index == 1) {
-            var spins: usize = 0;
-            while (started.session.isStartingAudio() and spins < 1000) : (spins += 1) {
+            var waits: usize = 0;
+            while (started.session.isStartingAudio() and waits < 2000) : (waits += 1) {
                 _ = started.session.pump();
-                std.Thread.yield() catch {};
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
             }
-            try testing.expect(spins < 1000);
+            try testing.expect(waits < 2000);
             try testing.expectEqual(error.NoAudioEndpoint, started.session.audioError().?);
         }
         // finish 也只交 PCM/峰值；Player 只在有播放意图时尝试创建，失败不毁波形。
@@ -193,6 +195,12 @@ test "总帧数开流时未知（无 Xing 的 MP3 / Ogg）：不做渐进，不�
         defer started.session.deinit(testing.allocator);
         try testing.expect(!started.progressive);
         try testing.expect(!started.session.isDecoding());
+        var decoded = try decode_mod.decode(testing.allocator, path, .{});
+        defer decoded.deinit(testing.allocator);
+        const expected = try peaks_mod.compute(testing.allocator, decoded.pcm, decoded.channels, decoded.bits, decoded.format, peaks_mod.default_buckets);
+        defer expected.deinit(testing.allocator);
+        try testing.expectEqualSlices(i16, expected.min, started.session.peaks.min);
+        try testing.expectEqualSlices(i16, expected.max, started.session.peaks.max);
         std.debug.print(
             "otto-lite: progressive-fallback file={s} pcm={d}B duration={d}ms\n",
             .{ std.fs.path.basename(path), started.session.pcm.len, started.session.duration_ms },

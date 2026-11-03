@@ -84,11 +84,15 @@ pub const WAIT_FAILED: DWORD = 0xFFFF_FFFF;
 pub const INFINITE: DWORD = 0xFFFF_FFFF;
 
 pub const GENERIC_READ: DWORD = 0x8000_0000;
+pub const GENERIC_WRITE: DWORD = 0x4000_0000;
 pub const FILE_SHARE_READ: DWORD = 0x0000_0001;
 pub const FILE_SHARE_WRITE: DWORD = 0x0000_0002;
 pub const FILE_SHARE_DELETE: DWORD = 0x0000_0004;
 pub const OPEN_EXISTING: DWORD = 3;
+pub const CREATE_ALWAYS: DWORD = 2;
 pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x0000_0080;
+pub const FILE_ATTRIBUTE_TEMPORARY: DWORD = 0x0000_0100;
+pub const FILE_FLAG_DELETE_ON_CLOSE: DWORD = 0x0400_0000;
 pub const FILE_BEGIN: DWORD = 0;
 pub const FILE_CURRENT: DWORD = 1;
 pub const FILE_END: DWORD = 2;
@@ -135,6 +139,16 @@ pub extern "kernel32" fn ReadFile(
     read: *DWORD,
     overlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
+pub extern "kernel32" fn WriteFile(
+    file: HANDLE,
+    buffer: [*]const u8,
+    to_write: DWORD,
+    written: *DWORD,
+    overlapped: ?*anyopaque,
+) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GetTempPathW(count: DWORD, buffer: [*]u16) callconv(.winapi) DWORD;
+pub extern "kernel32" fn GetTempFileNameW(path: [*:0]const u16, prefix: [*:0]const u16, unique: u32, name: [*]u16) callconv(.winapi) DWORD;
+pub extern "kernel32" fn DeleteFileW(path: [*:0]const u16) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 

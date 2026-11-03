@@ -196,8 +196,8 @@ pub const Thumbs = struct {
         // 「L2 + 预览 ≤ 48 MiB」。设置面板夹取后的值也走这里（`setBudgets` 再打一次）。
         const mib: u64 = 1024 * 1024;
         std.debug.print(
-            "otto-lite: cache budget l2={d}MiB preview={d}MiB\n",
-            .{ @as(u64, options.budget_bytes) / mib, @as(u64, options.preview_budget_bytes) / mib },
+            "otto-lite: cache budget l2={d}MiB preview={d}MiB pcm={d}MiB\n",
+            .{ @as(u64, options.budget_bytes) / mib, @as(u64, options.preview_budget_bytes) / mib, @as(u64, mem_budget.pcm_max_bytes) / mib },
         );
 
         // 隔离是默认路径：helper exe 不在就是**启动错误**，不是「没有预览」。
@@ -413,8 +413,8 @@ pub const Thumbs = struct {
 
         const mib: u64 = 1024 * 1024;
         std.debug.print(
-            "otto-lite: cache budget l2={d}MiB preview={d}MiB l3={d}MiB\n",
-            .{ @as(u64, l2_bytes) / mib, @as(u64, preview_budget) / mib, l3_bytes / mib },
+            "otto-lite: cache budget l2={d}MiB preview={d}MiB pcm={d}MiB l3={d}MiB\n",
+            .{ @as(u64, l2_bytes) / mib, @as(u64, preview_budget) / mib, @as(u64, mem_budget.pcm_max_bytes) / mib, l3_bytes / mib },
         );
 
         if (self.disk) |*disk| {
