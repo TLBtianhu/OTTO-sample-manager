@@ -1,4 +1,4 @@
-//! OTTO 的容器驱动布局：小型轨道分配器 + 列表 profile + 尺寸缓存。
+//! OTTO 的容器驱动布局：列表 profile + 尺寸缓存。
 //!
 //! 这里不做通用 flexbox，也不做等比缩放。所有尺寸都是容器内的逻辑点；
 //! 字体、行高和点击目标是常量。只有 `Cache.update` 看到容器尺寸真的变化，
@@ -20,86 +20,6 @@ pub const default_window_height: u16 = 700;
 
 const row_padding: u16 = 12;
 const row_gap: u16 = 8;
-
-pub const Track = union(enum) {
-    fixed: u16,
-    fraction: u8,
-    minmax: struct { min: u16, max: u16, weight: u8 },
-};
-
-/// 沿一个轴分配轨道。先放 fixed 和 minmax.min，再按 weight 分剩余；
-/// 到 max 的轨道退出，余量继续分给未封顶轨道。调用方提供输出，帧内零分配。
-///
-/// 正常产品路径保证 total 足够覆盖所有下限。防御性的 total 不足分支按顺序
-/// 截断，绝不绕出负尺寸；窗口最小尺寸保证列表名称不会走到这个分支。
-pub fn distribute(total: u16, tracks: []const Track, output: []u16) []u16 {
-    std.debug.assert(output.len >= tracks.len);
-    const out = output[0..tracks.len];
-    var base: u32 = 0;
-    for (tracks, out) |track, *size| {
-        size.* = switch (track) {
-            .fixed => |value| value,
-            .fraction => 0,
-            .minmax => |value| value.min,
-        };
-        base += size.*;
-    }
-    if (base >= total) {
-        var left: u16 = total;
-        for (out) |*size| {
-            const wanted = size.*;
-            size.* = @min(wanted, left);
-            left -= size.*;
-        }
-        return out;
-    }
-
-    var remaining: u32 = @as(u32, total) - base;
-    while (remaining > 0) {
-        var open_weight: u32 = 0;
-        for (tracks, out) |track, size| {
-            if (capacity(track, size) > 0) open_weight += weight(track);
-        }
-        if (open_weight == 0) break;
-
-        var granted: u32 = 0;
-        for (tracks, out) |track, *size| {
-            const room = capacity(track, size.*);
-            if (room == 0) continue;
-            const ideal: u32 = @intCast((@as(u64, remaining) * weight(track)) / open_weight);
-            const grant = @min(room, ideal);
-            size.* += @intCast(grant);
-            granted += grant;
-        }
-        // 余数不足以让每个轨道都分到 1 时，按声明顺序补一个，结果可复现。
-        if (granted == 0) {
-            for (tracks, out) |track, *size| {
-                if (capacity(track, size.*) == 0) continue;
-                size.* += 1;
-                granted = 1;
-                break;
-            }
-        }
-        remaining -= granted;
-    }
-    return out;
-}
-
-fn weight(track: Track) u32 {
-    return switch (track) {
-        .fixed => 0,
-        .fraction => |value| value,
-        .minmax => |value| value.weight,
-    };
-}
-
-fn capacity(track: Track, size: u16) u32 {
-    return switch (track) {
-        .fixed => 0,
-        .fraction => if (weight(track) == 0) 0 else std.math.maxInt(u16) - size,
-        .minmax => |value| if (weight(track) == 0) 0 else @max(value.min, value.max) - size,
-    };
-}
 
 pub const Profile = enum {
     compact_with_overflow,

@@ -216,22 +216,5 @@ pub fn identityHash(identity: core.model.FileIdentity) u64 {
 }
 
 /// 自旋锁：临界区只有一次队列交换（几次指针写），没有 IO 或分配。
-/// 与 `watch.zig` / `import_ui.zig` 同一个理由：Zig 0.17 的 `std.Io.Mutex` 要 Io 实例。
-pub const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    pub fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    pub fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+/// 保留原引用路径，实际实现统一在 app 内部的 `spin_lock.zig`。
+pub const SpinLock = @import("spin_lock.zig").SpinLock;

@@ -28,26 +28,7 @@ const thumbs_preview = @import("thumbs_preview.zig");
 const Snapshot = @import("preview_snapshot.zig").Snapshot;
 
 /// 自旋锁：临界区只有换 `?Snapshot` / `?Result` 指针，没有 IO、没有分配。
-/// 照 `thumbs.zig` / `ports/watch.zig` 的先例（Zig 0.17 没有不需要 Io 实例的
-/// `std.Thread.Mutex`）。
-const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+const SpinLock = @import("spin_lock.zig").SpinLock;
 
 /// 工作线程交回来的一份答案。`provider` 是静态名字，`outcome` 归本结构所有。
 pub const Result = struct {

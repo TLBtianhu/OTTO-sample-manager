@@ -218,7 +218,7 @@ pub const State = struct {
         // 列表只遍历行映射：第 row 行 → 第 index 个样本（选择/预览/拖拽仍只认样本下标）。
         const list_id = c.peekId(null);
         const scroll_target = browse_action.scrollTarget(s, c, list_id);
-        var rows = ui.list(c, .{ .count = s.search.len(), .row_height = 44, .scroll_to = scroll_target });
+        var rows = ui.list(c, .{ .count = s.search.len(), .row_height = @floatFromInt(layout_plan.row.height), .scroll_to = scroll_target });
         // 本帧建出来的行范围（含 list 的 overscan）。预取与验收都用它，不改列表行为。
         var first_row: usize = 0;
         var last_row: usize = 0;

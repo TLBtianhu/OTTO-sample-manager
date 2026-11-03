@@ -174,7 +174,7 @@ pub fn openSelected(s: *State) void {
 pub fn scrollTarget(s: *State, c: *ui.Context, list_id: u64) ?f32 {
     const session = s.browse orelse return null;
     const view_height = if (c.rects.get(list_id)) |rect| rect.h else c.size.h;
-    return scroll.target(session, s.search.len(), 44, view_height);
+    return scroll.target(session, s.search.len(), @floatFromInt(s.layout.plan.row.height), view_height);
 }
 
 pub fn rememberScroll(s: *State, c: *ui.Context, list_id: u64) void {

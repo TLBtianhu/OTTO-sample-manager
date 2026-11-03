@@ -332,25 +332,8 @@ pub const Update = struct {
     }
 };
 
-/// 自旋锁：临界区只有交换一个 `Report` 值（与 `import_ui.zig` 同一条理由）。
-const SpinLock = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(self: *SpinLock) void {
-        var spins: u32 = 0;
-        while (self.flag.swap(true, .acquire)) {
-            spins +%= 1;
-            if (spins > 64) {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-    }
-
-    fn release(self: *SpinLock) void {
-        self.flag.store(false, .release);
-    }
-};
+/// 自旋锁：临界区只有交换一个 `Report` 值。
+const SpinLock = @import("spin_lock.zig").SpinLock;
 
 // ---------------------------------------------------------------------------
 // 一次检查（CLI 与 UI 线程共用同一条路径）
