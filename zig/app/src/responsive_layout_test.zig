@@ -45,12 +45,12 @@ fn sum(values: []const u16) u32 {
     return total;
 }
 
-test "容器断点：每个 profile 至少四个宽度，无重叠/负尺寸/越界，目标和名称可读" {
+test "连续布局：各密度区间均无重叠/负尺寸/越界，目标和名称可读" {
     const widths = [_]u16{
         280, 300, 320, 359, // compact_with_overflow
-        360, 380, 420, 479, // name_and_duration
-        480, 520, 600, 639, // no_sample_rate
-        640, 720, 900, 1200, // full
+        360, 380, 424, 425, // name_and_duration
+        426, 480, 560, 561, // no_sample_rate
+        562, 640, 720, 900, 1200, // full（采样率从 1px 连续长大）
     };
     for (widths) |width| {
         const plan = layout.solve(width, 700);
@@ -71,32 +71,61 @@ test "窗口下限：0×0 和负值输入不会拖垮布局" {
     try layout.validate(plan);
 }
 
-test "让位顺序：先采样率，再格式和大小；文件名从不先消失或跌破下限" {
+test "让位顺序与逐像素连续：辅助列依次收缩，所有相邻尺寸变化最多 1px" {
     const full = layout.solve(640, 700);
-    const no_rate = layout.solve(639, 700);
-    const names = layout.solve(479, 700);
+    const no_rate = layout.solve(560, 700);
+    const no_size = layout.solve(480, 700);
+    const names = layout.solve(425, 700);
     const compact = layout.solve(359, 700);
 
     try testing.expect(full.row.visible(.sample_rate));
     try testing.expect(!no_rate.row.visible(.sample_rate));
     try testing.expect(no_rate.row.visible(.format));
     try testing.expect(no_rate.row.visible(.size));
+    try testing.expect(!no_size.row.visible(.sample_rate));
+    try testing.expect(!no_size.row.visible(.size));
+    try testing.expect(no_size.row.visible(.format));
     try testing.expect(!names.row.visible(.format));
     try testing.expect(!names.row.visible(.size));
     try testing.expect(names.row.visible(.duration));
     try testing.expect(!compact.row.visible(.format));
-    for ([_]layout.Plan{ full, no_rate, names, compact }) |plan| {
+    for ([_]layout.Plan{ full, no_rate, no_size, names, compact }) |plan| {
         try testing.expect(plan.row.visible(.name));
         try testing.expect((plan.row.width(.name) orelse 0) >= layout.min_name_width);
     }
+
+    var previous = layout.solve(280, 700);
+    for (281..901) |width| {
+        const plan = layout.solve(@intCast(width), 700);
+        try layout.validate(&plan);
+        try testing.expect(absDelta(previous.row.width(.name).?, plan.row.width(.name).?) <= 1);
+        for ([_]layout.ColumnKind{ .duration, .format, .sample_rate, .size }) |kind| {
+            const before = previous.row.width(kind);
+            const after = plan.row.width(kind);
+            if (before != null and after != null) {
+                try testing.expect(absDelta(before.?, after.?) <= 1);
+            } else if (before != null) {
+                try testing.expect(before.? <= 1);
+            } else if (after != null) {
+                try testing.expect(after.? <= 1);
+            }
+        }
+        try testing.expect(absDelta(previous.preview_height, plan.preview_height) <= 1);
+        previous = plan;
+    }
 }
 
-test "预览条：窄容器 56px，宽容器 clamp(56,25%高,180)" {
+fn absDelta(a: u16, b: u16) u16 {
+    return if (a > b) a - b else b - a;
+}
+
+test "预览条：360–480 宽连续插值，之后保持 clamp(56,25%高,180)" {
     try testing.expectEqual(@as(u16, 56), layout.solve(360, 700).preview_height);
-    try testing.expectEqual(@as(u16, 56), layout.solve(479, 900).preview_height);
+    try testing.expectEqual(@as(u16, 75), layout.solve(380, 700).preview_height);
+    try testing.expectEqual(@as(u16, 174), layout.solve(479, 700).preview_height);
+    try testing.expectEqual(@as(u16, 175), layout.solve(480, 700).preview_height);
     try testing.expectEqual(@as(u16, 56), layout.previewHeight(480, 100));
     try testing.expectEqual(@as(u16, 105), layout.solve(480, 100).preview_height);
-    try testing.expectEqual(@as(u16, 175), layout.solve(480, 700).preview_height);
     try testing.expectEqual(@as(u16, 180), layout.solve(900, 1200).preview_height);
 }
 
@@ -111,9 +140,9 @@ test "懒重算：滚动/刷新/hover 的同尺寸帧不求解，同 profile 不
     _ = cache.update(501, 700);
     try testing.expectEqual(@as(u32, 2), cache.solves);
     try testing.expectEqual(revision, cache.display_revision);
-    _ = cache.update(639, 700);
+    _ = cache.update(561, 700);
     try testing.expectEqual(revision, cache.display_revision);
-    _ = cache.update(640, 700);
+    _ = cache.update(562, 700);
     try testing.expectEqual(revision + 1, cache.display_revision);
 }
 

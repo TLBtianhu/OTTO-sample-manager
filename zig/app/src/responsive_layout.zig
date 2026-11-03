@@ -11,6 +11,11 @@ pub const min_name_width: u16 = 96;
 pub const row_height: u16 = 44;
 pub const font_size: u16 = 13;
 pub const min_click_target: u16 = 24;
+pub const default_window_width: u16 = 380;
+pub const default_window_height: u16 = 700;
+
+const row_padding: u16 = 12;
+const row_gap: u16 = 8;
 
 pub const Track = union(enum) {
     fixed: u16,
@@ -99,11 +104,14 @@ pub const Profile = enum {
     full,
 };
 
-/// 断点只认列表容器宽，不认窗口装饰、显示器或缩放比例。
+/// Profile describes structural density, not a second set of dimensions.
+/// Column widths themselves come from the continuous slots below.
 pub fn listProfile(container_width: u16) Profile {
-    if (container_width >= 640) return .full;
-    if (container_width >= 480) return .no_sample_rate;
-    if (container_width >= 360) return .name_and_duration;
+    const width = @max(container_width, min_window_width);
+    if (slotContent(auxiliarySlot(width, .sample_rate), .sample_rate) > 0) return .full;
+    if (slotContent(auxiliarySlot(width, .format), .format) > 0 or
+        slotContent(auxiliarySlot(width, .size), .size) > 0) return .no_sample_rate;
+    if (width >= 360) return .name_and_duration;
     return .compact_with_overflow;
 }
 
@@ -119,6 +127,9 @@ pub const Rect = struct {
 pub const Column = struct {
     kind: ColumnKind,
     rect: Rect,
+    /// Flow gap owned by this column. It shrinks with the column, so removing
+    /// a column never hands a whole 8px gap back to the name in one frame.
+    gap_before: u16 = 0,
 };
 
 pub const RowPlan = struct {
@@ -158,8 +169,11 @@ pub const Plan = struct {
 };
 
 pub fn previewHeight(container_width: u16, container_height: u16) u16 {
-    if (container_width < 480) return 56;
-    return std.math.clamp(container_height / 4, 56, 180);
+    const full = std.math.clamp(container_height / 4, 56, 180);
+    // 360px 以下保持紧凑预览；到 480px 才完全展开。中间 120px 的
+    // 每一像素都只改变少量高度，不再在 480 处从 56 跳到 175。
+    const blend: u16 = std.math.clamp(container_width -| 360, 0, 120);
+    return 56 + @as(u16, @intCast((@as(u32, full - 56) * blend) / 120));
 }
 
 pub fn solve(container_width: u16, container_height: u16) Plan {
@@ -167,43 +181,39 @@ pub fn solve(container_width: u16, container_height: u16) Plan {
     const width = @max(container_width, min_window_width);
     const height = @max(container_height, min_window_height);
     const profile = listProfile(width);
-    const kinds: []const ColumnKind = switch (profile) {
-        .full => &.{ .name, .duration, .format, .sample_rate, .size },
-        .no_sample_rate => &.{ .name, .duration, .format, .size },
-        .name_and_duration, .compact_with_overflow => &.{ .name, .duration },
-    };
 
-    var tracks: [7]Track = undefined;
-    var sizes: [7]u16 = undefined;
-    tracks[0] = .{ .fixed = 32 }; // 缩略图
-    tracks[1] = .{ .fixed = 34 }; // 行号
-    for (kinds, 0..) |kind, index| {
-        tracks[index + 2] = if (kind == .name)
-            .{ .minmax = .{ .min = min_name_width, .max = std.math.maxInt(u16), .weight = 1 } }
-        else
-            .{ .fixed = fixedWidth(kind) };
-    }
-    const track_count = kinds.len + 2;
-    const padding: u16 = 12;
-    const gap: u16 = 8;
-    const distributable = width - 2 * padding - gap * @as(u16, @intCast(track_count - 1));
-    _ = distribute(distributable, tracks[0..track_count], sizes[0..track_count]);
+    // 辅助列的 slot 同时包含列宽与它前面的 gap。缩窗时依次收缩采样率、
+    // 大小、格式；名称始终拿剩余。slot 每变 1px，名称也只反向变 1px。
+    const duration_slot: u16 = fixedWidth(.duration) + row_gap;
+    const format_slot = auxiliarySlot(width, .format);
+    const rate_slot = auxiliarySlot(width, .sample_rate);
+    const size_slot = auxiliarySlot(width, .size);
+    const leading: u16 = 2 * row_padding + 32 + row_gap + 34 + row_gap;
+    const name_width = width - leading - duration_slot - format_slot - rate_slot - size_slot;
 
     var row: RowPlan = .{
         .container_width = width,
-        .thumb = .{},
-        .ordinal = .{},
+        .thumb = rect(row_padding, 32),
+        .ordinal = rect(row_padding + 32 + row_gap, 34),
     };
-    var x: u16 = padding;
-    row.thumb = rect(x, sizes[0]);
-    x += sizes[0] + gap;
-    row.ordinal = rect(x, sizes[1]);
-    x += sizes[1] + gap;
-    for (kinds, 0..) |kind, index| {
-        row.columns[index] = .{ .kind = kind, .rect = rect(x, sizes[index + 2]) };
-        x += sizes[index + 2] + gap;
+    var x: u16 = row_padding + 32 + row_gap + 34;
+    const kinds = [_]ColumnKind{ .name, .duration, .format, .sample_rate, .size };
+    for (kinds) |kind| {
+        const slot = switch (kind) {
+            .name => name_width + row_gap,
+            .duration => duration_slot,
+            .format => format_slot,
+            .sample_rate => rate_slot,
+            .size => size_slot,
+        };
+        const content = if (kind == .name) name_width else slotContent(slot, kind);
+        if (content == 0) continue;
+        const gap = slot - content;
+        x += gap;
+        row.columns[row.column_count] = .{ .kind = kind, .rect = rect(x, content), .gap_before = gap };
+        row.column_count += 1;
+        x += content;
     }
-    row.column_count = kinds.len;
     return .{
         .width = width,
         .height = height,
@@ -211,6 +221,24 @@ pub fn solve(container_width: u16, container_height: u16) Plan {
         .row = row,
         .preview_height = previewHeight(width, height),
     };
+}
+
+/// The container width at which each auxiliary slot is full. The next slot
+/// starts yielding exactly where the previous one reaches zero.
+fn auxiliarySlot(width: u16, kind: ColumnKind) u16 {
+    const full_at: u16 = switch (kind) {
+        .sample_rate => 640,
+        .size => 560,
+        .format => 480,
+        else => return 0,
+    };
+    const slot_capacity = fixedWidth(kind) + row_gap;
+    return std.math.clamp(width -| (full_at - slot_capacity), 0, slot_capacity);
+}
+
+fn slotContent(slot: u16, kind: ColumnKind) u16 {
+    const slot_capacity = fixedWidth(kind) + row_gap;
+    return @intCast((@as(u32, slot) * fixedWidth(kind)) / slot_capacity);
 }
 
 fn fixedWidth(kind: ColumnKind) u16 {

@@ -32,15 +32,21 @@ fn compare(t: *ui.Tester, sample: Sample) !void {
     var advances: [Sample.words.len]f32 = undefined;
     for (layout.glyphs, 0..) |glyph, i| {
         indices[i] = glyph.glyph;
+        const positions: f32 = @floatFromInt(t.text.positions(glyph));
         const next = if (i + 1 < layout.glyphs.len) layout.glyphs[i + 1].x else layout.width;
-        advances[i] = (next - glyph.x) * t.scale;
+        advances[i] = (@round(next * t.scale * positions) - @round(glyph.x * t.scale * positions)) / positions;
     }
     const run: Run = .{ .face = @ptrCast(face), .size = sample.style.size * t.scale, .count = @intCast(layout.glyphs.len), .indices = &indices, .advances = &advances };
     const pixels = try t.render(gpa);
     defer pixels.deinit(gpa);
     const bg = t.theme.background;
     const fg = sample.color;
-    const expected = try renderReference(run, pixels.width, pixels.height, @round((f.leading / 2 + f.ascent) * t.scale), .{ fg.r, fg.g, fg.b, fg.a }, .{ bg.r, bg.g, bg.b, bg.a }, if (native.aliased) 3 else if (native.cleartype) 1 else 2, @ptrCast(native.params.?));
+    const rendering = native.mode(face, rf.size, t.scale).rendering;
+    // Direct2D uses a different Classic edge-contrast equation. Its exact
+    // pixel reference below is for Natural; Classic has a dedicated mode and
+    // integer-phase test plus the independent System.Drawing optical audit.
+    if (rendering <= 3) return;
+    const expected = try renderReference(run, pixels.width, pixels.height, @round((f.leading / 2 + f.ascent) * t.scale), .{ fg.r, fg.g, fg.b, fg.a }, .{ bg.r, bg.g, bg.b, bg.a }, if (native.aliased) 3 else if (native.cleartype) 1 else 2, 0, @ptrCast(native.params.?));
     defer gpa.free(expected);
     for (0..pixels.width * pixels.height) |i| for (0..3) |channel| {
         const at = i * 4 + channel;
@@ -52,7 +58,7 @@ fn compare(t: *ui.Tester, sample: Sample) !void {
     };
 }
 
-test "Windows final color pixels match Direct2D at six sizes and five DPI scales" {
+test "Windows Natural final color pixels match Direct2D at six sizes and five DPI scales" {
     for ([_]f32{ 1, 1.25, 1.5, 1.75, 2 }) |scale| for ([_]bool{ false, true }) |dark| {
         var sample: Sample = .{ .color = if (dark) .hex(0xf0f0f0) else .hex(0x1a1a1a) };
         var t: ui.Tester = undefined;
@@ -64,6 +70,19 @@ test "Windows final color pixels match Direct2D at six sizes and five DPI scales
             try compare(&t, sample);
         };
     };
+}
+
+test "Windows small physical ems use GDI Classic and one integer position" {
+    var sample: Sample = .{};
+    var t: ui.Tester = undefined;
+    try init(&t, &sample, 1, .white);
+    defer t.deinit();
+    const f = t.text.font(.{ .size = 13.5 });
+    const rf = t.text.run_fonts.items[f.id];
+    const native = &t.text.atlas.native;
+    const face = native.fonts.get(.{ .face = @intFromPtr(rf.font), .simulations = 0 }) orelse return error.MissingNativeFace;
+    try std.testing.expectEqual(@as(u32, 2), native.mode(face, rf.size, t.scale).rendering);
+    try std.testing.expectEqual(@as(u8, 1), try native.positions(gpa, rf, t.scale));
 }
 
 test "Windows grayscale and aliased coverage match native rendering" {
@@ -107,7 +126,13 @@ test "Windows glyph cache retains phases, weights and DPI transitions" {
     defer t.deinit();
     const regular = try hashGlyphs(&t, .regular, 0);
     if (!t.text.atlas.native.aliased) {
-        for ([_]u8{ 6, 12, 18 }) |bin| try std.testing.expect(regular != try hashGlyphs(&t, .regular, bin));
+        const font = t.text.font(.{ .size = 13.5 });
+        const run_font = t.text.run_fonts.items[font.id];
+        if (t.text.atlas.positions(font.id, run_font) > 1) {
+            for ([_]u8{ 6, 12, 18 }) |bin| try std.testing.expect(regular != try hashGlyphs(&t, .regular, bin));
+        } else {
+            for ([_]u8{ 6, 12, 18 }) |bin| try std.testing.expectEqual(regular, try hashGlyphs(&t, .regular, bin));
+        }
     }
     try std.testing.expect(regular != try hashGlyphs(&t, .semibold, 0));
     t.text.setScale(1.5);
@@ -199,7 +224,7 @@ pub const Run = extern struct {
     bidi: u32 = 0,
 };
 
-fn renderReference(run: Run, width: usize, height: usize, baseline: f32, fg: [4]f32, bg: [4]f32, antialias: u32, params: *Com) ![]u8 {
+fn renderReference(run: Run, width: usize, height: usize, baseline: f32, fg: [4]f32, bg: [4]f32, antialias: u32, measuring: u32, params: *Com) ![]u8 {
     const dc = CreateCompatibleDC(null) orelse return error.ReferenceDC;
     defer _ = DeleteDC(dc);
     var bits: ?[*]u8 = null;
@@ -224,7 +249,7 @@ fn renderReference(run: Run, width: usize, height: usize, baseline: f32, fg: [4]
     t.method(36, *const fn (*Com, *Com) callconv(.winapi) void)(t, params);
     t.method(48, *const fn (*Com) callconv(.winapi) void)(t);
     t.method(47, *const fn (*Com, *const [4]f32) callconv(.winapi) void)(t, &bg);
-    t.method(29, *const fn (*Com, Point, *const Run, *Com, u32) callconv(.winapi) void)(t, .{ .x = 0, .y = baseline }, &run, b, 0);
+    t.method(29, *const fn (*Com, Point, *const Run, *Com, u32) callconv(.winapi) void)(t, .{ .x = 0, .y = baseline }, &run, b, measuring);
     if (t.method(49, *const fn (*Com, ?*u64, ?*u64) callconv(.winapi) i32)(t, null, null) < 0) return error.ReferenceDraw;
     return gpa.dupe(u8, (bits orelse return error.ReferenceBitmap)[0 .. width * height * 4]);
 }

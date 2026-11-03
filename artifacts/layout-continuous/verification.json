@@ -1,0 +1,15 @@
+{
+  "widths": 421,
+  "range": [
+    280,
+    700
+  ],
+  "max_adjacent_delta": {
+    "name": 1,
+    "duration": 0,
+    "format": 1,
+    "sample_rate": 1,
+    "size": 1,
+    "preview": 1
+  }
+}

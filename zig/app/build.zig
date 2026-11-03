@@ -156,6 +156,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // Optical text audit: offscreen only, never installed beside the product.
+    const text_compare = b.addExecutable(.{
+        .name = "otto-text-compare",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/text_compare.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "nanoui", .module = nanoui_dep.module("nanoui") }},
+        }),
+    });
+    const run_text_compare = b.addRunArtifact(text_compare);
+    run_text_compare.addPassthruArgs();
+    b.step("text-compare", "Render the ClearType comparison probe offscreen").dependOn(&run_text_compare.step);
+
     // 测试根：只拉数据层 / 口岸 / 取图层 / 选择与拖拽快照，不碰 nanoui。
     //   * live.zig      合成 Event 覆盖相对路径 join、rename 的 from/to、overflow 映射；
     //   * thumbs.zig    缓存键与载荷头的纯函数（线程与真实 Shell 由 --demo-thumbs 覆盖）；

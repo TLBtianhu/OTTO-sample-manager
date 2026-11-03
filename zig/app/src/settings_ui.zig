@@ -28,6 +28,7 @@ const responsive_layout = @import("responsive_layout.zig");
 const thumbs_mod = @import("thumbs.zig");
 const update_ui = @import("update_ui.zig");
 const win_window = @import("otto_win_window");
+const window_util = @import("window_util.zig");
 const ui = nanoui.ui;
 
 const panel_width: f32 = 332;
@@ -253,9 +254,10 @@ pub const Panel = struct {
         c: *ui.Context,
         thumbs: *thumbs_mod.Thumbs,
         update: *update_ui.Update,
-        hwnd: ?*anyopaque,
+        window: ?*nanoui.Window,
     ) void {
         if (!self.open) return;
+        const hwnd = window_util.nativeHandle(window);
 
         // 遮罩：挡住下面的列表点击；点它（而不是卡片）关闭面板。
         const shade = ui.div(c).fixed().sizeFull().bg(ui.Color.black.alpha(0.32)).layer(1);
@@ -290,6 +292,7 @@ pub const Panel = struct {
         if (ui.slider(c, &self.opacity_percent, .{ .min = 0, .max = 100, .width = .fill })) {
             self.setOpacityFromSlider(hwnd);
         }
+        const reset_size = ui.button(c, "恢复默认大小（380×700）", .{ .variant = .ghost, .size = 11 });
 
         ui.text(c, "更新源", .{ .size = 11, .color = c.theme.muted });
         _ = ui.textField(c, &self.url_field, .{
@@ -324,6 +327,10 @@ pub const Panel = struct {
         host.end();
         shade.end();
 
+        if (reset_size.clicked) {
+            self.restoreDefaultWindowSize(window);
+            c.changed = true;
+        }
         if (close_it.clicked or shade_it.clicked) {
             c.changed = true;
             self.close(thumbs, update, hwnd);
@@ -387,11 +394,24 @@ pub const Panel = struct {
         self.save();
     }
 
+    /// 设置按钮与隐藏验收探针共用：窗口 client area、持久化尺寸和下一帧
+    /// 的容器布局一起回 380×700；nanoui 的 setSize 不激活窗口。
+    pub fn restoreDefaultWindowSize(self: *Panel, window: ?*nanoui.Window) void {
+        self.settings.layout = .{};
+        if (window) |value| {
+            value.setSize(@floatFromInt(responsive_layout.default_window_width), @floatFromInt(responsive_layout.default_window_height));
+            value.redraw();
+        }
+        self.save();
+    }
+
     /// 正常关闭时记录最后的窗口尺寸；每次关闭最多写一次。
     pub fn recordWindowClose(self: *Panel, window: *nanoui.Window) void {
-        const frame = window.frame();
-        self.settings.layout.width = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_width)), frame.width)));
-        self.settings.layout.height = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_height)), frame.height)));
+        // layout 是 newWindow/setSize 的 client area，不是含边框的外框；
+        // 混用会让每次关闭都把尺寸写大（380×700 -> 396×739）。
+        const content = window.contentSize();
+        self.settings.layout.width = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_width)), content[0])));
+        self.settings.layout.height = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_height)), content[1])));
         self.save();
     }
 
