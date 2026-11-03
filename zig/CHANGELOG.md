@@ -18,6 +18,16 @@
 
 
 
+
+## 0.52.0
+
+- **PCM 与解码缓冲纳入驻留预算**：新增三档驻留策略（`--pcm-residency` 可覆盖）：≤2 MiB 保留完整 PCM；2–64 MiB 保留 2 MiB 播放窗；**≥64 MiB 只留波形**，播放时才建有界帧源。
+- 10 分钟 FLAC 实测：完整 PCM **109.86 MiB** → 自动档真实窗口峰值 **36.48 MiB**（headless 16.67），20/20 次打开关闭全部释放。
+- **PCM 独立预算 6 MiB**，与 L2/预览并列；`membudget.ps1` 同时打印 `pcm` 与 `pcm-peak` 并硬性检查。
+- **反向证明**：10 分钟强制 `full-decode` → `pcm=109.86/6 FAIL`、`pcm-peak=146.13/50 FAIL`。
+- 跨窗 seek 与整段解码逐字节一致；未知总长的格式用 `DELETE_ON_CLOSE` 临时 spool 有界算峰值，不再二次解码。
+- 首版波形不退化：5 分钟 WAV p50 2.64 vs 9.61 ms（自动档 vs 全解码对照）。
+
 ## 0.51.0
 
 - **窗口拉伸改为"重排"而不是"缩放"**：新增 `responsive_layout.zig`（fixed / fraction / minmax 轨道求解 + 容器 profile），列表列数与预览高度随容器宽度变化，字号、行高、点击目标不变。
