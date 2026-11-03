@@ -1,4 +1,4 @@
-﻿# One command: build OTTO Lite, then verify all three run forms (CHARTER section 9)
+# One command: build OTTO Lite, then verify all three run forms (CHARTER section 9)
 # end to end, in real processes:
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\verify-distribution.ps1
@@ -470,9 +470,10 @@ function Restore-RealAppDataStash {
   $restored = $false
 
   # 1) Whatever is at the real path now was created by the test, so it has to go
-  #    completely. This is only safe when the user's directory really was moved
-  #    aside: if the move failed, what is there now is still the user's data.
-  if ($script:realOttoStashed -and (Test-Path -LiteralPath $script:realOtto)) {
+  #    completely. This is safe when the user's directory really was moved aside,
+  #    and also when it was absent before the test (then no user data existed).
+  if ((Test-Path -LiteralPath $script:realOtto) -and
+    ($script:realOttoStashed -or -not $script:realOttoPreInstalled.Exists)) {
     try {
       Remove-Item -LiteralPath $script:realOtto -Recurse -Force -ErrorAction Stop
     } catch {

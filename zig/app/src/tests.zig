@@ -75,6 +75,8 @@ test {
     _ = @import("browse_scroll.zig");
     _ = @import("browse_shell.zig");
     _ = @import("browse_stage2_test.zig");
+    // 启动库加载的错误生命周期：失败时也只释放已初始化的库占位。
+    _ = @import("app_boot.zig");
     _ = @import("library_io.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");
