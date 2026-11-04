@@ -11,6 +11,7 @@
 //!   * cache       —— 统一字节预算缓存（预算 / LRU / pin / 软配额 / 统计）
 //!   * index       —— 在不可变 Library 之上滚动应用文件变更事件的可变视图
 //!   * rescan      —— 局部重扫的纯差分：身份优先，无身份退回 路径+大小+mtime
+//!   * removal     —— 按 Sample.id / 目录路径移除并生成持久排除记录（不碰磁盘）
 //!   * semver      —— `x.y.z` 版本号的解析与比较（更新检查用）
 //!
 //! 只依赖 Zig 0.17 标准库，没有 @cImport、没有外部依赖。
@@ -27,6 +28,7 @@ pub const cache = @import("cache.zig");
 pub const annotations = @import("annotations.zig");
 pub const index = @import("index.zig");
 pub const rescan = @import("rescan.zig");
+pub const removal = @import("removal.zig");
 pub const semver = @import("semver.zig");
 
 /// 内核数据层版本号，与 build.zig.zon 保持一致。

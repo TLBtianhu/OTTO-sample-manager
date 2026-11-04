@@ -210,11 +210,11 @@ test "Corrupt：保留位 / 非法判别字节" {
     const valid = try binary.encode(allocator, &library);
     defer allocator.free(valid);
 
-    // flags 非 0
+    // flags 的未知位（bit0 现在是合法的 exclusions 区标志）
     {
         const broken = try allocator.dupe(u8, valid);
         defer allocator.free(broken);
-        std.mem.writeInt(u16, broken[10..12], 1, .little);
+        std.mem.writeInt(u16, broken[10..12], 2, .little);
         try std.testing.expectError(error.Corrupt, binary.decode(allocator, broken));
     }
 

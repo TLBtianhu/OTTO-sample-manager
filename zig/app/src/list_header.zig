@@ -24,6 +24,8 @@ pub const Info = struct {
     /// Ctrl+C 的提示还剩几拍（>0 = 正在闪）。
     flash_left: u32 = 0,
     flash_count: usize = 0,
+    flash_remove: bool = false,
+    can_remove: bool = false,
     /// 本帧画出的缩略图行数（>0 才显示）。
     rows_with_image: u32 = 0,
     /// 监听丢过事件（`live.dirty()`）。
@@ -51,6 +53,7 @@ pub const Action = struct {
     /// 右上角「设置」被点了。
     settings_clicked: bool = false,
     overflow_clicked: bool = false,
+    remove_clicked: bool = false,
 };
 
 pub fn draw(c: *ui.Context, info: Info) Action {
@@ -72,7 +75,11 @@ pub fn draw(c: *ui.Context, info: Info) Action {
             .color = if (info.import_failed) c.theme.danger else c.theme.accent,
         }, "· {s}", .{status});
         if (info.flash_left > 0) {
-            ui.textf(c, .{ .size = 18, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
+            if (info.flash_remove) {
+                ui.textf(c, .{ .size = 18, .color = c.theme.accent }, "· 已从库中移除 {d} 项", .{info.flash_count});
+            } else {
+                ui.textf(c, .{ .size = 18, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
+            }
         } else if (info.rows_with_image > 0) {
             ui.textf(c, .{ .size = 18, .color = c.theme.muted }, "· {d} 行有缩略图", .{info.rows_with_image});
         }
@@ -85,14 +92,14 @@ pub fn draw(c: *ui.Context, info: Info) Action {
         ui.end(c);
         action.overflow_clicked = more.clicked;
     } else {
-        merge(&action, secondaryButtons(c));
+        merge(&action, secondaryButtons(c, info.can_remove));
     }
     row.end();
 
     // <360：次要按钮收进内联溢出菜单；不弹系统窗、不抢焦点，打开才占一行。
     if (info.compact and info.overflow_open) {
         const menu = ui.div(c).row().wFull().h(24).itemsCenter().justifyEnd().gap(8);
-        merge(&action, secondaryButtons(c));
+        merge(&action, secondaryButtons(c, info.can_remove));
         menu.end();
     }
 
@@ -113,8 +120,14 @@ pub fn draw(c: *ui.Context, info: Info) Action {
     return action;
 }
 
-fn secondaryButtons(c: *ui.Context) Action {
+fn secondaryButtons(c: *ui.Context, can_remove: bool) Action {
     var action: Action = .{};
+    if (can_remove) {
+        const remove_button = smallPressable(c);
+        ui.text(c, "从库中移除", .{ .size = 14, .color = c.theme.danger });
+        ui.end(c);
+        action.remove_clicked = remove_button.clicked;
+    }
     const check_button = smallPressable(c);
     ui.text(c, "检查更新", .{ .size = 14, .color = c.theme.muted });
     ui.end(c);
@@ -130,6 +143,7 @@ fn merge(target: *Action, source: Action) void {
     target.check_clicked = target.check_clicked or source.check_clicked;
     target.settings_clicked = target.settings_clicked or source.settings_clicked;
     target.update_clicked = target.update_clicked or source.update_clicked;
+    target.remove_clicked = target.remove_clicked or source.remove_clicked;
 }
 
 /// 小号可点区域：只有 hover 时的浅底，点击面比文字略大一圈。

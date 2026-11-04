@@ -129,6 +129,47 @@ pub const StableKeyContext = struct {
     }
 };
 
+/// 从库中移除后留下的持久排除记录。它只描述库成员资格，绝不授权任何磁盘写操作。
+/// 文件记录同时保存路径与可用的 NTFS/ReFS 身份：路径拦截普通 created，身份让
+/// 重扫在同卷改名/移动后仍然认得它；目录记录按路径边界覆盖整个子树。
+pub const Exclusion = struct {
+    pub const Kind = enum(u8) { file = 0, folder = 1 };
+
+    kind: Kind,
+    path: []const u8,
+    identity: ?FileIdentity = null,
+
+    pub fn matches(self: Exclusion, path: []const u8, identity: ?FileIdentity) bool {
+        return switch (self.kind) {
+            .file => std.mem.eql(u8, self.path, path) or
+                (self.identity != null and identity != null and self.identity.?.eql(identity.?)),
+            .folder => pathWithin(self.path, path),
+        };
+    }
+};
+
+/// `path` 是否位于 `folder` 内。分隔符 `/` 与 `\\` 都认，且 `foo` 不会误伤 `foobar`。
+/// 与核心其它路径规则一致：不做大小写折叠（口岸负责平台归一化）。
+pub fn pathWithin(folder: []const u8, path: []const u8) bool {
+    if (folder.len == 0 or path.len <= folder.len) return false;
+    for (folder, path[0..folder.len]) |a, b| {
+        if (isPathSep(a) and isPathSep(b)) continue;
+        if (a != b) return false;
+    }
+    return isPathSep(folder[folder.len - 1]) or isPathSep(path[folder.len]);
+}
+
+fn isPathSep(char: u8) bool {
+    return char == '/' or char == '\\';
+}
+
+pub fn isExcluded(exclusions: []const Exclusion, path: []const u8, identity: ?FileIdentity) bool {
+    for (exclusions) |exclusion| {
+        if (exclusion.matches(path, identity)) return true;
+    }
+    return false;
+}
+
 pub const no_relative_path = std.math.maxInt(u32);
 
 /// 一个采样（对应 TS `Sample`）。

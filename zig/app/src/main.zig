@@ -1,15 +1,6 @@
-//! OTTO Lite：用 nanoui 的 Windows CPU 后端把 `zig/core` 的资料库画成可调整大小的列表，
-//! 用 `zig/ports` 的文件监听让列表跟着磁盘变、用系统缩略图给每行左侧配一张小图。
-//!
-//!   命令行与各自检入口见 `commands.zig`；都不开窗、不弹窗、不抢焦点。
-//!
-//! 本文件只留三件事：**参数分派**（`options` + `commands`）、**生命周期**
-//! （`tick` / `refresh` / 重载 / 拖拽定时器）、**`State` 组装**。其余在各枝：
-//!   * `app_boot.zig` —— 启动装配：库 / Live / 设置 / 缩略图 / 预览条 / 字体与上屏后端；
-//!   * `row_ui.zig`   —— 列表行的绘制、点击与拖拽、复制与选择表；
-//!   * `live.zig` / `live_adapt.zig` / `live_rescan.zig` —— 监听、翻译、重扫协作。
-//!
-//! 预览见 `preview_panel.zig`；默认库路径由 `mode.zig` 决定，搜索/拖出各有独立模块。
+//! OTTO Lite 主窗口。这里只做参数分派、生命周期与 State 组装；启动、列表、监听、
+//! 预览与「从库中移除」分别在 app_boot / row_ui / live / preview_panel / remove_ui。
+//! 命令行与各自检入口见 commands.zig，均不弹窗、不抢焦点。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -40,6 +31,7 @@ const preview_panel = @import("preview_panel.zig");
 const row_probe = @import("row_probe.zig");
 const row_ui = @import("row_ui.zig");
 const responsive_layout = @import("responsive_layout.zig");
+const remove_ui = @import("remove_ui.zig");
 const search_ui = @import("search_ui.zig");
 const selection_mod = @import("selection.zig");
 const settings_ui = @import("settings_ui.zig");
@@ -75,6 +67,8 @@ pub const State = struct {
     preview: *preview_panel.Panel,
     /// 选择模型（下标 + 锚点 + 当前行）；帧里只改它，不碰磁盘。
     selection: selection_mod.Selection = .{},
+    /// 文件夹节点的移除目标（样本选择仍在 selection 里）。
+    remove: remove_ui.Selection,
     /// 搜索框 + 过滤行映射 + 键盘导航（见 `search_ui.zig`）。
     search: search_ui.Search,
     import: import_ui.Import,
@@ -114,6 +108,7 @@ pub const State = struct {
     /// 表头提示还剩几拍（>0 = 正在闪），以及刚复制了几个。
     flash_left: u32 = 0,
     flash_count: usize = 0,
+    flash_remove: bool = false,
     fn view(s: *State, c: *ui.Context) void {
         // 上一帧 pin 住的条目到这里才放掉：view 之后还有 paint，paint 期间像素要有效。
         s.thumbs.beginFrame();
@@ -153,7 +148,7 @@ pub const State = struct {
             .disabled = s.import.busy(),
         };
         if (!busy) {
-            if (s.browse != null) browse_action.handleKeys(s, c);
+            if (s.browse != null) browse_action.handleKeys(s, c) else _ = remove_ui.handleKey(s, c);
             var action: search_ui.Outcome = .{};
             // 地址栏拥有键盘时，全局搜索/列表快捷键必须让路；这里只画搜索框，不处理 Enter/Esc。
             if (s.browse != null and s.address.keyboardOwned()) {
@@ -161,7 +156,10 @@ pub const State = struct {
             } else {
                 action = s.search.frame(c, s.samples, &s.selection, import_button);
             }
-            if (action.filter_changed) row_ui.noteSelection(s);
+            if (action.filter_changed) {
+                s.remove.clearFolder();
+                row_ui.noteSelection(s);
+            }
             if (action.activate) row_ui.activateCursor(s, c);
             if (action.toggle_play) c.changed = s.preview.togglePlay(row_ui.previewRow(s)) or c.changed;
             if (action.trailing_clicked) open_ui.toggle(&s.open_menu, c);
@@ -182,6 +180,8 @@ pub const State = struct {
             .ext_filter = s.search.extSummary(&ext_buffer),
             .flash_left = s.flash_left,
             .flash_count = s.flash_count,
+            .flash_remove = s.flash_remove,
+            .can_remove = remove_ui.canRemove(s),
             .rows_with_image = s.reporter.printed_rows,
             .dirty = if (s.browse != null) false else s.live.dirty(),
             .import_status = s.import.status(&status_buffer),
@@ -197,6 +197,7 @@ pub const State = struct {
                 c.changed = true;
             }
             if (header_action.check_clicked) s.update.begin();
+            if (header_action.remove_clicked) remove_ui.removeCurrent(s, c);
             if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
             if (header_action.settings_clicked) s.settings.openPanel(c);
         }
@@ -226,11 +227,8 @@ pub const State = struct {
         var built_rows: usize = 0;
         while (rows.next()) |row| {
             if (s.search.folderAt(row)) |folder| {
-                const it = library_tree_ui.draw(c, folder);
-                if (!busy and it.clicked and s.search.toggleFolder(row)) {
-                    s.settings.saveViewState();
-                    c.changed = true;
-                }
+                const it = library_tree_ui.draw(c, folder, remove_ui.folderSelected(s, folder.path));
+                if (!busy and it.clicked) remove_ui.folderClicked(s, c, row);
                 continue;
             }
             const index = s.search.sampleAt(row) orelse continue;
@@ -255,6 +253,7 @@ pub const State = struct {
         if (!busy) {
             if (body_it.clicked) {
                 s.selection.clear();
+                s.remove.clearFolder();
                 row_ui.cancelPress(s);
                 row_ui.noteSelection(s);
                 c.changed = true;
@@ -351,12 +350,13 @@ pub const State = struct {
 
     /// 导入成功后重载：内存列表换成刚保存的那份库（理由见 `import_ui.zig` 文件头）。
     /// 选择清空、过滤重建、预览重提交——都走和启动时同一条初始化路径。
-    fn afterReload(s: *State) void {
+    pub fn afterReload(s: *State) void {
         s.live = s.import.live();
         s.samples = s.live.samples();
         s.duration_trust.clear();
         s.thumbs.clearFailures();
         s.search.markStale();
+        s.remove.clearFolder();
         s.selection.clear();
         s.selection.resize(s.gpa, s.samples.len) catch {};
         s.preview.sync(null, .{});
@@ -520,6 +520,7 @@ fn run(init: std.process.Init) !void {
         .duration_trust = duration_trust.Trust.init(init.gpa, init.io),
         .thumbs = boot.thumbs,
         .preview = boot.preview,
+        .remove = remove_ui.Selection.init(init.gpa),
         .search = search_ui.Search.init(init.gpa),
         .import = try import_ui.Import.init(init.gpa, init.io, &boot.library, &boot.live, boot.library_path),
         .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse boot.settings.update_url, options.no_exec, options.update_current),
@@ -538,6 +539,7 @@ fn run(init: std.process.Init) !void {
     defer state.update.deinit();
     defer state.settings.deinit();
     defer state.selection.deinit(init.gpa);
+    defer state.remove.deinit();
     defer state.address.deinit();
     defer state.search.deinit();
     defer state.transport.deinit();

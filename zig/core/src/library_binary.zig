@@ -15,7 +15,7 @@
 //! 偏移  长度  字段
 //! 0     8     magic = "OTTOLIB\0"
 //! 8     2     version = 2（其它版本一律报 UnknownVersion）
-//! 10    2     flags（必须为 0；将来变了就升 version）
+//! 10    2     flags（bit0 = 有排除记录区；其它位必须为 0）
 //! 12    4     sample_count
 //! 16    4     group_count
 //! 20    4     folder_count
@@ -56,6 +56,10 @@
 //!   u8 flags（bit0 is_expanded，bit1 is_renaming）
 //! folder_order[folder_order_count]、group_order[group_order_count]
 //!   字符串 × N（个数在文件头；与 `store.Library` 一致，元素是 **id** 不是路径）
+//! exclusions（仅 flags.bit0 = 1）
+//!   u32 exclusion_count；每条：u8 kind（0 file / 1 folder）、
+//!   u8 has_identity + [u32 volume_serial，u64 file_index]、字符串 path
+//!   file 同时按路径/身份拦截，folder 按路径边界覆盖子树；只排除库成员，不授权磁盘写入。
 //! ```
 //!
 //! 字符串 = `u32 长度 + 原始字节`，长度上限见 `max_string_bytes`；不强制 UTF-8
@@ -92,6 +96,7 @@ pub const max_groups = format.max_groups;
 pub const max_folders = format.max_folders;
 pub const max_order_entries = format.max_order_entries;
 pub const max_refs = format.max_refs;
+pub const max_exclusions = format.max_exclusions;
 pub const Error = format.Error;
 pub const isOtto = format.isOtto;
 
@@ -170,7 +175,7 @@ pub fn encode(allocator: std.mem.Allocator, library: *const store.Library) Error
 
     try encoder.writeBytes(magic);
     try encoder.writeU16(format_version);
-    try encoder.writeU16(0);
+    try encoder.writeU16(if (library.exclusions.len == 0) 0 else format.exclusions_flag);
     try encoder.writeCount(library.samples.len, max_samples);
     try encoder.writeCount(library.groups.len, max_groups);
     try encoder.writeCount(library.folders.len, max_folders);
@@ -187,6 +192,10 @@ pub fn encode(allocator: std.mem.Allocator, library: *const store.Library) Error
     for (library.folders) |folder| try writeFolder(&encoder, folder);
     try writeStringList(&encoder, library.folder_order);
     try writeStringList(&encoder, library.group_order);
+    if (library.exclusions.len != 0) {
+        try encoder.writeCount(library.exclusions.len, max_exclusions);
+        for (library.exclusions) |item| try writeExclusion(&encoder, item);
+    }
 
     const payload_length = encoder.list.items.len - payload_start;
     const narrowed = std.math.cast(u32, payload_length) orelse return error.TooLarge;
@@ -298,6 +307,18 @@ fn writeFolder(encoder: *Encoder, folder: model.SampleFolder) Error!void {
     if (folder.is_expanded) flags |= 1 << 0;
     if (folder.is_renaming) flags |= 1 << 1;
     try encoder.writeU8(flags);
+}
+
+fn writeExclusion(encoder: *Encoder, item: model.Exclusion) Error!void {
+    try encoder.writeU8(@intFromEnum(item.kind));
+    if (item.identity) |identity| {
+        try encoder.writeU8(1);
+        try encoder.writeU32(identity.volume_serial);
+        try encoder.writeU64(identity.file_index);
+    } else {
+        try encoder.writeU8(0);
+    }
+    try encoder.writeString(item.path);
 }
 
 /// 顺序列表的元素个数已经在文件头里（folder_order_count / group_order_count），

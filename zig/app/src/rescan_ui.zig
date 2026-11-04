@@ -366,7 +366,7 @@ pub const Rescan = struct {
             };
         }
 
-        var difference = try core.rescan.diff(self.allocator, index.samples(), entries);
+        var difference = try core.rescan.diffExcluding(self.allocator, index.samples(), entries, index.library.exclusions);
         defer difference.deinit(self.allocator);
 
         const applied = try index.applyRescan(difference, entries);

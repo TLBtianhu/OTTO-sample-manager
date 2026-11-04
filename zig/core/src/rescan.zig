@@ -98,6 +98,16 @@ pub fn diff(
     old: []const model.Sample,
     fresh: []const ScanEntry,
 ) error{OutOfMemory}!Diff {
+    return diffExcluding(allocator, old, fresh, &.{});
+}
+
+/// 重扫入口同样执行持久排除：排除项既不是 added，也不会与旧行配成 moved/modified。
+pub fn diffExcluding(
+    allocator: std.mem.Allocator,
+    old: []const model.Sample,
+    fresh: []const ScanEntry,
+    exclusions: []const model.Exclusion,
+) error{OutOfMemory}!Diff {
     // 身份 → 旧下标列表。用列表而不是单值：硬链接会让两个路径共享一个身份，
     // 一个旧样本被配上之后，另一个仍未配的旧样本不能因此被当成删除。
     var by_identity: std.HashMapUnmanaged(
@@ -143,6 +153,7 @@ pub fn diff(
     var unchanged: usize = 0;
 
     for (fresh, 0..) |entry, fresh_index| {
+        if (model.isExcluded(exclusions, entry.path, entry.identity)) continue;
         const matched = try matchOld(old, &by_identity, &by_path, used, entry);
         if (matched) |old_index| {
             used[old_index] = true;

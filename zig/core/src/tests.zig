@@ -29,6 +29,8 @@ test {
     _ = @import("index_test.zig");
     _ = @import("rescan.zig");
     _ = @import("rescan_test.zig");
+    _ = @import("removal.zig");
+    _ = @import("removal_test.zig");
     // `x.y.z` 版本号：解析 / 前导零 / 段数 / 溢出 / 三段比较。
     _ = @import("semver.zig");
 }

@@ -16,6 +16,17 @@ pub fn rebuild(
     base: *const store.Library,
     current: []const model.Sample,
 ) Error!store.Library {
+    return rebuildExcludingFolders(backing, base, current, &.{});
+}
+
+/// 同 `rebuild`，额外跳过指定目录及其后代的库记录。调用方已先从 current 删掉
+/// 这些目录里的样本；树/顺序/分组引用仍由同一套 reconcile 闭合。
+pub fn rebuildExcludingFolders(
+    backing: std.mem.Allocator,
+    base: *const store.Library,
+    current: []const model.Sample,
+    excluded_folders: []const []const u8,
+) Error!store.Library {
     var arena = std.heap.ArenaAllocator.init(backing);
     errdefer arena.deinit();
     const allocator = arena.allocator();
@@ -40,6 +51,14 @@ pub fn rebuild(
     var folders: std.ArrayList(model.SampleFolder) = .empty;
     var folder_index = std.StringHashMapUnmanaged(u32){};
     for (base.folders) |folder| {
+        var skip = false;
+        for (excluded_folders) |path| {
+            if (std.mem.eql(u8, folder.path, path) or model.pathWithin(path, folder.path)) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip) continue;
         const copy = try cloneFolder(allocator, folder);
         try folders.append(allocator, copy);
         try folder_index.put(allocator, copy.id, @intCast(folders.items.len - 1));
@@ -60,6 +79,8 @@ pub fn rebuild(
     const group_slice = try groups.toOwnedSlice(allocator);
     const folder_slice = try folders.toOwnedSlice(allocator);
     try sample_location.backfill(allocator, sample_slice, folder_slice);
+    const exclusions = try allocator.alloc(model.Exclusion, base.exclusions.len);
+    for (base.exclusions, 0..) |item, index| exclusions[index] = try store.cloneExclusion(allocator, item);
     report.samples_loaded = sample_slice.len;
     report.groups_loaded = group_slice.len;
     report.folders_loaded = folder_slice.len;
@@ -76,6 +97,7 @@ pub fn rebuild(
         .group_order = group_order,
         .settings = base.settings,
         .report = report,
+        .exclusions = exclusions,
     };
 }
 

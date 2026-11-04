@@ -63,6 +63,7 @@ pub const Counts = struct {
     added: usize = 0,
     skipped_path: usize = 0,
     skipped_identity: usize = 0,
+    restored_exclusions: usize = 0,
     failed: usize = 0,
     bytes: usize = 0,
 
@@ -101,6 +102,7 @@ pub const Report = struct {
     added: usize = 0,
     skipped_path: usize = 0,
     skipped_identity: usize = 0,
+    restored_exclusions: usize = 0,
     failed: usize = 0,
     bytes: usize = 0,
     ms: f64 = 0,
@@ -397,6 +399,9 @@ pub fn mergeScan(
     var incoming: std.ArrayList(core.model.Sample) = .empty;
     const imported_at = std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
     for (scan.files) |fact| {
+        const identity = if (fact.identity) |value| toCoreIdentity(value) else null;
+        // 显式导入是用户明确的恢复意图；只有这条路径清墓碑，监听/重扫永不调用。
+        report.restored_exclusions += try library.clearExclusionsFor(fact.path, identity);
         switch (dedupe.classify(fact)) {
             .duplicate_path => {
                 report.skipped_path += 1;
@@ -488,6 +493,7 @@ fn countsFrom(report: Report) Counts {
         .added = report.added,
         .skipped_path = report.skipped_path,
         .skipped_identity = report.skipped_identity,
+        .restored_exclusions = report.restored_exclusions,
         .failed = report.failed,
         .bytes = report.bytes,
         .skipped_hidden = report.skipped_hidden,
@@ -529,13 +535,14 @@ fn printSummary(
 ) void {
     const line = std.fmt.allocPrint(
         allocator,
-        "scanned={d} added={d} skipped_path={d} skipped_identity={d} failed={d} " ++
+        "scanned={d} added={d} skipped_path={d} skipped_identity={d} restored_exclusions={d} failed={d} " ++
             "wrote={s} bytes={d} ms={d:.2}\n",
         .{
             counts.scanned,
             counts.added,
             counts.skipped_path,
             counts.skipped_identity,
+            counts.restored_exclusions,
             counts.failed,
             save_path,
             counts.bytes,

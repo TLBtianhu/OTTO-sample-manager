@@ -380,6 +380,30 @@ The "hit" rows are renumbered from 1 in the filtered list.
 Not in this half: pinyin / initials, the input-method (IME) composition path,
 matching-substring highlighting and fuzzy matching.
 
+## Removing library entries (never deleting source files)
+
+Select one or more samples and click 「从库中移除」 in the header, or press Delete.
+A folder row uses the same two entries and removes its complete subtree. Delete is
+left to the text editor while the search field has focus. Browse mode is read-only
+and has no removal entry.
+
+Removal is a core transformation keyed by `Sample.id` / folder path, never a display
+row number. The app atomically saves and reloads OTTOLIB v2, clears selection and
+preview, and stops the current audio session before releasing the old library. v2's
+optional exclusion area (`flags.bit0`) stores `kind`, `path` and optional file
+identity. File tombstones cover both the original path and later identity matches;
+folder tombstones cover path-boundary descendants. Startup, watcher created/renamed
+and rescan enforce them. An explicit re-import is the user's restore intent: it clears
+matching tombstones and allows those files back; no separate restore UI is needed.
+Records are otherwise deduplicated and retained for the library's lifetime.
+No source file or source directory is deleted, renamed, moved, recycled or written.
+
+```powershell
+# Real hidden/non-activating HWND: header multi-remove, folder Delete, restart,
+# explicit re-import restore, focus readback and SHA-256 source manifests.
+& zig\remove_accept.ps1
+```
+
 ## Headless checks
 
 ```powershell
