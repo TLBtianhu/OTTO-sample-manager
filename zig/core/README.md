@@ -39,7 +39,9 @@ zig build test
 | `src/store_rebuild.zig` | 把 `Index` 的事件收集结果重建为带目录/分组关系、可查询的 `Library` 业务快照 |
 | `src/query.zig` | 目录递归过滤、分组过滤、文件名子串过滤、排序、子树枚举 |
 | `src/annotations.zig` | 以 `StableKey`（身份优先）为键的注释表：`AnnotationTable` / `resolve` 旧库迁移 |
-| `src/index.zig` | 可变索引层：在不可变 `Library` 之上滚动应用 created / removed / renamed / modified / overflow |
+| `src/index.zig` | 可变索引层：在不可变 `Library` 之上滚动应用 created / removed / renamed / modified / overflow，并执行持久排除 |
+| `src/removal.zig` | 按 `Sample.id` 多选或按目录路径递归移除；重建闭合引用并生成文件/目录墓碑，不碰磁盘 |
+| `src/removal_test.zig` | 多选、目录递归、v2 墓碑往返、重启/监听/重扫不复活 |
 | `src/tests.zig` | 集成测试（4 个 fixture + 1000 条合成数据耗时打印） |
 | `src/store_test.zig` | `store` 的单元测试（内联 JSON） |
 | `src/library_binary_test.zig` | `OTTOLIB` 往返 / 四个具名损坏错误 / 上限 / 任意截断或翻字节不 panic |
@@ -48,7 +50,7 @@ zig build test
 | `fixtures/*.json` | 全部为手工构造的合成数据，**不含任何真实用户数据** |
 | `fixtures/fixtures.zig` | 以 `@embedFile` 暴露 fixture 文本 |
 
-单文件均小于 600 行；`zig build test` 当前为 **90 个测试**。
+单文件均不超过 600 行；`zig build test` 当前为 **94 个测试**。
 
 ## 公共 API 草图
 

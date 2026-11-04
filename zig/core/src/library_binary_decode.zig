@@ -22,6 +22,7 @@ const max_groups = format.max_groups;
 const max_folders = format.max_folders;
 const max_order_entries = format.max_order_entries;
 const max_refs = format.max_refs;
+const max_exclusions = format.max_exclusions;
 const isOtto = format.isOtto;
 fn durationFromMs(milliseconds: u64) f64 {
     return @as(f64, @floatFromInt(milliseconds)) / 1000.0;
@@ -122,7 +123,7 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
     const version = try decoder.readU16();
     if (version != format_version) return error.UnknownVersion;
     const flags = try decoder.readU16();
-    if (flags != 0) return error.Corrupt;
+    if (flags & ~format.exclusions_flag != 0) return error.Corrupt;
 
     const sample_count = try decoder.readU32();
     const group_count = try decoder.readU32();
@@ -159,6 +160,7 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
     var folders: std.ArrayList(model.SampleFolder) = .empty;
     var folder_order: std.ArrayList([]const u8) = .empty;
     var group_order: std.ArrayList([]const u8) = .empty;
+    var exclusions: std.ArrayList(model.Exclusion) = .empty;
 
     var index: u32 = 0;
     while (index < sample_count) : (index += 1) {
@@ -179,6 +181,14 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
     n = 0;
     while (n < group_order_count) : (n += 1) {
         try group_order.append(allocator, try decoder.readString());
+    }
+    if (flags & format.exclusions_flag != 0) {
+        const exclusion_count = try decoder.readU32();
+        if (exclusion_count > max_exclusions) return error.TooLarge;
+        n = 0;
+        while (n < exclusion_count) : (n += 1) {
+            try exclusions.append(allocator, try readExclusion(&decoder));
+        }
     }
 
     if (decoder.pos != bytes.len - crc_size) return error.Corrupt;
@@ -226,6 +236,7 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
     const folder_slice = try folders.toOwnedSlice(allocator);
     const folder_order_slice = try folder_order.toOwnedSlice(allocator);
     const group_order_slice = try group_order.toOwnedSlice(allocator);
+    const exclusion_slice = try exclusions.toOwnedSlice(allocator);
     try sample_location.backfill(allocator, sample_slice, folder_slice);
 
     return .{
@@ -239,6 +250,7 @@ pub fn decode(backing: std.mem.Allocator, bytes: []const u8) Error!store.Library
         .folder_order = folder_order_slice,
         .group_order = group_order_slice,
         .settings = settings,
+        .exclusions = exclusion_slice,
         .report = .{
             .samples_loaded = sample_slice.len,
             .groups_loaded = group_slice.len,
@@ -334,6 +346,24 @@ fn readSample(decoder: *Decoder) Error!model.Sample {
     if ((root_path.len > 0 or relative_path.len > 0) and
         !sample_location.assign(&result, root_path, relative_path)) return error.Corrupt;
     return result;
+}
+
+fn readExclusion(decoder: *Decoder) Error!model.Exclusion {
+    const kind: model.Exclusion.Kind = switch (try decoder.readU8()) {
+        0 => .file,
+        1 => .folder,
+        else => return error.Corrupt,
+    };
+    const has_identity = try decoder.readU8();
+    if (has_identity > 1) return error.Corrupt;
+    const identity: ?model.FileIdentity = if (has_identity == 1) .{
+        .volume_serial = try decoder.readU32(),
+        .file_index = try decoder.readU64(),
+    } else null;
+    if (kind == .folder and identity != null) return error.Corrupt;
+    const path = try decoder.readString();
+    if (path.len == 0) return error.Corrupt;
+    return .{ .kind = kind, .path = path, .identity = identity };
 }
 
 fn readGroup(decoder: *Decoder) Error!model.SampleGroup {

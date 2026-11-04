@@ -20,6 +20,9 @@ pub const max_groups: u32 = 1_000_000;
 pub const max_folders: u32 = 1_000_000;
 pub const max_order_entries: u32 = 1_000_000;
 pub const max_refs: u32 = 1_000_000;
+pub const max_exclusions: u32 = 1_000_000;
+/// v2 flags：bit0 表示 order 列表后还有排除记录区；其余位保留。
+pub const exclusions_flag: u16 = 1;
 
 pub const Error = error{
     OutOfMemory,

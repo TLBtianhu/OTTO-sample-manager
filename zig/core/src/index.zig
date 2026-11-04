@@ -166,7 +166,11 @@ pub const Index = struct {
         };
         errdefer self.invalidated_arena.deinit();
         errdefer self.items.deinit(allocator);
-        try self.items.appendSlice(allocator, library.samples);
+        try self.items.ensureTotalCapacity(allocator, library.samples.len);
+        for (library.samples) |sample| {
+            if (library.isExcluded(sample.file_path, sample.identity)) continue;
+            try self.items.append(allocator, sample);
+        }
         return self;
     }
 
@@ -238,7 +242,7 @@ pub const Index = struct {
         );
 
         var report = RescanReport{
-            .added = difference.added.len,
+            .added = 0,
             .removed = difference.removed.len,
             .moved = difference.moved.len,
             .modified = difference.changed.len,
@@ -302,7 +306,9 @@ pub const Index = struct {
         }
 
         // 4. 追加真正的新文件（按扫描顺序）。
-        for (difference.added) |ref| try self.insertScanEntry(fresh[ref.fresh]);
+        for (difference.added) |ref| {
+            if (try self.insertScanEntry(fresh[ref.fresh])) report.added += 1;
+        }
 
         report.invalidated = self.invalidated.items;
         return report;
@@ -336,7 +342,7 @@ pub const Index = struct {
 
     /// `created`：追加一条只有路径的样本；同一路径已经在视图里时按 `modified` 处理。
     fn applyCreated(self: *Index, path: []const u8, report: *ApplyReport) error{OutOfMemory}!void {
-        if (path.len == 0) return;
+        if (path.len == 0 or self.library.isExcluded(path, null)) return;
 
         if (self.locate(path)) |position| {
             // 重复的 created（事件重放 / 漏了中间的 removed）：文件其实已经知道，
@@ -351,7 +357,7 @@ pub const Index = struct {
     }
 
     fn insertCreated(self: *Index, path: []const u8) error{OutOfMemory}!void {
-        try self.insertScanEntry(.{
+        _ = try self.insertScanEntry(.{
             .path = path,
             .name = model.baseName(path),
             .ext = model.fileExtFromPath(path),
@@ -362,11 +368,12 @@ pub const Index = struct {
     }
 
     /// 从一条扫描事实建样本：L0 字段（大小 / mtime / 身份）直接落地，L1 元数据
-    /// 仍未读（`pending_metadata = true`，等后台 probe 补齐）。
+    /// 仍未读（`pending_metadata = true`，等后台 probe 补齐）。false = 被持久排除拦截。
     ///
     /// `name` / `ext` 不用：`file_ext` 必须指向 Index 自己持有的路径，
     /// 否则扫描结束后扫描 arena 一释放就成了悬空切片。
-    fn insertScanEntry(self: *Index, entry: rescan.ScanEntry) error{OutOfMemory}!void {
+    fn insertScanEntry(self: *Index, entry: rescan.ScanEntry) error{OutOfMemory}!bool {
+        if (self.library.isExcluded(entry.path, entry.identity)) return false;
         const owned_path = try self.allocator.dupe(u8, entry.path);
         errdefer self.allocator.free(owned_path);
         const sample_id = try self.newCreatedId();
@@ -394,6 +401,7 @@ pub const Index = struct {
         });
         self.ownString(owned_path);
         self.ownString(sample_id);
+        return true;
     }
 
     /// 改名 / 同卷移动：只换路径与派生名，id / 身份 / 分组 / 目录 / 顺序保持。
@@ -423,6 +431,12 @@ pub const Index = struct {
     /// `renamed`：只改地址与派生名；找不到 `from` 时降级为 `created`。
     fn applyRenamed(self: *Index, rename: Change.Renamed, report: *ApplyReport) error{OutOfMemory}!void {
         if (rename.to.len == 0) return;
+        // 已从库中移除的源不因 renamed 的 to 侧复活；移入排除目录则只移除旧行。
+        if (rename.from.len > 0 and self.library.isExcluded(rename.from, null)) return;
+        if (self.library.isExcluded(rename.to, null)) {
+            if (rename.from.len > 0) self.applyRemoved(rename.from, report);
+            return;
+        }
 
         if (rename.from.len == 0) {
             // 没有旧路径就没法定位：按新文件处理。

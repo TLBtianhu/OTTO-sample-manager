@@ -151,6 +151,7 @@ pub fn rowInput(s: *State, c: *ui.Context, index: usize, it: ui.Interaction) voi
         return;
     }
     if (it.right_pressed and c.input.button == .left and c.input.ctrl) {
+        s.remove.clearFolder();
         s.selection.click(index, .{ .ctrl = true });
         cancelPress(s);
         noteSelection(s);
@@ -158,6 +159,7 @@ pub fn rowInput(s: *State, c: *ui.Context, index: usize, it: ui.Interaction) voi
         return;
     }
     if (it.clicked) {
+        s.remove.clearFolder();
         if (c.input.shift) {
             s.search.selectVisible(c, &s.selection, index);
         } else {
@@ -244,6 +246,7 @@ pub fn copySelection(s: *State, c: *ui.Context) void {
     };
     s.flash_left = flash_ticks;
     s.flash_count = count;
+    s.flash_remove = false;
     c.changed = true;
     std.debug.print("otto-lite: 已复制 {d} 个素材到剪贴板\n", .{count});
 }

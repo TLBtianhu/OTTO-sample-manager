@@ -308,6 +308,15 @@ pub const Import = struct {
         return true;
     }
 
+    /// 移除等其它库写操作也走同一条“先完整加载，再换 Live/Library”路径。
+    /// save_path 由本对象复制持有；失败时旧对象保持可用。
+    pub fn reloadSaved(self: *Import, save_path: []const u8) !void {
+        const copied = try self.allocator.dupe(u8, save_path);
+        if (self.save_path) |old| self.allocator.free(old);
+        self.save_path = copied;
+        try self.reload();
+    }
+
     /// 重载刚保存的库：先建好新的 Library + Live，全部成功才拆旧的。
     ///
     /// 失败（新文件被删、磁盘错、内存不足）时旧对象原样可用，UI 继续显示旧列表

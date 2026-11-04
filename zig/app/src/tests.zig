@@ -37,6 +37,7 @@ test {
     // 溢出重扫：防抖 / Hold 的纯逻辑 + 真实文件系统上的增删改与注释保留。
     _ = @import("rescan_ui.zig");
     _ = @import("rescan_test.zig");
+    _ = @import("removal_app_test.zig");
     _ = @import("thumbs_test.zig");
     // 盒式降采样（纯像素运算）与预览/行内共享的那份 256px 缓存（键、命中、派生）。
     _ = @import("thumbs_derive.zig");

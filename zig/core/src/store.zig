@@ -42,6 +42,8 @@ pub const Library = struct {
     group_order: []const []const u8,
     settings: model.Settings,
     report: LoadReport,
+    /// 持久排除/墓碑；JSON 读取始终为空，OTTOLIB v2 解码恢复。
+    exclusions: []const model.Exclusion = &.{},
 
     pub fn deinit(self: *Library) void {
         self.arena.deinit();
@@ -92,7 +94,64 @@ pub const Library = struct {
         }
         return added;
     }
+
+    /// 追加持久排除记录，字符串深拷贝进库 arena。相同 kind+path 的记录只留一条；
+    /// 后到的文件身份会补齐旧记录，目录记录天然去重。返回新增条数（身份补齐不算新增）。
+    pub fn appendExclusions(self: *Library, incoming: []const model.Exclusion) error{OutOfMemory}!usize {
+        if (incoming.len == 0) return 0;
+        const allocator = self.arena.allocator();
+        var merged: std.ArrayList(model.Exclusion) = .empty;
+        try merged.ensureTotalCapacity(allocator, self.exclusions.len + incoming.len);
+        for (self.exclusions) |item| merged.appendAssumeCapacity(try cloneExclusion(allocator, item));
+
+        var added: usize = 0;
+        for (incoming) |item| {
+            var found = false;
+            for (merged.items) |*existing| {
+                if (existing.kind != item.kind or !std.mem.eql(u8, existing.path, item.path)) continue;
+                found = true;
+                if (existing.identity == null and item.identity != null) {
+                    existing.* = try cloneExclusion(allocator, item);
+                }
+                break;
+            }
+            if (!found) {
+                merged.appendAssumeCapacity(try cloneExclusion(allocator, item));
+                added += 1;
+            }
+        }
+        self.exclusions = try merged.toOwnedSlice(allocator);
+        return added;
+    }
+
+    pub fn isExcluded(self: *const Library, path: []const u8, identity: ?model.FileIdentity) bool {
+        return model.isExcluded(self.exclusions, path, identity);
+    }
+
+    /// 仅供“用户显式重新导入”的恢复意图：清掉与这条事实匹配的文件/目录墓碑。
+    /// 自动监听与重扫不得调用；返回清掉的记录数，其它排除原样保留。
+    pub fn clearExclusionsFor(self: *Library, path: []const u8, identity: ?model.FileIdentity) error{OutOfMemory}!usize {
+        var removed: usize = 0;
+        for (self.exclusions) |item| {
+            if (item.matches(path, identity)) removed += 1;
+        }
+        if (removed == 0) return 0;
+        const allocator = self.arena.allocator();
+        var kept: std.ArrayList(model.Exclusion) = .empty;
+        try kept.ensureTotalCapacity(allocator, self.exclusions.len - removed);
+        for (self.exclusions) |item| {
+            if (!item.matches(path, identity)) kept.appendAssumeCapacity(try cloneExclusion(allocator, item));
+        }
+        self.exclusions = try kept.toOwnedSlice(allocator);
+        return removed;
+    }
 };
+
+pub fn cloneExclusion(allocator: std.mem.Allocator, item: model.Exclusion) error{OutOfMemory}!model.Exclusion {
+    var copy = item;
+    copy.path = try allocator.dupe(u8, item.path);
+    return copy;
+}
 
 /// 新建一个空库。导入流水线在没给 `--library` 时用它，不必先写一个空 JSON。
 ///
