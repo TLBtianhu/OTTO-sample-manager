@@ -13,7 +13,7 @@
 //! ## 格式
 //!
 //! ```json
-//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255,"version":2,"view":{"mode":"library","expanded_folders":[]},"layout":{"width":380,"height":700}}
+//! {"always_on_top":false,"update_url":null,"l2_budget_mib":64,"l3_budget_mib":256,"opacity":255,"version":2,"view":{"mode":"library","expanded_folders":[]},"layout":{"width":540,"height":960}}
 //! ```
 //!
 //! 缺字段用默认值，未知字段忽略；无 version 的 v1 自动按旧平铺格式迁移，
@@ -215,8 +215,8 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Settings {
             expanded_folders: []const []const u8 = &.{},
         } = null,
         layout: struct {
-            width: u32 = 380,
-            height: u32 = 700,
+            width: u32 = responsive_layout.default_window_width,
+            height: u32 = responsive_layout.default_window_height,
         } = .{},
     };
 
@@ -363,14 +363,14 @@ test "设置 v1 自动迁移：旧字段一个不少，写回只写 v2 并补 vi
     try testing.expectEqualStrings("https://old.example/feed.json", migrated.update_url.?);
     try testing.expectEqual(settings_v2.ViewMode.library, migrated.view.mode);
     try testing.expectEqual(@as(usize, 0), migrated.view.expanded_folders.items.items.len);
-    try testing.expectEqual(@as(u32, 380), migrated.layout.width);
-    try testing.expectEqual(@as(u32, 700), migrated.layout.height);
+    try testing.expectEqual(@as(u32, 540), migrated.layout.width);
+    try testing.expectEqual(@as(u32, 960), migrated.layout.height);
 
     const bytes = try migrated.toJson(testing.allocator);
     defer testing.allocator.free(bytes);
     try testing.expect(std.mem.indexOf(u8, bytes, "\"version\":2") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "\"view\":") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes, "\"layout\":{\"width\":380,\"height\":700}") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"layout\":{\"width\":540,\"height\":960}") != null);
     var written = decode(testing.allocator, bytes);
     defer written.deinit();
     try testing.expect(written.always_on_top);

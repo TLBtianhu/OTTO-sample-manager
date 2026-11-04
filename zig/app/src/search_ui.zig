@@ -331,7 +331,7 @@ pub const Search = struct {
         const exts = self.extSummary(&ext_buffer);
         const query = self.buffer.text();
         if (exts) |filtered| {
-            ui.textf(c, .{ .size = 13, .weight = .semibold }, "没有符合条件的素材（当前筛选：{s}）", .{filtered});
+            ui.textf(c, .{ .size = 16, .weight = .semibold }, "没有符合条件的素材（当前筛选：{s}）", .{filtered});
             if (query.len > 0) {
                 ui.textf(c, .{ .size = 12, .color = c.theme.muted }, "搜索“{s}”与后缀筛选同时生效", .{query});
             } else {
@@ -339,7 +339,7 @@ pub const Search = struct {
             }
             return;
         }
-        ui.textf(c, .{ .size = 13, .weight = .semibold }, "没有符合条件的素材（搜索：{s}）", .{query});
+        ui.textf(c, .{ .size = 16, .weight = .semibold }, "没有符合条件的素材（搜索：{s}）", .{query});
         ui.text(c, "按 Esc 清空搜索", .{ .size = 12, .color = c.theme.muted });
     }
 

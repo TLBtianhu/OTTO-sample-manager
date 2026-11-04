@@ -66,7 +66,7 @@ function Import-Library([string]$Form, [string]$Exe, [string]$Expected) {
 }
 function Write-Settings([string]$Form, [string]$Exe, [string]$Expected, [string]$Cache) {
   $shot = Join-Path $script:temp ($Form + '.png')
-  $arguments = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $shot, 'click:设置;at:218,196;click:关闭'
+  $arguments = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $shot, 'click:设置;at:298,222;click:关闭'
   $run = Invoke-Otto $Exe $arguments
   $settingsOk = $false; $opacity = -1
   if (Test-Path -LiteralPath $Expected -PathType Leaf) {

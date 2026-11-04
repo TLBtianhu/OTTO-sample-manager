@@ -2,7 +2,7 @@
 //! 证据的数字）。
 //!
 //! 为什么不能再用 `ui.Tester`：它没有窗口、没有 `WM_PAINT`、没有上屏。本文件建一个
-//! 380×700 的真 `HWND`（**屏外** `-4000,0`，`WS_EX_NOACTIVATE` + `SW_SHOWNOACTIVATE`），
+//! 540×960 的真 `HWND`（**屏外** `-4000,0`，`WS_EX_NOACTIVATE` + `SW_SHOWNOACTIVATE`），
 //! 这样：
 //!   * 窗口是"可见"的，所以消息循环真的会收到 `WM_PAINT`（隐藏窗口收不到）；
 //!   * 它从来不是前台窗口：看不到、点不到、不进任务栏（`run` 里只断言"不是前台"）；
@@ -28,6 +28,7 @@ const core = @import("otto_core");
 const bench_stats = @import("bench_stats.zig");
 const bench_win = @import("bench_win.zig");
 const mem_breakdown = @import("mem_breakdown.zig");
+const responsive_layout = @import("responsive_layout.zig");
 const row_probe = @import("row_probe.zig");
 const scroll_stats = @import("bench_scroll_stats.zig");
 const thumbs_mod = @import("thumbs.zig");
@@ -151,7 +152,7 @@ const Pacer = struct {
 // 入口
 // ---------------------------------------------------------------------------
 
-/// `main` 的入口：窗口由基准自己建——380×700、先不 show（`run` 里用
+/// `main` 的入口：窗口由基准自己建——540×960、先不 show（`run` 里用
 /// `SW_SHOWNOACTIVATE` 显示），带 `WS_EX_NOACTIVATE`；跑完以基准的退出码退出。
 pub fn runCli(
     init: std.process.Init,
@@ -167,8 +168,8 @@ pub fn runCli(
     const library = options.bench_scroll orelse return error.NoLibrary;
     const window = try app.newWindow(.{
         .title = title,
-        .width = 380,
-        .height = 700,
+        .width = @floatFromInt(responsive_layout.default_window_width),
+        .height = @floatFromInt(responsive_layout.default_window_height),
         .content = .{ .view = view },
         .visible = false,
         .non_activating = true,

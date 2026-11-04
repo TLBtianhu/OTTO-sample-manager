@@ -20,7 +20,7 @@ const ui = nanoui.ui;
 
 const mib: f64 = 1024.0 * 1024.0;
 
-/// 第一帧视图构建：尺寸用窗口声明的 380×700（不是 1×1）：列表在 1 点高时一行都
+/// 第一帧视图构建：尺寸用窗口声明的 client area（不是 1×1）：列表在 1 点高时一行都
 /// 排不出来，量到的只是"空树"的价钱。离屏、`gui=false`，不 show、不抢焦点。
 pub fn firstFrame(
     init: std.process.Init,

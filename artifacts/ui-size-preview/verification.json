@@ -1,0 +1,71 @@
+{
+    "result":  "PASS",
+    "minimum_client":  "384x768",
+    "preview_range":  "192-216",
+    "compact_or_hidden_preview":  false,
+    "cases":  [
+                  {
+                      "requested":  "540x960",
+                      "client":  "540x960",
+                      "preview_height":  216,
+                      "screenshot":  "540x960.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "540x864",
+                      "client":  "540x864",
+                      "preview_height":  216,
+                      "screenshot":  "540x864.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "540x800",
+                      "client":  "540x800",
+                      "preview_height":  200,
+                      "screenshot":  "540x800.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "540x768",
+                      "client":  "540x768",
+                      "preview_height":  192,
+                      "screenshot":  "540x768.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "540x720",
+                      "client":  "540x768",
+                      "preview_height":  192,
+                      "screenshot":  "540x720.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "480x768",
+                      "client":  "480x768",
+                      "preview_height":  192,
+                      "screenshot":  "480x768.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "420x768",
+                      "client":  "420x768",
+                      "preview_height":  192,
+                      "screenshot":  "420x768.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "384x768",
+                      "client":  "384x768",
+                      "preview_height":  192,
+                      "screenshot":  "384x768.png",
+                      "hidden":  true
+                  },
+                  {
+                      "requested":  "360x600",
+                      "client":  "384x768",
+                      "preview_height":  192,
+                      "screenshot":  "360x600.png",
+                      "hidden":  true
+                  }
+              ]
+}

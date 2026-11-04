@@ -42,18 +42,25 @@ function Invoke-Hidden([string]$Arguments) {
 $script:exeForProbe = $Exe
 $script:workForProbe = $work
 $settingsText = -join [char[]](0x8BBE, 0x7F6E)
-$restoreText = (-join [char[]](0x6062, 0x590D, 0x9ED8, 0x8BA4, 0x5927, 0x5C0F, 0xFF08)) + '380' + [char]0x00D7 + '700' + [char]0xFF09
+$restoreText = (-join [char[]](0x6062, 0x590D, 0x9ED8, 0x8BA4, 0x5927, 0x5C0F, 0xFF08)) + '540' + [char]0x00D7 + '960' + [char]0xFF09
 $action = 'click:' + $settingsText + ';click:' + $restoreText
 $initial = Join-Path $OutDir 'before-900x1000.png'
 $first = Invoke-Hidden ('--settings-probe --nanoui-snapshot="' + $initial + '" --nanoui-script="' + $action + '" --nanoui-wait=1')
 $json = [IO.File]::ReadAllText($settings)
-if ($json -notmatch '"layout":\{"width":380,"height":700\}') {
-  throw "button did not save 380x700: $json; $first"
+if ($json -notmatch '"layout":\{"width":540,"height":960\}') {
+  throw "button did not save 540x960: $json; $first"
 }
 $final = Join-Path $OutDir 'restored-click-final.png'
 $second = Invoke-Hidden ('--settings-probe --nanoui-snapshot="' + $final + '" --nanoui-wait=1')
-if ($second -notmatch '\(380x700 points at 1x\)') {
-  throw "restart is not 380x700: $second"
+if ($second -notmatch '\(540x960 points at 1x\)') {
+  throw "restart is not 540x960: $second"
 }
-[IO.File]::WriteAllText((Join-Path $OutDir 'probe.log'), ($first + "`n" + $second), [Text.UTF8Encoding]::new($false))
-Write-Output 'restore-default-size: PASS click 900x1000 -> 380x700; restart=380x700; hidden=true'
+$fresh = Join-Path $OutDir 'fresh-default.png'
+$script:workForProbe = Join-Path $work 'fresh'
+New-Item -ItemType Directory -Force -Path $script:workForProbe | Out-Null
+$third = Invoke-Hidden ('--settings-probe --nanoui-snapshot="' + $fresh + '" --nanoui-wait=1')
+if ($third -notmatch '\(540x960 points at 1x\)') {
+  throw "fresh default is not 540x960: $third"
+}
+[IO.File]::WriteAllText((Join-Path $OutDir 'probe.log'), ($first + "`n" + $second + "`n" + $third), [Text.UTF8Encoding]::new($false))
+Write-Output 'restore-default-size: PASS fresh=540x960; click 900x1000 -> 540x960; restart=540x960; hidden=true'

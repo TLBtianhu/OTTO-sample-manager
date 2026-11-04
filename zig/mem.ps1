@@ -10,7 +10,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\mem.ps1 -Release
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\mem.ps1 -NoBuild
 #
-# The probe window is a REAL HWND at 380x700 that is never shown: no popup,
+# The probe window is a REAL HWND with a 540x960 default client area that is never shown: no popup,
 # no focus, no taskbar entry. It loads the library, builds the first frame
 # (font scan + glyph atlas), creates the D3D11 device and swap chain, scrolls
 # the list until 8 / 50 / 100 thumbnails are cached and drawn, then idles for

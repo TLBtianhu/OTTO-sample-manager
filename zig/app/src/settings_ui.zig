@@ -8,7 +8,7 @@
 //!     的每一帧调用 `SetLayeredWindowAttributes`；URL 交给 `Update.setUrl`，
 //!     L2 / L3 预算交给 `Thumbs.setBudgets`；随后原子写设置文件。
 //!
-//! ## 布局（380 点时）
+//! ## 布局（332 点固定面板，默认窗口 540×960）
 //!
 //! 面板是 `ui.card`，绝对定位覆盖在列表上（不参与列表布局，搜索框宽度不变）。
 //! 底层还有一层半透明遮罩：点遮罩关闭面板，也挡住它下面的列表点击。
@@ -270,9 +270,9 @@ pub const Panel = struct {
         ui.card(c, .{ .width = .fill, .gap = 10 });
 
         const header = ui.div(c).row().wFull().itemsCenter().gap(8);
-        ui.text(c, "设置", .{ .size = 15, .weight = .semibold });
+        ui.text(c, "设置", .{ .size = 18, .weight = .semibold });
         ui.spacer(c);
-        const close_it = ui.button(c, "关闭", .{ .variant = .ghost, .size = 15, .width = .{ .px = 48 } });
+        const close_it = ui.button(c, "关闭", .{ .variant = .ghost, .size = 18, .width = .{ .px = 48 } });
         header.end();
         ui.divider(c);
 
@@ -281,41 +281,42 @@ pub const Panel = struct {
             self.applyTopmost(hwnd);
         }
 
-        // 不透明度：标签 + 百分比在同一行，滑块占满卡片内宽（380 点面板下
+        // 不透明度：标签 + 百分比在同一行，滑块占满卡片内宽（332 点面板下
         // 卡片内宽 300 点，滑块与上面的文本框同宽，不会撑破）。
         const opacity_row = ui.div(c).row().wFull().itemsCenter().gap(8);
-        ui.text(c, "窗口不透明度", .{ .size = 15, .color = c.theme.muted });
+        ui.text(c, "窗口不透明度", .{ .size = 18, .color = c.theme.muted });
         ui.spacer(c);
-        ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "{d:.0}%", .{self.opacity_percent});
+        ui.textf(c, .{ .size = 18, .color = c.theme.muted }, "{d:.0}%", .{self.opacity_percent});
         opacity_row.end();
         // 拖动（按下）期间每帧都在改：不等关闭面板，这就是"热生效"。
         if (ui.slider(c, &self.opacity_percent, .{ .min = 0, .max = 100, .width = .fill })) {
             self.setOpacityFromSlider(hwnd);
         }
-        const reset_size = ui.button(c, "恢复默认大小（380×700）", .{ .variant = .ghost, .size = 15 });
+        const reset_label = c.print("恢复默认大小（{d}×{d}）", .{ responsive_layout.default_window_width, responsive_layout.default_window_height });
+        const reset_size = ui.button(c, reset_label, .{ .variant = .ghost, .size = 18 });
 
-        ui.text(c, "更新源", .{ .size = 15, .color = c.theme.muted });
+        ui.text(c, "更新源", .{ .size = 18, .color = c.theme.muted });
         _ = ui.textField(c, &self.url_field, .{
             .placeholder = "空 = 未配置",
             .width = .fill,
-            .size = 15,
+            .size = 18,
             // 点进去就全选：改一个已经存在的值不用先按 Ctrl+A。
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "缩略图内存预算 (MiB，上限 32)", .{ .size = 15, .color = c.theme.muted });
+        ui.text(c, "缩略图内存预算 (MiB，上限 32)", .{ .size = 18, .color = c.theme.muted });
         _ = ui.textField(c, &self.l2_field, .{
             .placeholder = "32",
             .width = .fill,
-            .size = 15,
+            .size = 18,
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "磁盘缓存预算 (MiB)", .{ .size = 15, .color = c.theme.muted });
+        ui.text(c, "磁盘缓存预算 (MiB)", .{ .size = 18, .color = c.theme.muted });
         _ = ui.textField(c, &self.l3_field, .{
             .placeholder = "256",
             .width = .fill,
-            .size = 15,
+            .size = 18,
             .select_all_on_focus = true,
         });
 
@@ -395,7 +396,7 @@ pub const Panel = struct {
     }
 
     /// 设置按钮与隐藏验收探针共用：窗口 client area、持久化尺寸和下一帧
-    /// 的容器布局一起回 380×700；nanoui 的 setSize 不激活窗口。
+    /// 的容器布局一起回 540×960；nanoui 的 setSize 不激活窗口。
     pub fn restoreDefaultWindowSize(self: *Panel, window: ?*nanoui.Window) void {
         self.settings.layout = .{};
         if (window) |value| {
@@ -408,7 +409,7 @@ pub const Panel = struct {
     /// 正常关闭时记录最后的窗口尺寸；每次关闭最多写一次。
     pub fn recordWindowClose(self: *Panel, window: *nanoui.Window) void {
         // layout 是 newWindow/setSize 的 client area，不是含边框的外框；
-        // 混用会让每次关闭都把尺寸写大（380×700 -> 396×739）。
+        // 混用会让每次关闭都把尺寸写大（540×960 -> 556×999）。
         const content = window.contentSize();
         self.settings.layout.width = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_width)), content[0])));
         self.settings.layout.height = @intFromFloat(@round(@max(@as(f64, @floatFromInt(responsive_layout.min_window_height)), content[1])));

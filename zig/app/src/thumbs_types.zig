@@ -14,7 +14,7 @@ const mem_budget = @import("mem_budget.zig");
 /// 2x，所以按 64 请求：2x 屏上正好 1:1，1x 屏由图集缩到 32 点，不会糊。
 pub const default_size_px: u32 = 64;
 
-/// 有界队列容量。一屏 380×700 / 44px ≈ 17 行，32 条留了一屏半的余量：
+/// 有界队列容量。一屏 540×960 / 44px ≈ 22 行，32 条留了约一屏半的余量：
 /// 正常滚动不会丢，只有一次性塞进更多请求时才会触发「丢最旧」。
 pub const default_queue_capacity: usize = 32;
 

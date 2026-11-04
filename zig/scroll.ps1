@@ -18,7 +18,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\scroll.ps1 -Release
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\scroll.ps1 -NoBuild -Frames 300
 #
-# The probe window is a REAL HWND, 380x700, placed OFF SCREEN at (-4000,0),
+# The probe window is a REAL HWND with a 540x960 client area, placed OFF SCREEN at (-4000,0),
 # created with WS_EX_NOACTIVATE and shown with SW_SHOWNOACTIVATE: it never
 # takes the foreground and never appears in the taskbar, but it is visible, so
 # WM_PAINT really runs and DWM really has a redirection surface. Add -Edge to

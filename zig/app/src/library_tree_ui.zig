@@ -16,8 +16,8 @@ pub fn draw(c: *ui.Context, row: library_tree.Row) ui.Interaction {
         .control = true,
     }, c.theme.surface_hover);
     defer ui.end(c);
-    ui.text(c, if (row.expanded) "▾" else "▸", .{ .size = 15, .color = c.theme.accent });
+    ui.text(c, if (row.expanded) "▾" else "▸", .{ .size = 18, .color = c.theme.accent });
     ui.icon(c, "folder", .{ .size = 22, .color = c.theme.accent });
-    ui.text(c, row.name, .{ .size = 15, .weight = .semibold, .truncate = .ellipsis });
+    ui.text(c, row.name, .{ .size = 18, .weight = .semibold, .truncate = .ellipsis });
     return it;
 }

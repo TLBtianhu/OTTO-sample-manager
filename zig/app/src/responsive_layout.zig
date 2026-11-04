@@ -5,21 +5,24 @@
 //! 才重新求解；profile 不变时 `display_revision` 不变，调用方只更新数值。
 const std = @import("std");
 
-pub const min_window_width: u16 = 280;
-pub const min_window_height: u16 = 420;
+pub const min_window_width: u16 = 384;
+pub const min_window_height: u16 = 768;
 pub const min_name_width: u16 = 96;
 pub const row_height: u16 = 44;
-pub const font_size: u16 = 13;
+pub const font_size: u16 = 16;
 pub const min_click_target: u16 = 24;
-/// 顶部搜索、后缀 chips 与表头约占 104px；不足 160px 时连 56px
-/// 紧凑预览都放不下。0 是明确的占位状态，不是让 flex 继续压缩预览。
-pub const min_preview_window_height: u16 = 160;
-pub const compact_preview_height: u16 = 56;
-pub const default_window_width: u16 = 380;
-pub const default_window_height: u16 = 700;
+/// 按最占空间的音频分支定量：18px 播放按钮/正文、56px 波形与两行事实
+/// 需要 192px；240px 波形加图位和横向间距需要约 374px，宽度取 384。
+/// Windows 在 384×768 夹住缩放，因此产品里没有紧凑条或隐藏态。
+pub const min_preview_height: u16 = 192;
+pub const max_preview_height: u16 = 216;
+pub const default_window_width: u16 = 540;
+pub const default_window_height: u16 = 960;
 
 const row_padding: u16 = 12;
 const row_gap: u16 = 8;
+/// 18px 下四位序号也需要完整点击/绘制槽，不能沿用 13px 时代的 34px。
+const ordinal_width: u16 = 44;
 
 pub const Profile = enum {
     compact_with_overflow,
@@ -93,12 +96,10 @@ pub const Plan = struct {
 };
 
 pub fn previewHeight(container_width: u16, container_height: u16) u16 {
-    if (container_height < min_preview_window_height) return 0;
-    const full = std.math.clamp(container_height / 4, compact_preview_height, 180);
-    // 360px 以下保持紧凑预览；到 480px 才完全展开。中间 120px 的
-    // 每一像素都只改变少量高度，不再在 480 处从 56 跳到 175。
-    const blend: u16 = std.math.clamp(container_width -| 360, 0, 120);
-    return compact_preview_height + @as(u16, @intCast((@as(u32, full - compact_preview_height) * blend) / 120));
+    _ = container_width;
+    // 高度每增加 4px，预览最多增加 1px；宽度只参与列表列求解。
+    // 窗口下限保证这里至少是 192，任何尺寸都不会出现紧凑细条。
+    return std.math.clamp(container_height / 4, min_preview_height, max_preview_height);
 }
 
 pub fn solve(container_width: u16, container_height: u16) Plan {
@@ -113,15 +114,15 @@ pub fn solve(container_width: u16, container_height: u16) Plan {
     const format_slot = auxiliarySlot(width, .format);
     const rate_slot = auxiliarySlot(width, .sample_rate);
     const size_slot = auxiliarySlot(width, .size);
-    const leading: u16 = 2 * row_padding + 32 + row_gap + 34 + row_gap;
+    const leading: u16 = 2 * row_padding + 32 + row_gap + ordinal_width + row_gap;
     const name_width = width - leading - duration_slot - format_slot - rate_slot - size_slot;
 
     var row: RowPlan = .{
         .container_width = width,
         .thumb = rect(row_padding, 32),
-        .ordinal = rect(row_padding + 32 + row_gap, 34),
+        .ordinal = rect(row_padding + 32 + row_gap, ordinal_width),
     };
-    var x: u16 = row_padding + 32 + row_gap + 34;
+    var x: u16 = row_padding + 32 + row_gap + ordinal_width;
     const kinds = [_]ColumnKind{ .name, .duration, .format, .sample_rate, .size };
     for (kinds) |kind| {
         const slot = switch (kind) {
@@ -144,7 +145,7 @@ pub fn solve(container_width: u16, container_height: u16) Plan {
         .height = height,
         .profile = profile,
         .row = row,
-        .preview_height = previewHeight(width, container_height),
+        .preview_height = previewHeight(width, height),
     };
 }
 
@@ -190,8 +191,8 @@ pub const Cache = struct {
     display_revision: u32 = 0,
 
     pub fn update(self: *Cache, width_points: f32, height_points: f32) *const Plan {
-        const width = points(width_points, 380);
-        const height = points(height_points, 700);
+        const width = points(width_points, default_window_width);
+        const height = points(height_points, default_window_height);
         if (self.has_size and width == self.last_width and height == self.last_height) return &self.plan;
         const old_profile = if (self.has_size) self.plan.profile else null;
         self.plan = solve(width, height);
@@ -227,7 +228,7 @@ pub fn validate(plan: *const Plan) ValidationError!void {
     if (plan.profile != listProfile(plan.width)) return error.StaleProfile;
     if (plan.font_size != font_size) return error.FontScaled;
     if (plan.row.height < min_click_target or plan.toolbar_target < min_click_target or plan.search_target < min_click_target) return error.TargetTooSmall;
-    if (plan.preview_height != 0 and (plan.preview_height < compact_preview_height or plan.preview_height > 180 or plan.preview_height > plan.height)) return error.PreviewBounds;
+    if (plan.preview_height < min_preview_height or plan.preview_height > max_preview_height or plan.preview_height > plan.height) return error.PreviewBounds;
     if (!plan.row.visible(.name)) return error.MissingName;
     if ((plan.row.width(.name) orelse 0) < min_name_width) return error.NameTooNarrow;
     if (plan.row.container_width != plan.width) return error.OutOfBounds;

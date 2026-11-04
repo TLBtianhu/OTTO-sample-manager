@@ -178,9 +178,11 @@ zig-out/bin/otto-lite.exe --demo-thumbs <dir> --no-isolation
 
 ## Preview and selection
 
-The strip below the list uses `56 px` when the list container is narrower than
-480 points, otherwise `clamp(56, 25% of container height, 180)`. At full height
-it has three parts (the compact strip keeps only a small slot and one outcome row):
+The strip below the list always keeps the full layout. The window's minimum client
+area is 384×768, which reserves a 192px preview; from there its height grows
+continuously with `clamp(192, 25% of container height, 216)`. Windows clamps
+smaller resize drags instead of hiding the preview or collapsing it to a compact
+strip. At full height it has three parts:
 
 - **the preview area** (left slot + outcome text), driven only by the registry;
 - **the facts footer** (name / size / duration / extension, then the path), taken
@@ -490,7 +492,7 @@ zig-out/bin/otto-lite.exe <dir>/library.json --nanoui-wait=2 --nanoui-snapshot=t
 ### Real-window memory (the charter's ≤ 50 MiB line)
 
 `--mem-probe` measures the memory a *real window* holds, not a headless tester:
-it builds the same state as a normal start in a 380×700 HWND that is never shown
+it builds the same state as a normal start with a 540×960 default client area in an HWND that is never shown
 (no popup, no focus, no taskbar entry), builds the first frame (font scan, glyph
 atlas), presents once, scrolls the list until 8 / 50 / 100 thumbnails are cached
 and drawn, then idles for `--mem-probe-idle` seconds while the app's own 150 ms

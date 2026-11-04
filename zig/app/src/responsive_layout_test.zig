@@ -14,7 +14,7 @@ test "连续布局：各密度区间约束成立，行高来自唯一常量" {
         const plan = layout.solve(width, 700);
         try layout.validate(&plan);
         try testing.expectEqual(layout.listProfile(width), plan.profile);
-        try testing.expectEqual(@as(u16, 13), plan.font_size);
+        try testing.expectEqual(@as(u16, 16), plan.font_size);
         try testing.expectEqual(layout.row_height, plan.row.height);
     }
 }
@@ -35,6 +35,12 @@ test "窗口下限：0×0 和负值输入不会拖垮布局" {
     var cache: layout.Cache = .{};
     const plan = cache.update(-100, std.math.nan(f32));
     try layout.validate(plan);
+    try testing.expectEqual(@as(u16, 540), layout.default_window_width);
+    try testing.expectEqual(@as(u16, 960), layout.default_window_height);
+    try testing.expectEqual(layout.default_window_width, plan.width);
+    try testing.expectEqual(layout.default_window_height, plan.height);
+    try testing.expectEqual(@as(u16, 384), layout.min_window_width);
+    try testing.expectEqual(@as(u16, 768), layout.min_window_height);
 }
 
 test "让位顺序与逐像素连续：辅助列依次收缩，所有相邻尺寸变化最多 1px" {
@@ -85,29 +91,34 @@ fn absDelta(a: u16, b: u16) u16 {
     return if (a > b) a - b else b - a;
 }
 
-test "预览条：连续插值、小窗口紧凑预览与不足时明确占位" {
-    try testing.expectEqual(@as(u16, 56), layout.solve(360, 700).preview_height);
-    try testing.expectEqual(@as(u16, 75), layout.solve(380, 700).preview_height);
-    try testing.expectEqual(@as(u16, 174), layout.solve(479, 700).preview_height);
-    try testing.expectEqual(@as(u16, 175), layout.solve(480, 700).preview_height);
-    try testing.expectEqual(@as(u16, 0), layout.previewHeight(480, 100));
-    try testing.expectEqual(@as(u16, 0), layout.solve(480, 100).preview_height);
-    try testing.expectEqual(@as(u16, 180), layout.solve(900, 1200).preview_height);
-    for ([_]layout.Plan{
-        layout.solve(280, 420), layout.solve(300, 400),
-        layout.solve(320, 380), layout.solve(360, 480),
-    }) |plan| {
-        try layout.validate(&plan);
-        try testing.expectEqual(layout.compact_preview_height, plan.preview_height);
+test "预览条：只随高度连续插值，最小窗口仍是 192px 完整预览" {
+    // 宽度不再参与预览高度；低于最小高度的输入也先夹到 768。
+    for ([_]u16{ 360, 380, 479, 480, 540, 900 }) |width| {
+        try testing.expectEqual(@as(u16, 192), layout.solve(width, 700).preview_height);
     }
-    for ([_]u16{ 0, 100, 119, 120, 130, 140, 150, 159 }) |height| {
-        const plan = layout.solve(320, height);
-        try layout.validate(&plan);
-        try testing.expectEqual(@as(u16, 0), plan.preview_height);
+    try testing.expectEqual(@as(u16, 192), layout.solve(384, 768).preview_height);
+    try testing.expectEqual(@as(u16, 193), layout.solve(384, 772).preview_height);
+    try testing.expectEqual(@as(u16, 216), layout.solve(540, 960).preview_height);
+    try testing.expectEqual(@as(u16, 216), layout.solve(900, 1200).preview_height);
+
+    // 逐高度扫描：可见预览始终是 192–216，增长相邻至多 1px；
+    // 即使损坏输入绕过 Windows 下限，求解器也只回完整预览，不返回细条或隐藏态。
+    var previous = layout.previewHeight(540, 0);
+    try testing.expectEqual(layout.min_preview_height, previous);
+    for (1..961) |height| {
+        const current = layout.previewHeight(540, @intCast(height));
+        try testing.expect(current >= layout.min_preview_height and current <= layout.max_preview_height);
+        try testing.expect(absDelta(previous, current) <= 1);
+        previous = current;
     }
-    try testing.expectEqual(layout.compact_preview_height, layout.solve(320, 160).preview_height);
-    for ([_]u16{ 1, 15, 27, 55 }) |height| {
-        var invalid = layout.solve(320, 420);
+    for ([_]u16{ 0, 100, 360, 600, 767 }) |height| {
+        const plan = layout.solve(384, height);
+        try layout.validate(&plan);
+        try testing.expectEqual(layout.min_window_height, plan.height);
+        try testing.expectEqual(layout.min_preview_height, plan.preview_height);
+    }
+    for ([_]u16{ 0, 1, 15, 96, 150, 180, 191, 217 }) |height| {
+        var invalid = layout.solve(384, 768);
         invalid.preview_height = height;
         try testing.expectError(error.PreviewBounds, layout.validate(&invalid));
     }
@@ -153,8 +164,8 @@ test "反向证明：等比缩放会缩字体，约束断言必须红" {
     scaled.width = 280;
     scaled.height = 420;
     scaled.profile = layout.listProfile(280);
-    scaled.preview_height = 56;
-    scaled.font_size = @divTrunc(13 * 280, 900);
+    scaled.preview_height = layout.min_preview_height;
+    scaled.font_size = @divTrunc(16 * 280, 900);
     scaled.row.container_width = 280;
     scaled.row.thumb = scaleRect(scaled.row.thumb, 280, 900);
     scaled.row.ordinal = scaleRect(scaled.row.ordinal, 280, 900);
@@ -167,7 +178,7 @@ test "反向证明：窗口变窄但不重排会越界，约束断言必须红" 
     stale.width = 280;
     stale.height = 420;
     stale.profile = layout.listProfile(280);
-    stale.preview_height = 56;
+    stale.preview_height = layout.min_preview_height;
     stale.row.container_width = 280;
     try testing.expectError(error.OutOfBounds, layout.validate(&stale));
 }
