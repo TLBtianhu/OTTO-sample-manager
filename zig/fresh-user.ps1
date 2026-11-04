@@ -1,4 +1,5 @@
-# OTTO 单根目录生命周期验收。只运行 OTTO_TEST 构建：不写真实注册表/快捷方式，不弹窗。
+# OTTO 单根目录生命周期验收。只运行 OTTO_TEST 构建：不碰正式注册项/快捷方式，不弹窗。
+# 快捷方式写入隔离 APPDATA；注册值写入专用 HKCU 测试键，并在 finally 清理。
 # 正常：pwsh zig/fresh-user.ps1
 # 反向：pwsh zig/fresh-user.ps1 -FaultDataLoss（必须 exit 1，且数据保留断言为红）
 [CmdletBinding()]
@@ -23,6 +24,9 @@ $script:failedNames = @()
 $script:root = ''
 $script:reference = ''
 $script:temp = ''
+$script:testRegBase = 'Registry::HKEY_CURRENT_USER\Software\OTTO\OTTO Lite\Test\InstallLayout'
+$script:testUninstReg = Join-Path $script:testRegBase 'Uninstall'
+$script:shell = $null
 
 function Add-Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
   [void]$script:checks.Add([pscustomobject]@{ Step = $script:step; Name = $Name; Ok = $Ok })
@@ -71,7 +75,7 @@ function Show-Diff($Diff) {
 }
 function Get-ChildEnv {
   return @{ APPDATA = $script:fakeAppData; LOCALAPPDATA = $script:fakeLocal;
-    TEMP = $script:fakeTemp; TMP = $script:fakeTemp }
+    TEMP = $script:fakeTemp; TMP = $script:fakeTemp; OTTO_TEST_START_MENU = $script:fakePrograms }
 }
 function Invoke-Native([string]$Exe, [string]$Arguments, [int]$TimeoutSeconds = 90) {
   Write-Host ('  $ "{0}" {1}' -f $Exe, $Arguments)
@@ -104,14 +108,45 @@ function Wait-Gone([string]$Path) {
   }
   return (-not (Test-Path -LiteralPath $Path))
 }
+function Add-InstallLayoutChecks([string]$Root, [string]$Prefix) {
+  $rootUninstaller = Join-Path $Root 'Uninstall.exe'
+  $uninstallers = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Filter 'Uninstall.exe' -Force -ErrorAction SilentlyContinue)
+  Add-Check "$Prefix：根有且仅有一份 Uninstall.exe" (
+    (Test-Path -LiteralPath $rootUninstaller -PathType Leaf) -and $uninstallers.Count -eq 1 -and
+    $uninstallers[0].FullName -eq $rootUninstaller) "count=$($uninstallers.Count) path=$rootUninstaller"
+  Add-Check "$Prefix：app 内没有 Uninstall.exe" (
+    -not (Test-Path -LiteralPath (Join-Path $Root 'app\Uninstall.exe')))
+
+  $link = Join-Path $script:fakePrograms 'OTTO Lite\Uninstall OTTO Lite.lnk'
+  $target = ''
+  if (Test-Path -LiteralPath $link -PathType Leaf) {
+    if ($null -eq $script:shell) { $script:shell = New-Object -ComObject WScript.Shell }
+    $target = $script:shell.CreateShortcut($link).TargetPath
+  }
+  $startBinaries = @(Get-ChildItem -LiteralPath $script:fakePrograms -Recurse -File -Filter 'Uninstall.exe' -Force -ErrorAction SilentlyContinue)
+  Add-Check "$Prefix：开始菜单仅是指向根卸载器的快捷入口" (
+    (Test-Path -LiteralPath $link -PathType Leaf) -and $target -eq $rootUninstaller -and $startBinaries.Count -eq 0
+  ) "target=$target startMenuBinaries=$($startBinaries.Count)"
+
+  $uninstall = ''; $quiet = ''
+  if (Test-Path -LiteralPath $script:testUninstReg) {
+    $uninstall = Get-ItemPropertyValue -LiteralPath $script:testUninstReg -Name 'UninstallString' -ErrorAction SilentlyContinue
+    $quiet = Get-ItemPropertyValue -LiteralPath $script:testUninstReg -Name 'QuietUninstallString' -ErrorAction SilentlyContinue
+  }
+  $expected = '"{0}"' -f $rootUninstaller
+  Add-Check "$Prefix：注册表 UninstallString/QuietUninstallString 指向根" (
+    $uninstall -eq $expected -and $quiet -eq ($expected + ' /S')
+  ) "UninstallString=$uninstall QuietUninstallString=$quiet"
+}
 function Uninstall-Test([string]$Root, [string]$Choice = '') {
-  $uninstaller = Join-Path $Root 'app\Uninstall.exe'
+  $uninstaller = Join-Path $Root 'Uninstall.exe'
   $arguments = '/S'
   if ($Choice) { $arguments += ' /OTTO_TEST_CLEAN=' + $Choice }
   $run = Invoke-Native $uninstaller $arguments 120
   $gone = Wait-Gone (Join-Path $Root 'app')
+  $uninstallerGone = Wait-Gone $uninstaller
   Add-Check $(if ($Choice) { "勾选 $Choice 的卸载执行成功" } else { '默认静默卸载执行成功' }) (
-    $run.Code -eq 0 -and $gone) "exit=$($run.Code) appGone=$gone"
+    $run.Code -eq 0 -and $gone -and $uninstallerGone) "exit=$($run.Code) appGone=$gone rootUninstallerGone=$uninstallerGone"
 }
 function New-DataAndCache([string]$Root, [bool]$RunApp) {
   $exe = Join-Path $Root 'app\otto-lite.exe'
@@ -190,6 +225,12 @@ try {
     $nsi.Contains('RequestExecutionLevel user') -and -not $nsi.Contains('RequestExecutionLevel admin'))
   Add-Check '图形目录页与 HKCU 卸载注册均启用' (
     $nsi.Contains('!insertmacro MUI_PAGE_DIRECTORY') -and $nsi.Contains('WriteRegStr HKCU'))
+  Add-Check '安装脚本只写根卸载器，开始菜单与注册表均指向根' (
+    $nsi.Contains('WriteUninstaller "$INSTDIR\Uninstall.exe"') -and
+    -not $nsi.Contains('WriteUninstaller "$INSTDIR\app\Uninstall.exe"') -and
+    $nsi.Contains('CreateShortcut "${OTTO_START_MENU}\OTTO Lite\Uninstall OTTO Lite.lnk" "$INSTDIR\Uninstall.exe"') -and
+    $nsi.Contains('"UninstallString" ''"$INSTDIR\Uninstall.exe"''') -and
+    $nsi.Contains('"QuietUninstallString" ''"$INSTDIR\Uninstall.exe" /S'''))
   Add-Check '卸载页默认主程序勾选、data/cache 不勾选' (
     $un.Contains('${NSD_Check} $OttoMainCheck') -and
     $un.Contains('${NSD_Uncheck} $OttoDataCheck') -and
@@ -199,11 +240,13 @@ try {
     $un.Contains('${If} ${Silent}'))
 
   $script:temp = Join-Path $env:TEMP ('otto-install-root-' + [guid]::NewGuid().ToString('N'))
+  Remove-Item -LiteralPath $script:testRegBase -Recurse -Force -ErrorAction SilentlyContinue
   $script:root = Join-Path $script:temp 'custom root' # 同时验证 /D= 支持空格。
   $script:reference = Join-Path $script:temp 'reference'
   $script:fakeAppData = Join-Path $script:temp 'fake-roaming'
   $script:fakeLocal = Join-Path $script:temp 'fake-local'
   $script:fakeTemp = Join-Path $script:temp 'fake-temp'
+  $script:fakePrograms = Join-Path $script:fakeAppData 'Microsoft\Windows\Start Menu\Programs'
   foreach ($dir in @($script:temp, $script:fakeAppData, $script:fakeLocal, $script:fakeTemp)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
   }
@@ -218,9 +261,14 @@ try {
 
   Step 2 '安装 v1，首次运行生成新库、设置与缓存'
   Install-Test $FromSetup $script:root | Out-Null
-  foreach ($name in @('otto-lite.exe', 'otto-thumb-host.exe', 'Uninstall.exe')) {
-    Add-Check "app 中有 $name" (Test-Path -LiteralPath (Join-Path $script:root "app\$name") -PathType Leaf)
+  foreach ($name in @('otto-lite.exe', 'otto-thumb-host.exe')) {
+    Add-Check "v1 app 中有 $name" (Test-Path -LiteralPath (Join-Path $script:root "app\$name") -PathType Leaf)
   }
+  $oldUninstallers = @(Get-ChildItem -LiteralPath $script:root -Recurse -File -Filter 'Uninstall.exe' -Force)
+  $oldUninstallerPath = if ($oldUninstallers.Count -eq 1) {
+    $oldUninstallers[0].FullName.Substring($script:root.Length).TrimStart('\')
+  } else { '<missing-or-duplicate>' }
+  Add-Check 'v1 卸载器唯一，并记录旧布局供覆盖清理验证' ($oldUninstallers.Count -eq 1) "path=$oldUninstallerPath"
   Add-Check '安装器不创建 data 或 cache' (
     -not (Test-Path -LiteralPath (Join-Path $script:root 'data')) -and
     -not (Test-Path -LiteralPath (Join-Path $script:root 'cache')))
@@ -237,6 +285,7 @@ try {
 
   Step 3 '覆盖升级：app 全量替换，data/cache 逐字节不变'
   Install-Test $ToSetup $script:reference | Out-Null
+  Add-InstallLayoutChecks $script:reference '新版全新安装'
   $referenceApp = @(Get-Tree (Join-Path $script:reference 'app'))
   [IO.File]::WriteAllText((Join-Path $script:root 'app\obsolete-v1.txt'), 'must disappear')
   if ($FaultDataLoss) {
@@ -244,6 +293,9 @@ try {
     Write-Host '  [FAULT] 已模拟升级丢失 settings.json；下面的保留断言必须红。'
   }
   Install-Test $ToSetup $script:root | Out-Null
+  Add-InstallLayoutChecks $script:root '旧版覆盖升级'
+  Add-Check '旧版 app\Uninstall.exe 残留已被覆盖升级清除' (
+    -not (Test-Path -LiteralPath (Join-Path $script:root 'app\Uninstall.exe'))) "v1=$oldUninstallerPath"
   $appDiff = Compare-Tree $referenceApp @(Get-Tree (Join-Path $script:root 'app'))
   Add-Check '覆盖后的 app 与新版全新安装逐文件、逐字节一致' $appDiff.Ok (
     "files=$($referenceApp.Count) changed=$($appDiff.Changed.Count) added=$($appDiff.Added.Count) removed=$($appDiff.Removed.Count)")
@@ -272,6 +324,10 @@ try {
   Add-Check '默认卸载后 app 不存在，data 仍逐字节保留' (
     -not (Test-Path -LiteralPath (Join-Path $script:root 'app')) -and $defaultDataDiff.Ok)
   Add-Check '默认卸载后 cache 仍逐字节保留' $defaultCacheDiff.Ok
+  $defaultLeftover = @(Get-ChildItem -LiteralPath $script:root -Recurse -File -Filter 'Uninstall.exe' -Force -ErrorAction SilentlyContinue)
+  Add-Check '默认卸载保留数据时，根与 app 均无 Uninstall.exe' (
+    (Test-Path -LiteralPath $script:data) -and (Test-Path -LiteralPath $script:cache) -and $defaultLeftover.Count -eq 0
+  ) "leftover=$($defaultLeftover.Count)"
   if (-not $defaultDataDiff.Ok) { Show-Diff $defaultDataDiff }
 
   Step 5 '只有明确选择才删除 data/cache'
@@ -305,6 +361,11 @@ try {
 } catch {
   Add-Check '验收脚本未预期异常' $false $_.Exception.Message
 } finally {
+  Remove-Item -LiteralPath $script:testRegBase -Recurse -Force -ErrorAction SilentlyContinue
+  if ($null -ne $script:shell) {
+    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($script:shell)
+    $script:shell = $null
+  }
   if ($script:temp -and (Test-Path -LiteralPath $script:temp) -and -not $KeepTemp) {
     Remove-Item -LiteralPath $script:temp -Recurse -Force -ErrorAction SilentlyContinue
   }

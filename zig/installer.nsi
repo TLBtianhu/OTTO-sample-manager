@@ -1,5 +1,6 @@
 ; OTTO Lite 单根目录 NSIS 安装包。
-; 用户只选安装根；安装器只写 <根>\app，绝不创建、读取或覆盖 data/cache。
+; 用户只选安装根；程序资产写入 <根>\app，唯一卸载器写入 <根>\Uninstall.exe。
+; 安装器绝不创建、读取或覆盖 data/cache。
 
 !ifndef VERSION
   !error "缺少 /DVERSION=<x.y.z>"
@@ -18,8 +19,18 @@ BrandingText "OTTO Lite ${VERSION}"
 OutFile "${OUT_FILE}"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\OTTO Lite"
 !define APP_KEY "Software\OTTO\OTTO Lite"
+!ifdef OTTO_TEST
+  ; fresh-user 只清理这个专用测试键，绝不覆盖正式安装登记。
+  !define OTTO_REG_UNINST_KEY "Software\OTTO\OTTO Lite\Test\InstallLayout\Uninstall"
+  !define OTTO_REG_APP_KEY "Software\OTTO\OTTO Lite\Test\InstallLayout\App"
+  !define OTTO_START_MENU "$OttoStartMenu"
+!else
+  !define OTTO_REG_UNINST_KEY "${UNINST_KEY}"
+  !define OTTO_REG_APP_KEY "${APP_KEY}"
+  !define OTTO_START_MENU "$SMPROGRAMS"
+!endif
 InstallDir "$LOCALAPPDATA\Programs\OTTO"
-InstallDirRegKey HKCU "${APP_KEY}" "InstallDir"
+InstallDirRegKey HKCU "${OTTO_REG_APP_KEY}" "InstallDir"
 RequestExecutionLevel user
 
 !include "MUI2.nsh"
@@ -88,12 +99,20 @@ LangString OTTO_UN_ALL_CONFIRM ${LANG_ENGLISH} \
 
 !include "installer-uninstall.nsh"
 
+Function .onInit
+!ifdef OTTO_TEST
+  ; NSIS 的 $APPDATA 不随子进程环境重定向；验收显式传入隔离开始菜单。
+  ReadEnvStr $OttoStartMenu "OTTO_TEST_START_MENU"
+!endif
+FunctionEnd
+
 Section "OTTO Lite" SecMain
   SectionIn RO
   SetShellVarContext current
   SetRegView 64
 
   ; app 是可整体替换的资产；data/cache 没有任何安装器指令指向它们。
+  ; 整体替换也会清掉旧版 app\Uninstall.exe，根卸载器随后成为唯一副本。
   RMDir /r "$INSTDIR\app"
   SetOutPath "$INSTDIR\app"
   File "${SOURCE_DIR}\otto-lite.exe"
@@ -102,26 +121,26 @@ Section "OTTO Lite" SecMain
 !ifdef LICENSE_FILE
   File "${LICENSE_FILE}"
 !endif
-  WriteUninstaller "$INSTDIR\app\Uninstall.exe"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
 
+  CreateDirectory "${OTTO_START_MENU}\OTTO Lite"
+  CreateShortcut "${OTTO_START_MENU}\OTTO Lite\OTTO Lite.lnk" "$INSTDIR\app\otto-lite.exe"
+  CreateShortcut "${OTTO_START_MENU}\OTTO Lite\Uninstall OTTO Lite.lnk" "$INSTDIR\Uninstall.exe"
 !ifndef OTTO_TEST
-  CreateDirectory "$SMPROGRAMS\OTTO Lite"
-  CreateShortcut "$SMPROGRAMS\OTTO Lite\OTTO Lite.lnk" "$INSTDIR\app\otto-lite.exe"
-  CreateShortcut "$SMPROGRAMS\OTTO Lite\Uninstall OTTO Lite.lnk" "$INSTDIR\app\Uninstall.exe"
   CreateShortcut "$DESKTOP\OTTO Lite.lnk" "$INSTDIR\app\otto-lite.exe"
-
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "OTTO Lite"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "CandaceZcc"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\app\otto-lite.exe,0"
-  WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\app\Uninstall.exe"'
-  WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\app\Uninstall.exe" /S'
-  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
-  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
-  WriteRegStr HKCU "${APP_KEY}" "InstallDir" "$INSTDIR"
-  WriteRegStr HKCU "${APP_KEY}" "Version" "${VERSION}"
 !endif
+
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "DisplayName" "OTTO Lite"
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "Publisher" "CandaceZcc"
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "DisplayIcon" "$INSTDIR\app\otto-lite.exe,0"
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+  WriteRegStr HKCU "${OTTO_REG_UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S'
+  WriteRegDWORD HKCU "${OTTO_REG_UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${OTTO_REG_UNINST_KEY}" "NoRepair" 1
+  WriteRegStr HKCU "${OTTO_REG_APP_KEY}" "InstallDir" "$INSTDIR"
+  WriteRegStr HKCU "${OTTO_REG_APP_KEY}" "Version" "${VERSION}"
 SectionEnd
 
 Section "Uninstall"
@@ -129,8 +148,8 @@ Section "Uninstall"
   SetRegView 64
   SetOutPath "$TEMP"
 
-  ; /S 下两个变量在 un.onInit 固定为 0，所以这里只删除 app。
-  ; NSIS 的卸载器自删除由 Delete 触发；仅 RMDir /r 会留下正在运行的 Uninstall.exe。
+  ; /S 下两个变量在 un.onInit 固定为 0，所以这里只删除 app 与卸载器。
+  ; 先兼容清理旧版 app\Uninstall.exe，再按选择清理数据，最后删除根卸载器。
   Delete "$OttoRoot\app\Uninstall.exe"
   RMDir /r "$OttoRoot\app"
   ${If} $OttoCleanData == "1"
@@ -139,15 +158,16 @@ Section "Uninstall"
   ${If} $OttoCleanCache == "1"
     RMDir /r "$OttoRoot\cache"
   ${EndIf}
-  ; 根里可能有用户自己的文件：只尝试移除空根，不递归删除整个根。
+  Delete "$OttoRoot\Uninstall.exe"
+  ; 根里可能有用户自己的文件或保留的数据：只尝试移除空根，不递归删除整个根。
   RMDir "$OttoRoot"
 
+  Delete "${OTTO_START_MENU}\OTTO Lite\OTTO Lite.lnk"
+  Delete "${OTTO_START_MENU}\OTTO Lite\Uninstall OTTO Lite.lnk"
+  RMDir "${OTTO_START_MENU}\OTTO Lite"
 !ifndef OTTO_TEST
-  Delete "$SMPROGRAMS\OTTO Lite\OTTO Lite.lnk"
-  Delete "$SMPROGRAMS\OTTO Lite\Uninstall OTTO Lite.lnk"
-  RMDir "$SMPROGRAMS\OTTO Lite"
   Delete "$DESKTOP\OTTO Lite.lnk"
-  DeleteRegKey HKCU "${UNINST_KEY}"
-  DeleteRegKey HKCU "${APP_KEY}"
 !endif
+  DeleteRegKey HKCU "${OTTO_REG_UNINST_KEY}"
+  DeleteRegKey HKCU "${OTTO_REG_APP_KEY}"
 SectionEnd
