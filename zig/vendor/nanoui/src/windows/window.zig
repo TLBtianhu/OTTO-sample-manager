@@ -197,7 +197,17 @@ pub const Window = struct {
         if (msg == w.WM_GETMINMAXINFO) {
             const mm: *w.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lp)));
             const s = self.dpiScale();
-            mm.pt_min_track_size = .{ .x = @intFromFloat(@max(0, self.min_width) * s), .y = @intFromFloat(@max(0, self.min_height) * s) };
+            const style: u32 = @bitCast(@as(i32, @truncate(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE))));
+            const ex_style: u32 = @bitCast(@as(i32, @truncate(w.GetWindowLongPtrW(hwnd, w.GWL_EXSTYLE))));
+            // Options and setSize use client-area points; ptMinTrackSize is the
+            // outer frame. Add the real non-client border so the client never
+            // shrinks below the application's minimum (not just the HWND).
+            var minimum: w.RECT = .{
+                .right = @intFromFloat(@max(0, self.min_width) * s),
+                .bottom = @intFromFloat(@max(0, self.min_height) * s),
+            };
+            _ = w.AdjustWindowRectEx(&minimum, style, 0, ex_style);
+            mm.pt_min_track_size = .{ .x = minimum.right - minimum.left, .y = minimum.bottom - minimum.top };
             // A borderless window maximises over the whole monitor, taskbar
             // and all: capped to the work area like a decorated one instead.
             // `ptMaxPosition` is *monitor-relative* — the window manager
@@ -210,7 +220,6 @@ pub const Window = struct {
             // on a secondary bigger than the primary can overshoot the work
             // area by that much. (Raymond Chen, "How does the window manager
             // adjust ptMaxSize and ptMaxPosition for multiple monitors?")
-            const style: u32 = @bitCast(@as(i32, @truncate(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE))));
             if (style & w.WS_CAPTION == 0) if (self.monitor()) |m| {
                 mm.pt_max_size = .{ .x = m.work.right - m.work.left, .y = m.work.bottom - m.work.top };
                 mm.pt_max_position = .{ .x = m.work.left - m.whole.left, .y = m.work.top - m.whole.top };

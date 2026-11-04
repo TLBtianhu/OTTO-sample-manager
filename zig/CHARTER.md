@@ -176,7 +176,7 @@ Cache: key → { payload: []u8, cost_bytes, last_used, hits, protected }
 | --- | --- | --- |
 | 冷启动（2000 素材库） | **p50 ≤ 100 ms；p95 ≤ 120 ms** | `--bench`：CreateProcess → 首帧报告行，**9 次**取 p50/p95。**为什么是这两个数**：本机"只 create window + present 一帧"的空程序就是 p50 82 / p95 100–109 ms（`PERF.md` §12.3，`zig/tools/floor-probe.zig`），100 ms 落在系统自己的抖动带里——所以 p50 是目标、p95 120 是噪声闸，单次 100±5 ms 不算退步。便携/安装形态（有字体索引缓存）与 dev 现在是同一条路径 |
 | 常驻内存（不含 L2） | ≤ 50 MiB | `mem.ps1`：**真实窗口**空闲 10 s 的 WorkingSet，减 L2 图像账 |
-| 列表滚动 380×700 | 60 fps | `--bench-scroll`：真实窗口、屏外、`WS_EX_NOACTIVATE`，每 16 ms 注入滚轮 300 帧 |
+| 列表滚动 540×960 | 60 fps | `--bench-scroll`：真实窗口、屏外、`WS_EX_NOACTIVATE`，每 16 ms 注入滚轮 300 帧 |
 | 音频首次试听（冷） | p95 ≤ 50 ms | `--bench` 的 `play()` → `position>0` ×20 |
 | 缩略图首次出现（冷） | p95 ≤ 80 ms | `--bench` 的冷 100 张 |
 | 重复预览（热） | ≤ 5 ms | L2/L3 命中 |

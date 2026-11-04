@@ -118,7 +118,7 @@ function New-DataAndCache([string]$Root, [bool]$RunApp) {
   if ($RunApp) {
     $shot = Join-Path $script:temp 'shots\settings.png'
     New-Item -ItemType Directory -Force -Path (Split-Path $shot -Parent) | Out-Null
-    $panel = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $shot, 'click:设置;at:218,196;click:关闭'
+    $panel = '--nanoui-snapshot="{0}" --nanoui-script={1}' -f $shot, 'click:设置;at:298,222;click:关闭'
     $gui = Invoke-Native $exe $panel
     Add-Check '隐藏窗口写入真实 settings.json（不弹窗、不抢焦点）' (
       $gui.Code -eq 0 -and (Test-Path -LiteralPath (Join-Path $Root 'data\settings.json') -PathType Leaf)

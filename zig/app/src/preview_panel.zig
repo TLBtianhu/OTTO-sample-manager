@@ -42,7 +42,7 @@ const trace = @import("trace.zig");
 const ui = nanoui.ui;
 
 /// 首帧前的默认高度（点）。每帧实际高度由容器求解器给出：
-/// 列表宽 <480 时 56，否则 clamp(56, 25% 容器高, 180)，字体与点击目标不变。
+/// 最小窗口保证完整预览至少 192px，之后随窗口高度连续长到 216px。
 pub const default_height: f32 = 160;
 
 pub const Options = struct {

@@ -63,7 +63,7 @@ pub fn draw(
         session.durationMs(),
     });
     const label = if (starting) "取消" else if (playing) "停止" else if (session.audioError() != null) "重试" else "播放";
-    const button = ui.button(c, label, .{ .size = 15 });
+    const button = ui.button(c, label, .{ .size = 18 });
     tools.end();
     header.end();
     if (button.clicked) {
@@ -72,11 +72,11 @@ pub fn draw(
     }
 
     if (starting) {
-        ui.text(c, "正在启动音频…", .{ .size = 15, .color = c.theme.accent });
+        ui.text(c, "正在启动音频…", .{ .size = 18, .color = c.theme.accent });
     } else if (session.audioError()) |err| {
-        ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "音频启动失败：{s}", .{@errorName(err)});
+        ui.textf(c, .{ .size = 18, .color = c.theme.muted }, "音频启动失败：{s}", .{@errorName(err)});
     } else {
-        ui.textf(c, .{ .size = 15 }, "{d} Hz · {d} 声道 · {d} 位", .{
+        ui.textf(c, .{ .size = 18 }, "{d} Hz · {d} 声道 · {d} 位", .{
             session.sample_rate,
             session.channels,
             session.bits,

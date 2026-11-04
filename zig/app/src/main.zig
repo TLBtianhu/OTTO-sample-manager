@@ -1,4 +1,4 @@
-//! OTTO Lite：用 nanoui 的 Windows CPU 后端把 `zig/core` 的资料库画成 380×700 列表，
+//! OTTO Lite：用 nanoui 的 Windows CPU 后端把 `zig/core` 的资料库画成可调整大小的列表，
 //! 用 `zig/ports` 的文件监听让列表跟着磁盘变、用系统缩略图给每行左侧配一张小图。
 //!
 //!   命令行与各自检入口见 `commands.zig`；都不开窗、不弹窗、不抢焦点。

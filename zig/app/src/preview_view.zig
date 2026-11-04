@@ -20,6 +20,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const preview = @import("preview.zig");
 const preview_audio = @import("preview_audio.zig");
+const responsive_layout = @import("responsive_layout.zig");
 const media_key = @import("media_key.zig");
 const Panel = @import("preview_panel.zig").Panel;
 const ui = nanoui.ui;
@@ -30,8 +31,9 @@ const slot_side: f32 = 96;
 /// 画整条预览条：上排（图位 + Outcome 内容），下排（两行事实）。
 /// 预览区只由 `Outcome` 驱动；事实直接来自 `Sample`，永远在。
 pub fn draw(panel: *Panel, c: *ui.Context) void {
-    if (panel.height == 0) return drawTooSmall(c);
-    if (panel.height < 150) return drawCompact(panel, c);
+    // 窗口下限由求解器与 WM_GETMINMAXINFO 共同保证；这里只画完整预览，
+    // 不再有“紧凑条 / 太小隐藏”两个会突然退化的分支。
+    std.debug.assert(panel.height >= responsive_layout.min_preview_height);
     const bar = ui.div(c)
         .wFull()
         .h(panel.height)
@@ -56,49 +58,6 @@ pub fn draw(panel: *Panel, c: *ui.Context) void {
     drawFacts(panel, c);
 }
 
-/// 空间连 56px 紧凑预览都不够：用明确占位代替被 flex 压成细条的预览。
-/// 不画图位、不画 Outcome；极小的高度只影响这个占位，不会截断预览文字。
-fn drawTooSmall(c: *ui.Context) void {
-    const bar = ui.div(c).row().wFull().h(28).itemsCenter().px(12)
-        .bg(c.theme.surface).border(c.theme.border).borderW(1);
-    defer bar.end();
-    ui.text(c, "窗口太小，预览已隐藏", .{ .size = 10, .color = c.theme.muted, .truncate = .ellipsis });
-}
-
-/// 56–149px 的紧凑预览：小图位 + 一条结果，辅助事实先让位，绝不纵向溢出。
-fn drawCompact(panel: *Panel, c: *ui.Context) void {
-    const bar = ui.div(c).row().wFull().h(panel.height).itemsCenter().gap(10).px(12).py(6)
-        .bg(c.theme.surface).border(c.theme.border).borderW(1);
-    defer bar.end();
-    drawSlot(panel, c, 32);
-    const details = ui.div(c).column().grow().justifyCenter().clip();
-    defer details.end();
-    const current = if (panel.current) |*outcome| outcome else {
-        ui.text(c, if (panel.pending) "正在读取预览…" else "选中一行查看预览", .{ .size = 12, .color = c.theme.muted, .truncate = .ellipsis });
-        return;
-    };
-    switch (current.*) {
-        .image => |bitmap| ui.textf(c, .{ .size = 12, .truncate = .ellipsis }, "图像预览 · {d}×{d}", .{ bitmap.width, bitmap.height }),
-        .text => |text| ui.text(c, text, .{ .size = 15, .truncate = .ellipsis }),
-        .audio => |*session| {
-            const line = ui.div(c).row().wFull().itemsCenter().gap(8);
-            ui.text(c, "音频预览", .{ .size = 12, .truncate = .ellipsis });
-            ui.spacer(c);
-            const playing = session.isPlaying();
-            const starting = session.isStartingAudio();
-            const label = if (starting) "取消" else if (playing) "停止" else if (session.audioError() != null) "重试" else "播放";
-            const button = ui.button(c, label, .{ .size = 15 });
-            line.end();
-            if (button.clicked) {
-                if (starting or playing) session.stop() else _ = preview_audio.play(session);
-                c.changed = true;
-            }
-        },
-        .frames => ui.text(c, "帧预览待接入", .{ .size = 12, .truncate = .ellipsis }),
-        .none => |reason| ui.text(c, reasonText(reason), .{ .size = 12, .truncate = .ellipsis }),
-    }
-}
-
 /// 按 `Outcome` 的五个分支画内容；`current == null` 时区分"未选中"与"正在读"。
 fn drawOutcome(panel: *Panel, c: *ui.Context) void {
     const current = if (panel.current) |*outcome| outcome else {
@@ -113,7 +72,7 @@ fn drawOutcome(panel: *Panel, c: *ui.Context) void {
     switch (current.*) {
         .image => |bitmap| {
             caption(panel, c, "图像预览");
-            ui.textf(c, .{ .size = 15 }, "{d}×{d} 像素", .{ bitmap.width, bitmap.height });
+            ui.textf(c, .{ .size = 18 }, "{d}×{d} 像素", .{ bitmap.width, bitmap.height });
             ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "{d} 字节 BGRA", .{bitmap.byteLen()});
         },
         .text => |text| {
@@ -140,12 +99,12 @@ fn drawOutcome(panel: *Panel, c: *ui.Context) void {
         }),
         .frames => {
             caption(panel, c, "帧预览");
-            ui.text(c, "帧预览待接入", .{ .size = 15, .color = c.theme.text });
+            ui.text(c, "帧预览待接入", .{ .size = 18, .color = c.theme.text });
             ui.text(c, "Media Foundation 抽帧是 M2", .{ .size = 10, .color = c.theme.muted });
         },
         .none => |reason| {
             caption(panel, c, "没有预览");
-            ui.text(c, reasonText(reason), .{ .size = 15, .color = c.theme.text });
+            ui.text(c, reasonText(reason), .{ .size = 18, .color = c.theme.text });
             ui.text(c, reasonDetail(reason), .{ .size = 10, .color = c.theme.muted, .wrap = true });
         },
     }

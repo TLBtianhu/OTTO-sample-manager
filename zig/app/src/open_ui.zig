@@ -18,13 +18,13 @@ pub fn frame(c: *ui.Context, open: *bool, import: *import_ui.Import, owner: ?*an
     if (!open.*) return;
     const row = ui.div(c).row().gap(8).px(12).py(4);
     defer row.end();
-    const files = ui.button(c, "选择文件…", .{ .size = 13 });
+    const files = ui.button(c, "选择文件…", .{ .size = 16 });
     if (files.clicked) {
         open.* = false;
         c.changed = true;
         beginFiles(import, owner);
     }
-    const folder = ui.button(c, "选择文件夹…", .{ .size = 13 });
+    const folder = ui.button(c, "选择文件夹…", .{ .size = 16 });
     if (folder.clicked) {
         open.* = false;
         c.changed = true;

@@ -66,17 +66,17 @@ pub fn draw(c: *ui.Context, info: Info) Action {
     });
     // 窄容器的辅助状态同样让位，不能把计数和溢出按钮挤出屏幕。
     if (!info.compact) {
-        if (info.ext_filter) |exts| ui.textf(c, .{ .size = 15, .color = c.theme.accent }, "· 仅 {s}", .{exts});
+        if (info.ext_filter) |exts| ui.textf(c, .{ .size = 18, .color = c.theme.accent }, "· 仅 {s}", .{exts});
         if (info.import_status) |status| ui.textf(c, .{
-            .size = 15,
+            .size = 18,
             .color = if (info.import_failed) c.theme.danger else c.theme.accent,
         }, "· {s}", .{status});
         if (info.flash_left > 0) {
-            ui.textf(c, .{ .size = 15, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
+            ui.textf(c, .{ .size = 18, .color = c.theme.accent }, "· 已复制 {d} 个素材", .{info.flash_count});
         } else if (info.rows_with_image > 0) {
-            ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "· {d} 行有缩略图", .{info.rows_with_image});
+            ui.textf(c, .{ .size = 18, .color = c.theme.muted }, "· {d} 行有缩略图", .{info.rows_with_image});
         }
-        if (info.dirty) ui.text(c, "· 有事件丢失，视图可能不完整", .{ .size = 15 });
+        if (info.dirty) ui.text(c, "· 有事件丢失，视图可能不完整", .{ .size = 18 });
     }
     ui.spacer(c);
     if (info.compact) {
@@ -99,7 +99,7 @@ pub fn draw(c: *ui.Context, info: Info) Action {
     if (info.update_status) |status| {
         const row_status = ui.div(c).row().wFull().h(24).itemsCenter().gap(6);
         const color = if (info.update_action_label != null) c.theme.accent else c.theme.muted;
-        ui.textf(c, .{ .size = 15, .color = color, .truncate = .ellipsis }, "{s}", .{status});
+        ui.textf(c, .{ .size = 18, .color = color, .truncate = .ellipsis }, "{s}", .{status});
         if (info.update_action_label) |label| {
             const it = smallPressable(c);
             ui.textf(c, .{ .size = 10, .color = c.theme.accent }, "{s}", .{label});

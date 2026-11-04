@@ -344,7 +344,7 @@ pub const SliderOptions = struct {
 pub fn slider(c: *Context, value: *f32, opts: SliderOptions) bool {
     const th = c.theme;
     const knob: f32 = 18;
-    const i = c.open(.{ .direction = .row, .width = opts.width, .height = .{ .px = 22 }, .align_items = .center, .control = true }, null);
+    const i = c.open(.{ .direction = .row, .width = opts.width, .height = .{ .px = 24 }, .align_items = .center, .control = true }, null);
     defer c.end();
     const it = c.interact(i, .{});
     // VoiceOver reads it, and swipes step it a tenth of its range.

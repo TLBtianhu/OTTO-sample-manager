@@ -28,7 +28,7 @@ pub fn draw(c: *ui.Context, sample_count: usize, busy: bool) bool {
     const box = ui.div(c).sizeFull().column().itemsCenter().justifyCenter().gap(10).px(24);
     defer box.end();
     ui.icon(c, icon_name, .{ .size = 32, .color = c.theme.muted });
-    ui.text(c, title, .{ .size = 15, .weight = .semibold });
+    ui.text(c, title, .{ .size = 18, .weight = .semibold });
     ui.text(c, description, .{ .size = 12, .color = c.theme.muted });
     const it = ui.button(c, import_ui.button_label, .{
         .variant = .primary,

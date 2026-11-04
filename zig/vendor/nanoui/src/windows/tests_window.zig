@@ -52,6 +52,8 @@ test "a window's client area is the size that was asked, borderless or not" {
             .title = "size",
             .width = 200,
             .height = 120,
+            .min_width = 160,
+            .min_height = 100,
             .visible = false,
             .decorations = decorated,
             .content = .{ .view = .init(&p, Page.view) },
@@ -221,9 +223,17 @@ test "a borderless window's maximize is capped to the work area, monitor-relativ
         .content = .{ .view = .init(&p, Page.view) },
     });
     var mm2: w.MINMAXINFO = .{};
-    _ = w.SendMessageW(plain.hwnd orelse return error.SkipZigTest, w.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&mm2)));
+    const plain_h = plain.hwnd orelse return error.SkipZigTest;
+    _ = w.SendMessageW(plain_h, w.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&mm2)));
     try testing.expectEqual(@as(i32, 0), mm2.pt_max_size.x);
     try testing.expectEqual(@as(i32, 0), mm2.pt_max_position.x);
+    // The decorated tracking minimum includes the frame: sizing the hidden
+    // HWND to that outer limit still leaves the full requested client area.
+    _ = w.SetWindowPos(plain_h, null, 0, 0, mm2.pt_min_track_size.x, mm2.pt_min_track_size.y, 0x0002 | 0x0004 | 0x0010);
+    var client: w.RECT = .{};
+    _ = w.GetClientRect(plain_h, &client);
+    try testing.expectEqual(@as(i32, @intFromFloat(200 * s)), client.right - client.left);
+    try testing.expectEqual(@as(i32, @intFromFloat(150 * s)), client.bottom - client.top);
 }
 
 const Counter = struct { n: u32 = 0 };
