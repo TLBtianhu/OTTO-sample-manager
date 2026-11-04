@@ -1,4 +1,4 @@
-# 目录浏览验收闸门：原 Stage 0/分页 18 行 + Stage 1 导航 9 行 + 地址栏 11 行（38 项），
+﻿# 目录浏览验收闸门：原 Stage 0/分页 18 行 + Stage 1 导航 9 行 + 地址栏 11 行（38 项），
 # 再加按需补全 / 路径健壮性 / Explorer 键 11 行（总计 49 项）。
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File zig\browse.ps1
@@ -392,7 +392,7 @@ function Invoke-ZeroWrite {
   Write-Step '5. 零写入（源目录 + 库 + 设置前后快照）'
   $dir = Join-Path $Root '10k'
   $before = Get-DirSnapshot $dir
-  $settings = Join-Path $env:LOCALAPPDATA 'OTTO\dev\settings.json'
+  $settings = $script:devSettings
   $library = Join-Path $PSScriptRoot 'app\fixtures\library.json'
   $settingsBefore = if (Test-Path -LiteralPath $settings) { (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash } else { 'missing' }
   $libraryBefore = if (Test-Path -LiteralPath $library) { (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash } else { 'missing' }
@@ -762,14 +762,26 @@ function Invoke-MemoryRefusal {
 . (Join-Path $PSScriptRoot 'browse_robust_accept.ps1')
 
 Write-Output 'OTTO Lite 目录浏览 Stage 0 + Stage 1 验收'
-Write-Output ('exe: {0}' -f $Exe)
-
-if (-not (Test-Path -LiteralPath $Exe)) {
-  Write-Output ('致命错误：找不到 {0}（先 zig build -Drelease=true）' -f $Exe)
-  exit 1
+Write-Output ('source exe: {0}' -f $Exe)
+$sourceExe = $Exe
+$sourceHelper = Join-Path (Split-Path $Exe -Parent) 'otto-thumb-host.exe'
+foreach ($path in @($sourceExe, $sourceHelper)) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    Write-Output ('致命错误：找不到 {0}（先 zig build -Drelease=true）' -f $path)
+    exit 1
+  }
 }
 
 Initialize-Fixtures $Root ([bool]$Recreate)
+# 以临时项目的 zig-out/bin 运行 dev 形态，数据只写临时项目的 .otto-dev。
+$devProject = Join-Path $env:TEMP ('otto-browse-dev-' + [Guid]::NewGuid().ToString('N'))
+$devBin = Join-Path $devProject 'zig-out\bin'
+New-Item -ItemType Directory -Force -Path $devBin | Out-Null
+$Exe = Join-Path $devBin 'otto-lite.exe'
+Copy-Item -LiteralPath $sourceExe -Destination $Exe
+Copy-Item -LiteralPath $sourceHelper -Destination (Join-Path $devBin 'otto-thumb-host.exe')
+$script:devSettings = Join-Path $devProject '.otto-dev\settings.json'
+Write-Output ('isolated dev exe: {0}' -f $Exe)
 # 大目录导航夹具只在本轮末尾加入；下一轮先移除，原 18 项仍看到纯 10 万文件。
 $navChildren = @((Join-Path $Root '100k\nav-child'), (Join-Path $Root '100k\a-nav-child'))
 foreach ($navChild in $navChildren) {

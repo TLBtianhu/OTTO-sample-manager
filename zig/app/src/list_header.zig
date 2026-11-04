@@ -119,7 +119,7 @@ fn secondaryButtons(c: *ui.Context) Action {
     ui.text(c, "检查更新", .{ .size = 14, .color = c.theme.muted });
     ui.end(c);
     const settings_button = smallPressable(c);
-    ui.text(c, "设置", .{ .size = 10, .color = c.theme.muted });
+    ui.text(c, "设置", .{ .size = 14, .color = c.theme.muted });
     ui.end(c);
     action.check_clicked = check_button.clicked;
     action.settings_clicked = settings_button.clicked;

@@ -6,8 +6,9 @@
 > 一次真实运行的环境、命令、六项数字、debug/release 差异，以及**哪些数字 headless
 > 根本测不出来**。数字不修饰：没达标的就写 FAIL。
 >
-> 注（0.15.0 之后）：dev 的数据目录已迁到 `%LOCALAPPDATA%\OTTO\dev`（CHARTER 九）。
-> 本文数字测于迁移之前，文中"dev 没有数据目录"指的是当时的状态。
+> 注（当前路径规则）：exe 位于 `<项目>\zig-out\bin\otto-lite.exe` 时，dev 数据在
+> `<项目>\.otto-dev`（CHARTER 九）。本文数字测于引入数据目录之前，文中"dev 没有
+> 数据目录"指的是当时的状态。
 
 - 工作树：`C:\src\otto-bench`，分支 `feat/bench`，基线 commit `0575802`（本次改动未提交）
 - 运行日期：2026-10-31
@@ -173,11 +174,10 @@ otto-lite.exe <library> --bench-first-frame
 - 每轮 100 次，成功才进样本，失败计数单独报；p50/p95 用 nearest-rank；
 - 计时方式与 `--thumb-bench` 完全一致（同一套 `Copies` / `collectFiles` / 时钟），
   没有第二套计时器；
-- **L3 没在这条测量里**：当时的 dev 形态不写数据目录（0.15.0 后迁到
-  `%LOCALAPPDATA%\OTTO\dev`），`--bench` 也不碰用户目录，所以 OTTO 自己的磁盘缩略图
-  缓存是关闭的。这里量的是「Shell 冷/热 + helper
-  隔离」的真实链路；要量 L3 命中率，需要带文件身份的 `Sample` 和临时数据目录，
-  留给下一轮真实窗口脚本（见第 7 节）。
+- **L3 没在这条测量里**：当时的 dev 形态不写数据目录（当前写到 `<项目>\.otto-dev`），
+  `--bench` 也不碰用户目录，所以 OTTO 自己的磁盘缩略图缓存是关闭的。这里量的是
+  「Shell 冷/热 + helper 隔离」的真实链路；要量 L3 命中率，需要带文件身份的 `Sample`
+  和临时数据目录，留给下一轮真实窗口脚本（见第 7 节）。
 
 ### 4.6 音频起播（`bench_audio.zig`）
 

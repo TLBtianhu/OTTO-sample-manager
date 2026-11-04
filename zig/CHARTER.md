@@ -363,7 +363,7 @@ OTTO 能防的。M4 起这条调用整体搬进 `otto-thumb-host.exe`：
 
 | 形态 | 谁用 | 程序在哪 | 数据在哪 |
 | --- | --- | --- | --- |
-| **编译产物** | 只有 CI / 开发者，用来产出分发物 | `zig-out/` | **无（必须纯净）**；dev 运行数据在开发者的 `%LOCALAPPDATA%\OTTO\dev`，不属于产物 |
+| **编译产物** | 只有 CI / 开发者，用来产出分发物 | `zig-out/` | **`zig-out` 无运行数据（必须纯净）**；dev 数据在 `<项目>\.otto-dev`，不属于产物 |
 | **便携版** | 用户拷走，自包含 | 任意目录 | `<exe 目录>\data` |
 | **安装版** | 用户日常使用 | `<根>\app`（默认根 `%LOCALAPPDATA%\Programs\OTTO`） | `<根>\data`；可再生缓存在 `<根>\cache` |
 
@@ -374,10 +374,11 @@ OTTO 能防的。M4 起这条调用整体搬进 `otto-thumb-host.exe`：
 2. **程序与数据分目录，安装器只拥有 `app`。** 默认根在当前用户的 LocalAppData 下，不需要
    管理员；安装与覆盖升级只替换 `app`，`data` 与 `cache` 一个字节都不动。installed 不读、
    不迁移旧 `%APPDATA%\OTTO`，自定义根也完全由 `<根>\app\otto-lite.exe` 推导。
-3. **编译产物必须纯净。** `zig-out/bin` 只允许出现构建产出的 exe / pdb；dev 的设置、
-   库、缓存、更新包都在 `%LOCALAPPDATA%\OTTO\dev`（没有 `LOCALAPPDATA` 时退回
-   `%TEMP%\OTTO-dev`）。dev 形态同样**绝不碰真实 `%APPDATA%\OTTO`**，否则"测用户
-   状态"这件事本身就失真了。从 `zig-out` 拷一份 exe 出去也必须是干净的。
+3. **编译产物必须纯净。** `zig-out/bin` 只允许出现构建产出的 exe / pdb；exe 位于
+   `<项目>\zig-out\bin\otto-lite.exe` 时，dev 的设置、库、缓存、更新包与 `crash.log`
+   都在 `<项目>\.otto-dev`，不读取或写入旧 `%LOCALAPPDATA%\OTTO\dev` / `%TEMP%\OTTO-dev`。
+   dev 形态同样**绝不碰真实 `%APPDATA%\OTTO`**，否则"测用户状态"这件事本身就失真了。
+   从 `zig-out` 拷一份 exe 出去也必须是干净的。
 4. **分发物由打包步骤生成**：版本号、标记文件、README、图标都由脚本产出，不靠人手工
    从 `zig-out` 里拷一个 exe 出来。
 

@@ -2,8 +2,8 @@
 //!
 //! ## 位置（三种形态都在各自的数据目录，`zig-out` 里不写）
 //!
-//!   * dev：`%LOCALAPPDATA%\OTTO\dev\settings.json`——开发者的本地目录，
-//!     删掉不影响源码；**编译产物本身不承载运行数据**。
+//!   * dev：`<zig-out 上一级>\.otto-dev\settings.json`——开发数据留在项目目录，
+//!     **编译产物本身不承载运行数据**。
 //!   * portable：`<exe 目录>\data\settings.json`。
 //!   * installed：`<安装根>\data\settings.json`（exe 位于 `<安装根>\app`）。
 //!
@@ -172,7 +172,7 @@ pub const Settings = struct {
 // ---------------------------------------------------------------------------
 
 /// 纯路径：形态 → 数据目录下的 `settings.json`。
-/// dataDir 拿不到（installed 的 app 路径非法，dev 没有 LOCALAPPDATA/TEMP）返回 null。
+/// dataDir 拿不到（installed 的 app 路径非法，dev 的 exe 不在 zig-out/bin 下）返回 null。
 pub fn pathFor(
     allocator: std.mem.Allocator,
     mode: mode_mod.Mode,
@@ -483,13 +483,14 @@ test "读不到文件：默认值，不向上抛错" {
     try testing.expectEqual(default_l3_mib, settings.l3_budget_mib);
 }
 
-test "路径：dev 在 %LOCALAPPDATA%，便携版在 data 目录" {
+test "路径：dev 在项目内 .otto-dev，便携版在 data 目录" {
     const dev = (try pathFor(testing.allocator, .dev, "C:\\build\\zig-out\\bin\\otto-lite.exe", .{
         .local_appdata = "C:\\Users\\me\\AppData\\Local",
     })).?;
     defer testing.allocator.free(dev);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\OTTO\\dev\\settings.json", dev);
+    try testing.expectEqualStrings("C:\\build\\.otto-dev\\settings.json", dev);
     try testing.expect(std.mem.indexOf(u8, dev, "zig-out") == null);
+    try testing.expect(std.mem.indexOf(u8, dev, "AppData") == null);
 
     const portable = (try pathFor(testing.allocator, .portable, "D:\\tools\\otto\\otto-lite.exe", .{})).?;
     defer testing.allocator.free(portable);
@@ -502,11 +503,10 @@ test "路径：dev 在 %LOCALAPPDATA%，便携版在 data 目录" {
     try testing.expectEqualStrings("D:\\OTTO\\data\\settings.json", installed);
 }
 
-test "dev 没有 LOCALAPPDATA 时设置退到 %TEMP%\\OTTO-dev，不写回 exe 目录" {
-    const path = (try pathFor(testing.allocator, .dev, "C:\\build\\zig-out\\bin\\otto-lite.exe", .{
+test "dev 路径没有 zig-out 段时设置路径为 null，不回退用户目录" {
+    const path = try pathFor(testing.allocator, .dev, "C:\\tools\\otto-lite.exe", .{
+        .local_appdata = "C:\\Users\\me\\AppData\\Local",
         .temp = "C:\\Temp",
-    })).?;
-    defer testing.allocator.free(path);
-    try testing.expectEqualStrings("C:\\Temp\\OTTO-dev\\settings.json", path);
-    try testing.expect(std.mem.indexOf(u8, path, "zig-out") == null);
+    });
+    try testing.expect(path == null);
 }

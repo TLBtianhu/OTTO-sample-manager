@@ -52,7 +52,7 @@ pub const Boot = struct {
     /// 位置参数或形态默认值；`Import` 用它当载入路径。
     library_path: []const u8,
     settings: settings_store.Settings,
-    /// 设置文件路径（三种形态都在各自的数据目录；dev 在 %LOCALAPPDATA%）。
+    /// 设置文件路径（三种形态都在各自的数据目录；dev 在 `<项目>\.otto-dev`）。
     settings_path: ?[]const u8,
     /// 浏览模式：设置只读（不落盘）。见 `settings_ui.Panel.Options.read_only`。
     settings_read_only: bool = false,
@@ -274,7 +274,7 @@ pub fn boot(
         trace.mark("setup.live");
     }
 
-    // 设置：三种形态都写各自的数据目录（dev 在 %LOCALAPPDATA%\OTTO\dev），
+    // 设置：三种形态都写各自的数据目录（dev 在 <项目>\.otto-dev），
     // 编译产物里不落任何运行数据；读不到 / 坏了都用默认值（见 settings_store）。
     // 浏览模式**只读**：路径照旧解析（这样主题/不透明度仍能读），但写入口关闭。
     startup_dx.mark(.read_settings);
@@ -283,7 +283,7 @@ pub fn boot(
     startup_dx.mark(.read_library);
 
     // 取图层用自己的分配器（`init.gpa` 线程安全，Debug 下还查泄漏）；L3 目录按
-    // 运行形态决定（dev 在 %LOCALAPPDATA%\OTTO\dev\cache，不写工程目录、不写源目录）。
+    // 运行形态决定（dev 在 <项目>\.otto-dev\cache，不写 zig-out、不写用户目录）。
     //
     // L2 预算：设置面板的值（已被 `settings_store` 夹到 32 MiB）或基准/探针的
     // `--l2-budget-mib` 覆盖。预览一档永远按同一政策从 L2 派生，合计 ≤ 48 MiB。
@@ -313,7 +313,7 @@ pub fn boot(
     });
     errdefer preview.deinit();
 
-    // 字体索引写进各自的数据目录；dev 也在 %LOCALAPPDATA%，不在 zig-out 里。
+    // 字体索引写进各自的数据目录；dev 也在 <项目>\.otto-dev，不在 zig-out 里。
     // 上屏：默认 GDI（`--mem-probe` 实测比 D3D11 翻转交换链少 29 MiB 常驻、
     // present 便宜一个数量级）；`--d3d` 回到旧的 D3D 路径（要 vsync 时用）。
     startup_dx.mark(.create_window);

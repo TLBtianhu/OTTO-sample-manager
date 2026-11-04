@@ -50,18 +50,17 @@ $ErrorActionPreference = 'Continue'
 
 $root = $PSScriptRoot
 $appDir = Join-Path $root 'app'
-$exe = Join-Path $appDir 'zig-out\bin\otto-lite.exe'
-# dev data lives under %LOCALAPPDATA%\OTTO\dev now, not in zig-out. Point the
-# child at a throw-away LOCALAPPDATA so the probe never touches the developer's
-# own dev settings / caches.
-$previousLocalAppData = $env:LOCALAPPDATA
-$devLocalAppData = Join-Path $env:TEMP 'otto-opacity-localappdata'
-if (Test-Path $devLocalAppData) { Remove-Item -Recurse -Force $devLocalAppData -ErrorAction SilentlyContinue }
-New-Item -ItemType Directory -Path $devLocalAppData -Force | Out-Null
-$env:LOCALAPPDATA = $devLocalAppData
-$settings = Join-Path $devLocalAppData 'OTTO\dev\settings.json'
+$sourceExe = Join-Path $appDir 'zig-out\bin\otto-lite.exe'
+$sourceHelper = Join-Path $appDir 'zig-out\bin\otto-thumb-host.exe'
+# Run a copied dev runtime so its data naturally lands in a temporary project.
+$work = Join-Path $env:TEMP 'otto-opacity-dev'
+$devBin = Join-Path $work 'zig-out\bin'
+$exe = Join-Path $devBin 'otto-lite.exe'
+$settings = Join-Path $work '.otto-dev\settings.json'
+if (Test-Path $work) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $devBin -Force | Out-Null
 $library = Join-Path $appDir 'fixtures\library.json'
-$shotDir = Join-Path $env:TEMP 'otto-opacity-probe'
+$shotDir = Join-Path $work 'snapshots'
 $startupShot = Join-Path $shotDir 'startup.png'
 $panelShot = Join-Path $root 'snapshot-opacity.png'
 
@@ -91,7 +90,11 @@ if (-not $NoBuild) {
   }
 }
 
-if (-not (Test-Path $exe)) { throw "missing exe: $exe" }
+foreach ($path in @($sourceExe, $sourceHelper)) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing runtime: $path" }
+}
+Copy-Item -LiteralPath $sourceExe -Destination $exe
+Copy-Item -LiteralPath $sourceHelper -Destination (Join-Path $devBin 'otto-thumb-host.exe')
 if (-not (Test-Path $library)) { throw "missing fixture library: $library" }
 if (Test-Path $shotDir) { Remove-Item -Recurse -Force $shotDir -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Path $shotDir -Force | Out-Null
@@ -363,6 +366,5 @@ $results | Where-Object { $_.Name -like '* foreground' } | ForEach-Object {
 Write-Output ('  {0} checks, {1} passed, {2} failed' -f $results.Count, ($results.Count - $failed.Count), $failed.Count)
 Write-Output ('  panel snapshot: {0}' -f $panelShot)
 
-$env:LOCALAPPDATA = $previousLocalAppData
 if ($failed.Count -gt 0) { exit 1 }
 exit 0

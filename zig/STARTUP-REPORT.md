@@ -7,8 +7,9 @@
 > Zig 0.17.0 / release（ReleaseSafe）/ `fixtures/library.json`（2000 条）+
 > `C:\src\otto-testkit\samples`。所有数字都是本机、本次会话实测。
 >
-> 注（0.15.0 之后）：dev 的数据目录已迁到 `%LOCALAPPDATA%\OTTO\dev`（CHARTER 九）。
-> 本文数字测于迁移之前，文中"dev 没有数据目录"指的是当时的状态。
+> 注（当前路径规则）：exe 位于 `<项目>\zig-out\bin\otto-lite.exe` 时，dev 数据在
+> `<项目>\.otto-dev`（CHARTER 九）。本文数字测于引入数据目录之前，文中"dev 没有
+> 数据目录"指的是当时的状态。
 
 ## 0. 结论先说
 

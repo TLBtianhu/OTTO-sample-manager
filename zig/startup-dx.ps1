@@ -173,8 +173,10 @@ function Invoke-CrashCase([string]$Name, [string]$CaseExe, [string]$LocalBase, [
   if ($logExists) { Write-Output ($Name + " log:`n" + $log.Trim()) }
 }
 
+$devProject = Join-Path $work 'dev-project'
+$devDir = New-Case 'dev-project\zig-out\bin' $false
 $devLocal = Join-Path $work 'dev-local'
-Invoke-CrashCase 'dev' $Exe $devLocal (Join-Path $devLocal 'OTTO\dev\crash.log')
+Invoke-CrashCase 'dev' (Join-Path $devDir 'otto-lite.exe') $devLocal (Join-Path $devProject '.otto-dev\crash.log')
 
 $installedRoot = Join-Path $work 'installed-root'
 $installedDir = New-Case 'installed-root\app' $false

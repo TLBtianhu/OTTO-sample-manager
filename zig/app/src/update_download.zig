@@ -29,7 +29,7 @@
 //! ## 文件名
 //!
 //! `<dataDir>\updates\otto-lite-<version>-setup.exe`（dev 也在自己的数据目录
-//! `%LOCALAPPDATA%\OTTO\dev\updates\`，见 `mode.updatesDir`）。`<version>` 来自 feed，
+//! `<项目>\.otto-dev\updates\`，见 `mode.updatesDir`）。`<version>` 来自 feed，
 //! 不是从 URL 里猜的——URL 可以是任意 CDN 路径。
 //!
 //! ## 边界（与 README 同步）

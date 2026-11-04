@@ -5,7 +5,7 @@
 //! 在 OutOfMemory / panic 路径上再依赖一个可能已经无法工作的分配器。
 //!
 //! 路径与设置文件的形态规则一致：
-//!   * dev       %LOCALAPPDATA%\OTTO\dev\crash.log（缺省时沿用 %TEMP%\OTTO-dev）
+//!   * dev       `<zig-out 上一级>\.otto-dev\crash.log`（开发数据留在项目目录）
 //!   * portable  <exe>\data\crash.log
 //!   * installed <安装根>\data\crash.log（exe 位于 <安装根>\app）
 //! 安装版的 `app` 子目录只承载程序，永远不会成为日志目标。
@@ -68,8 +68,6 @@ pub fn crashLogPathFor(
     buffer: []u8,
     mode: mode_mod.Mode,
     exe_path: []const u8,
-    local_appdata: ?[]const u8,
-    temp: ?[]const u8,
 ) ?[]const u8 {
     switch (mode) {
         .portable => {
@@ -83,18 +81,13 @@ pub fn crashLogPathFor(
             return std.fmt.bufPrint(buffer, "{s}\\data\\crash.log", .{root}) catch null;
         },
         .dev => {
-            if (nonEmpty(local_appdata)) |base| {
-                return std.fmt.bufPrint(buffer, "{s}\\OTTO\\dev\\crash.log", .{base}) catch null;
-            }
-            const base = nonEmpty(temp) orelse return null;
-            return std.fmt.bufPrint(buffer, "{s}\\OTTO-dev\\crash.log", .{base}) catch null;
+            const bin_dir = std.fs.path.dirname(exe_path) orelse return null;
+            const zig_out = std.fs.path.dirname(bin_dir) orelse return null;
+            if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(zig_out), "zig-out")) return null;
+            const project = std.fs.path.dirname(zig_out) orelse return null;
+            return std.fmt.bufPrint(buffer, "{s}\\.otto-dev\\crash.log", .{project}) catch null;
         },
     }
-}
-
-fn nonEmpty(value: ?[]const u8) ?[]const u8 {
-    const resolved = value orelse return null;
-    return if (resolved.len > 0) resolved else null;
 }
 
 /// 返回写入 log_buffer 的路径长度；任何诊断故障都只让日志 unavailable，不二次崩溃。
@@ -118,9 +111,7 @@ fn writeLog(
         break :blk true;
     } else false;
     const mode = mode_mod.detectFrom(exe_path, portable);
-    const local = init.environ_map.get("LOCALAPPDATA");
-    const temp = init.environ_map.get("TEMP");
-    const log_path = crashLogPathFor(log_buffer, mode, exe_path, local, temp) orelse return null;
+    const log_path = crashLogPathFor(log_buffer, mode, exe_path) orelse return null;
 
     const parent = std.fs.path.dirname(log_path) orelse return null;
     std.Io.Dir.cwd().createDirPath(init.io, parent) catch return null;
@@ -224,4 +215,17 @@ fn wide(buffer: []u16, text: []const u8) [*:0]const u16 {
     };
     buffer[count] = 0;
     return @ptrCast(buffer.ptr);
+}
+
+test "dev 崩溃日志在项目内 .otto-dev，不写用户目录" {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = crashLogPathFor(&buffer, .dev, "C:\\src\\app\\zig-out\\bin\\otto-lite.exe").?;
+    try std.testing.expectEqualStrings("C:\\src\\app\\.otto-dev\\crash.log", path);
+    try std.testing.expect(std.mem.indexOf(u8, path, "AppData") == null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "zig-out") == null);
+}
+
+test "dev 崩溃日志路径没有 zig-out 段时不可用，不回退用户目录" {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expect(crashLogPathFor(&buffer, .dev, "C:\\tools\\otto-lite.exe") == null);
 }

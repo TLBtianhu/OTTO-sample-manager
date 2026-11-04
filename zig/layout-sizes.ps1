@@ -15,9 +15,15 @@ $Library = [IO.Path]::GetFullPath($Library)
 $OutDir = [IO.Path]::GetFullPath($OutDir)
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $work = Join-Path $env:TEMP ('otto-layout-sizes-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $work | Out-Null
+$devBin = Join-Path $work 'zig-out\bin'
+New-Item -ItemType Directory -Force -Path $devBin | Out-Null
+$script:exeForProbe = Join-Path $devBin 'otto-lite.exe'
+Copy-Item -LiteralPath $Exe -Destination $script:exeForProbe
+Copy-Item -LiteralPath (Join-Path (Split-Path $Exe -Parent) 'otto-thumb-host.exe') -Destination (Join-Path $devBin 'otto-thumb-host.exe')
+$settingsDir = Join-Path $work '.otto-dev'
+New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
 
-function Invoke-Snapshot([string]$Arguments, [string]$DataRoot) {
+function Invoke-Snapshot([string]$Arguments) {
   $psi = [Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = $script:exeForProbe
   $psi.Arguments = $Arguments
@@ -27,7 +33,6 @@ function Invoke-Snapshot([string]$Arguments, [string]$DataRoot) {
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
   $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
-  $psi.Environment['LOCALAPPDATA'] = $DataRoot
   $p = [Diagnostics.Process]::Start($psi)
   $stdout = $p.StandardOutput.ReadToEndAsync()
   $stderr = $p.StandardError.ReadToEndAsync()
@@ -37,7 +42,6 @@ function Invoke-Snapshot([string]$Arguments, [string]$DataRoot) {
   $p.Dispose()
   return $text
 }
-$script:exeForProbe = $Exe
 $results = @()
 foreach ($spec in @('540x960', '540x864', '540x800', '540x768', '540x720', '480x768', '420x768', '384x768', '360x600')) {
   $parts = $spec.Split('x')
@@ -45,14 +49,11 @@ foreach ($spec in @('540x960', '540x864', '540x800', '540x768', '540x720', '480x
   $requestedHeight = [int]$parts[1]
   $width = [Math]::Max(384, $requestedWidth)
   $height = [Math]::Max(768, $requestedHeight)
-  $dataRoot = Join-Path $work $spec
-  $settingsDir = Join-Path $dataRoot 'OTTO\dev'
-  New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
   $json = '{"version":2,"layout":{"width":' + $requestedWidth + ',"height":' + $requestedHeight + '}}'
   [IO.File]::WriteAllText((Join-Path $settingsDir 'settings.json'), $json, [Text.UTF8Encoding]::new($false))
   $shot = Join-Path $OutDir ($spec + '.png')
   $args = '--settings-probe --select=0 --nanoui-wait=0.4 --nanoui-script=click:samples --nanoui-snapshot="' + $shot + '" "' + $Library + '"'
-  $text = Invoke-Snapshot $args $dataRoot
+  $text = Invoke-Snapshot $args
   [IO.File]::WriteAllText((Join-Path $OutDir ($spec + '.log')), $text, [Text.UTF8Encoding]::new($false))
   $marker = '(' + $width + 'x' + $height + ' points at 1x)'
   if (-not $text.Contains($marker)) { throw "unexpected client size for ${spec}: $text" }

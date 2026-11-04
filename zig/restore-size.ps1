@@ -13,7 +13,14 @@ $Exe = [IO.Path]::GetFullPath($Exe)
 $OutDir = [IO.Path]::GetFullPath($OutDir)
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $work = Join-Path $env:TEMP ('otto-restore-size-' + [Guid]::NewGuid().ToString('N'))
-$settingsDir = Join-Path $work 'OTTO\dev'
+$sourceExe = $Exe
+$sourceHelper = Join-Path (Split-Path $Exe -Parent) 'otto-thumb-host.exe'
+$devBin = Join-Path $work 'zig-out\bin'
+New-Item -ItemType Directory -Force -Path $devBin | Out-Null
+$script:exeForProbe = Join-Path $devBin 'otto-lite.exe'
+Copy-Item -LiteralPath $sourceExe -Destination $script:exeForProbe
+Copy-Item -LiteralPath $sourceHelper -Destination (Join-Path $devBin 'otto-thumb-host.exe')
+$settingsDir = Join-Path $work '.otto-dev'
 New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
 $settings = Join-Path $settingsDir 'settings.json'
 [IO.File]::WriteAllText($settings, '{"version":2,"layout":{"width":900,"height":1000}}', [Text.UTF8Encoding]::new($false))
@@ -28,7 +35,6 @@ function Invoke-Hidden([string]$Arguments) {
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
   $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
-  $psi.Environment['LOCALAPPDATA'] = $script:workForProbe
   Write-Host ('$ "{0}" {1}' -f $psi.FileName, $psi.Arguments)
   $p = [Diagnostics.Process]::Start($psi)
   $stdout = $p.StandardOutput.ReadToEndAsync()
@@ -39,8 +45,6 @@ function Invoke-Hidden([string]$Arguments) {
   $p.Dispose()
   return $text
 }
-$script:exeForProbe = $Exe
-$script:workForProbe = $work
 $settingsText = -join [char[]](0x8BBE, 0x7F6E)
 $restoreText = (-join [char[]](0x6062, 0x590D, 0x9ED8, 0x8BA4, 0x5927, 0x5C0F, 0xFF08)) + '540' + [char]0x00D7 + '960' + [char]0xFF09
 $action = 'click:' + $settingsText + ';click:' + $restoreText
@@ -56,8 +60,12 @@ if ($second -notmatch '\(540x960 points at 1x\)') {
   throw "restart is not 540x960: $second"
 }
 $fresh = Join-Path $OutDir 'fresh-default.png'
-$script:workForProbe = Join-Path $work 'fresh'
-New-Item -ItemType Directory -Force -Path $script:workForProbe | Out-Null
+$freshProject = Join-Path $work 'fresh'
+$freshBin = Join-Path $freshProject 'zig-out\bin'
+New-Item -ItemType Directory -Force -Path $freshBin | Out-Null
+$script:exeForProbe = Join-Path $freshBin 'otto-lite.exe'
+Copy-Item -LiteralPath $sourceExe -Destination $script:exeForProbe
+Copy-Item -LiteralPath $sourceHelper -Destination (Join-Path $freshBin 'otto-thumb-host.exe')
 $third = Invoke-Hidden ('--settings-probe --nanoui-snapshot="' + $fresh + '" --nanoui-wait=1')
 if ($third -notmatch '\(540x960 points at 1x\)') {
   throw "fresh default is not 540x960: $third"

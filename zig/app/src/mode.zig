@@ -5,21 +5,20 @@
 //!   3. 其它 → installed
 //!
 //! 为了能单测，判定与路径拼装都是纯函数（`detectFrom` / `dataDirFor` /
-//! `libraryPathFor`）：输入只有 exe 路径、标记是否存在，以及一个只含
-//! `%APPDATA%` / `%LOCALAPPDATA%` / `%TEMP%` 的 `Env`。碰文件系统的只有
-//! `markerExists`，碰进程环境的只有 `environment`——两个薄封装，加起来不到
-//! 四十行。
+//! `libraryPathFor`）：输入只有 exe 路径、标记是否存在，以及一个 `Env`。
+//! 当前三种形态的数据目录都只由 exe 位置决定；`Env` 仅保留在纯函数签名中，
+//! 不再用来寻找 dev 数据目录。碰文件系统的只有 `markerExists`。
 //!
 //! 三种形态的数据目录：
-//!   * dev        `%LOCALAPPDATA%\OTTO\dev`（没有 LOCALAPPDATA 时 `%TEMP%\OTTO-dev`）；
+//!   * dev        `<zig-out 上一级>\.otto-dev`，开发数据留在项目目录，不写用户目录；
 //!                默认库仍是 `fixtures/library.json`（相对 cwd，源码里的 fixture）
 //!   * portable  `<exe 目录>\data`
 //!   * installed `<安装根>\data`，exe 必须位于 `<安装根>\app`；缓存位于 `<安装根>\cache`
 //!
 //! installed 不读 `%APPDATA%\OTTO`，也不从旧结构迁移。安装根完全由 exe 位置推导。
 //!
-//! **编译产物（`zig-out`）不承载任何运行数据。** dev 的数据在开发者的本地目录里，
-//! 删掉它不影响源码；从 `zig-out/bin` 拷 exe 出去也不会带上一份别人的设置。
+//! **编译产物（`zig-out`）不承载任何运行数据。** dev 数据位于源码树内、
+//! `zig-out` 之外的 `.otto-dev`；该目录已加入 `.gitignore`，删掉不影响源码。
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -43,8 +42,6 @@ pub const Mode = enum {
 /// 便携版的唯一判据：与 exe 同目录。
 pub const portable_marker = "otto-portable.flag";
 
-/// dev 的产品目录名；installed 不再使用任何 APPDATA 子目录。
-pub const installed_dir_name = "OTTO";
 /// installed 的固定程序子目录：`<安装根>\app\otto-lite.exe`。
 pub const install_app_dir_name = "app";
 
@@ -57,13 +54,8 @@ pub const library_file_name = "library.json";
 /// 下载好的安装包放在 `<数据目录>\updates\`。
 pub const updates_dir_name = "updates";
 
-/// dev 数据目录在 `%LOCALAPPDATA%` 下的段名：`<LOCALAPPDATA>\OTTO\dev`。
-pub const dev_dir_name = "dev";
-/// 没有 `LOCALAPPDATA` 时的临时目录名：`%TEMP%\OTTO-dev`。
-pub const dev_temp_dir_name = "OTTO-dev";
-
-/// 进程环境里路径相关的几个值。纯函数只读它，不自己读环境变量。
-/// 字符串由 `environment` 分配、`deinit` 释放；`dataDirFor` 只借用。
+/// 纯函数的可选环境输入。当前路径计算不读取它；保留在签名里是为了让
+/// “即使提供了用户目录也不能被使用”这一约束可以直接写成测试。
 pub const Env = struct {
     appdata: ?[]const u8 = null,
     local_appdata: ?[]const u8 = null,
@@ -101,25 +93,16 @@ pub fn hasZigOutSegment(exe_path: []const u8) bool {
     return false;
 }
 
-/// 纯路径：dev 数据目录。
-///
-///   * 有 `LOCALAPPDATA` → `%LOCALAPPDATA%\OTTO\dev`
-///   * 没有 → `%TEMP%\OTTO-dev`
-///   * 两个都没有 → null（调用方退回内存态并打日志，不猜当前目录）
-///
-/// 放在这里而不是 `dataDirFor` 里，是为了让“退回临时目录”这一条也能被单测覆盖。
-pub fn devDataDirFor(
-    allocator: std.mem.Allocator,
-    local_appdata: ?[]const u8,
-    temp: ?[]const u8,
-) !?[]u8 {
-    if (local_appdata) |base| {
-        if (base.len > 0) return try std.fs.path.join(allocator, &.{ base, installed_dir_name, dev_dir_name });
-    }
-    if (temp) |base| {
-        if (base.len > 0) return try std.fs.path.join(allocator, &.{ base, dev_temp_dir_name });
-    }
-    return null;
+/// 从 exe 路径推导开发数据目录：`<zig-out 的上一级>\.otto-dev`。
+/// 例如 `C:\src\otto-zig-lite\zig\app\zig-out\bin\otto-lite.exe`
+/// → `C:\src\otto-zig-lite\zig\app\.otto-dev`。
+/// 路径里没有完整 `zig-out` 段时返回 null，不回退用户目录。
+pub fn devDataDirFromExe(allocator: std.mem.Allocator, exe_path: []const u8) !?[]u8 {
+    const bin_dir = std.fs.path.dirname(exe_path) orelse return null;
+    const zig_out = std.fs.path.dirname(bin_dir) orelse return null;
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(zig_out), "zig-out")) return null;
+    const project = std.fs.path.dirname(zig_out) orelse return null;
+    return try std.fs.path.join(allocator, &.{ project, ".otto-dev" });
 }
 
 /// installed 的安装根。只认固定的 `app` 子目录，避免把任意绿色 exe 的父目录
@@ -135,16 +118,17 @@ pub fn installRootFor(allocator: std.mem.Allocator, exe_path: []const u8) ![]u8 
 
 /// 纯路径：形态 → 数据目录。
 ///
-/// dev 的数据在开发者的 `%LOCALAPPDATA%` 下，**不在 `zig-out` 里**；
-/// installed 由 `<根>\app\otto-lite.exe` 推出 `<根>\data`，不读取环境变量中的旧路径。
+/// dev 的数据在项目内的 `.otto-dev`，**不在 `zig-out` 里，也不读用户目录**；
+/// installed 由 `<根>\app\otto-lite.exe` 推出 `<根>\data`。
 pub fn dataDirFor(
     allocator: std.mem.Allocator,
     mode: Mode,
     exe_path: []const u8,
     env: Env,
 ) !?[]u8 {
+    _ = env;
     switch (mode) {
-        .dev => return try devDataDirFor(allocator, env.local_appdata, env.temp),
+        .dev => return try devDataDirFromExe(allocator, exe_path),
         .portable => {
             const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
             return try std.fs.path.join(allocator, &.{ exe_dir, "data" });
@@ -182,10 +166,7 @@ pub fn updatesDir(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     const mode = try detect(allocator, io, exe_path);
-    var env = try environment(allocator);
-    defer env.deinit(allocator);
-    if (mode == .dev) logDevFallback(env);
-    return updatesDirFor(allocator, mode, exe_path, env);
+    return updatesDirFor(allocator, mode, exe_path, .{});
 }
 
 /// 纯路径：形态 → 默认库文件。
@@ -222,7 +203,7 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, exe_path: []const u8) !M
     return detectFrom(exe_path, markerExists(allocator, io, exe_path));
 }
 
-/// 薄封装：形态 → 数据目录（读 %APPDATA% / %LOCALAPPDATA% / %TEMP%）。
+/// 薄封装：形态 → 数据目录。dev 由 exe 所在的项目路径决定，不读取用户目录。
 pub fn dataDir(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -230,10 +211,7 @@ pub fn dataDir(
     exe_path: []const u8,
 ) !?[]u8 {
     _ = io; // 保留参数：将来数据目录可能需要 Io（例如跟随重定向目录）。
-    var env = try environment(allocator);
-    defer env.deinit(allocator);
-    if (mode == .dev) logDevFallback(env);
-    return dataDirFor(allocator, mode, exe_path, env);
+    return dataDirFor(allocator, mode, exe_path, .{});
 }
 
 /// 启动时的默认库位置：dev 用 fixtures，其它在数据目录下。
@@ -242,10 +220,7 @@ pub fn defaultLibraryPath(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     const exe_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(exe_path);
     const mode = try detect(allocator, io, exe_path);
-    var env = try environment(allocator);
-    defer env.deinit(allocator);
-    if (mode == .dev) logDevFallback(env);
-    return libraryPathFor(allocator, mode, exe_path, env);
+    return libraryPathFor(allocator, mode, exe_path, .{});
 }
 
 /// 启动/自检真正打开的默认库（`defaultLibraryPath` 之上再看一眼 `.otto`）。
@@ -384,50 +359,4 @@ pub fn fontCachePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
     const base = (try startupCacheBaseDir(allocator, io)) orelse return null;
     defer allocator.free(base);
     return fontCachePathFor(allocator, base);
-}
-
-/// 读进程环境里的两个 appdata 与临时目录。
-///
-/// `std.process.Init.environ_map` 只在 `main` 的签名里可见，而这里的函数签名
-/// 不想把环境变量一路穿透下去；Zig 0.17 的 `Environ` 允许直接读进程环境块。
-/// 非 Windows 目标没有这几个概念，返回空 Env。
-fn environment(allocator: std.mem.Allocator) !Env {
-    var env: Env = .{};
-    errdefer env.deinit(allocator);
-    var map = switch (builtin.os.tag) {
-        .windows => std.process.Environ.createMap(.{ .block = .global }, allocator) catch return env,
-        else => return env,
-    };
-    defer map.deinit();
-    env.appdata = try dupeEnv(allocator, &map, "APPDATA");
-    env.local_appdata = try dupeEnv(allocator, &map, "LOCALAPPDATA");
-    env.temp = try dupeEnv(allocator, &map, "TEMP");
-    return env;
-}
-
-fn dupeEnv(
-    allocator: std.mem.Allocator,
-    map: *const std.process.Environ.Map,
-    name: []const u8,
-) !?[]u8 {
-    const value = map.get(name) orelse return null;
-    if (value.len == 0) return null;
-    return try allocator.dupe(u8, value);
-}
-
-/// 一次进程只提醒一次：启动时 `defaultLibraryPath` / `dataDir` / 缓存路径
-/// 会各查一次环境，重复的日志只会淹没真正的那一行。
-var dev_fallback_logged = false;
-
-/// 没有 `LOCALAPPDATA` 时只打一行日志：dev 数据目录退到了临时目录，
-/// 这一点必须让开发者看见（但绝不因此让程序起不来）。
-fn logDevFallback(env: Env) void {
-    if (env.local_appdata != null) return;
-    if (dev_fallback_logged) return;
-    dev_fallback_logged = true;
-    if (env.temp != null) {
-        std.debug.print("otto-lite: LOCALAPPDATA 未设置，dev 数据目录退回 %TEMP%\\OTTO-dev\n", .{});
-    } else {
-        std.debug.print("otto-lite: LOCALAPPDATA / TEMP 都没有，dev 数据目录不可用（内存态）\n", .{});
-    }
 }

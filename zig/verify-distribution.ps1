@@ -1,4 +1,4 @@
-# 三形态审计：dev / portable / installed。所有数据都在临时目录，旧 APPDATA 只放假毒丸。
+﻿# 三形态审计：dev / portable / installed。所有数据都在临时目录，旧 APPDATA 只放假毒丸。
 [CmdletBinding()]
 param(
   [string]$Zig = 'C:\Users\30680\zig\zig-x86_64-windows-0.17.0\zig.exe',
@@ -124,11 +124,16 @@ try {
     Sort-Object Name | ForEach-Object { $_.Name + '|' + $_.Length + '|' + (Get-Sha $_.FullName) })
 
   Write-Output '== dev =='
-  Assert-Version 'dev' $script:exe 'dev'
-  $devSettings = Join-Path $script:fakeLocal 'OTTO\dev\settings.json'
-  Write-Settings 'dev' $script:exe $devSettings (Join-Path $script:fakeLocal 'OTTO\dev\cache\thumbs')
-  Add-Check 'dev' 'fixture library and zig-out data stay untouched' (
+  $realDevSettings = Join-Path $script:app '.otto-dev\settings.json'
+  $realDevSettingsHash = Get-Sha $realDevSettings
+  $devProject = Join-Path $script:temp 'dev-project'
+  $devExe = Copy-Form (Join-Path $devProject 'zig-out\bin') $false
+  Assert-Version 'dev' $devExe 'dev'
+  $devData = Join-Path $devProject '.otto-dev'
+  Write-Settings 'dev' $devExe (Join-Path $devData 'settings.json') (Join-Path $devData 'cache\thumbs')
+  Add-Check 'dev' 'fixture, zig-out, and real dev settings stay untouched' (
     (Get-Sha $fixture) -eq $fixtureHash -and
+    (Get-Sha $realDevSettings) -eq $realDevSettingsHash -and
     -not (Test-Path -LiteralPath (Join-Path $script:app 'zig-out\bin\data')))
   Complete-Form 'dev'
 

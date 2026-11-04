@@ -31,7 +31,7 @@ test "zig-out 必须是完整路径段" {
     try testing.expect(!mode.hasZigOutSegment("C:\\src\\zig_out\\otto-lite.exe"));
 }
 
-test "数据目录：dev 在 LOCALAPPDATA，portable 在 exe 旁，installed 在单根 data" {
+test "数据目录：dev 在项目内，portable 在 exe 旁，installed 在单根 data" {
     const env = Env{
         .appdata = "C:\\Users\\me\\AppData\\Roaming",
         .local_appdata = "C:\\Users\\me\\AppData\\Local",
@@ -40,7 +40,7 @@ test "数据目录：dev 在 LOCALAPPDATA，portable 在 exe 旁，installed 在
 
     const dev = (try mode.dataDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", env)).?;
     defer testing.allocator.free(dev);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\OTTO\\dev", dev);
+    try testing.expectEqualStrings("C:\\src\\.otto-dev", dev);
 
     const portable = (try mode.dataDirFor(testing.allocator, .portable, "D:\\tools\\otto\\otto-lite.exe", env)).?;
     defer testing.allocator.free(portable);
@@ -53,32 +53,23 @@ test "数据目录：dev 在 LOCALAPPDATA，portable 在 exe 旁，installed 在
     try testing.expect(std.mem.indexOf(u8, installed, "Roaming") == null);
 }
 
-test "dev 数据目录不在 zig-out 下（编译产物不承载任何运行数据）" {
-    const dev = (try mode.dataDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", .{
+test "dev 数据目录在项目内 .otto-dev，不写 zig-out 或用户目录" {
+    const dev = (try mode.dataDirFor(testing.allocator, .dev, "C:\\src\\project\\zig-out\\bin\\otto-lite.exe", .{
         .local_appdata = "C:\\Users\\me\\AppData\\Local",
+        .temp = "C:\\Temp",
     })).?;
     defer testing.allocator.free(dev);
 
-    // 路径本身必须是开发者本地目录，而不是 exe 所在的构建目录。
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\OTTO\\dev", dev);
+    try testing.expectEqualStrings("C:\\src\\project\\.otto-dev", dev);
     try testing.expect(!mode.hasZigOutSegment(dev));
-    try testing.expect(std.mem.indexOf(u8, dev, "zig-out") == null);
+    try testing.expect(std.mem.indexOf(u8, dev, "AppData") == null);
 }
 
-test "dev 没有 LOCALAPPDATA 时退回 %TEMP%\\OTTO-dev，两个都没有就是 null" {
-    const fallback = (try mode.devDataDirFor(testing.allocator, null, "C:\\Users\\me\\AppData\\Local\\Temp")).?;
-    defer testing.allocator.free(fallback);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\Temp\\OTTO-dev", fallback);
-    try testing.expect(!mode.hasZigOutSegment(fallback));
-
-    const viaDataDir = (try mode.dataDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", .{
+test "dev 路径没有 zig-out 段时返回 null，不回退用户目录" {
+    try testing.expect((try mode.dataDirFor(testing.allocator, .dev, "C:\\tools\\otto-lite.exe", .{
+        .local_appdata = "C:\\Users\\me\\AppData\\Local",
         .temp = "C:\\Temp",
-    })).?;
-    defer testing.allocator.free(viaDataDir);
-    try testing.expectEqualStrings("C:\\Temp\\OTTO-dev", viaDataDir);
-
-    // 两个都没有：不猜当前目录，调用方退回内存态。
-    try testing.expect((try mode.dataDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", .{})) == null);
+    })) == null);
 }
 
 test "下载目录：三种形态都在各自的数据目录下，dev 不写 zig-out" {
@@ -90,14 +81,8 @@ test "下载目录：三种形态都在各自的数据目录下，dev 不写 zig
 
     const dev = (try mode.updatesDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", env)).?;
     defer testing.allocator.free(dev);
-    try testing.expectEqualStrings("C:\\Users\\me\\AppData\\Local\\OTTO\\dev\\updates", dev);
+    try testing.expectEqualStrings("C:\\src\\.otto-dev\\updates", dev);
     try testing.expect(!mode.hasZigOutSegment(dev));
-
-    const fallback = (try mode.updatesDirFor(testing.allocator, .dev, "C:\\src\\zig-out\\bin\\otto-lite.exe", .{
-        .temp = "C:\\Temp",
-    })).?;
-    defer testing.allocator.free(fallback);
-    try testing.expectEqualStrings("C:\\Temp\\OTTO-dev\\updates", fallback);
 
     const portable = (try mode.updatesDirFor(
         testing.allocator,

@@ -216,7 +216,7 @@ zig\package.ps1 -Version 0.60.0    # zig\dist\ 下出 portable.zip + setup.exe�
 | --- | --- |
 | 便携版（zip 解压） | 程序在解压目录；数据在 `<exe>\data` |
 | 安装版 | 默认根 `%LOCALAPPDATA%\Programs\OTTO`；程序在 `<根>\app`，设置在 `<根>\data\settings.json`，库在 `<根>\data\library.otto`，缓存根为 `<根>\cache` |
-| 开发版（`zig build` 产物） | `%LOCALAPPDATA%\OTTO\dev` |
+| 开发版（`zig build` 产物） | exe 在 `<项目>\zig-out\bin\otto-lite.exe` 时，数据、缓存与 `crash.log` 都在 `<项目>\.otto-dev` |
 
 安装版的默认根是当前用户目录，**不需要管理员权限**；图形安装页可以更改根，静默安装也支持把 `/D=<根>` 放在命令行最后。安装器只写 `app\`，不会创建或覆盖 `data\`、`cache\`，也不读取或迁移旧 `%APPDATA%\OTTO`。
 
