@@ -320,10 +320,6 @@ pub const Panel = struct {
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "行内缩略图 + 256px 预览合计 ≤ 48 MiB；超过上限会被夹取并提示", .{ .size = 14, .color = c.theme.muted });
-
-        ui.text(c, "关闭面板时自动保存；置顶 / 不透明度 / 预算立即生效", .{ .size = 14, .color = c.theme.muted });
-
         ui.end(c); // card
         host.end();
         shade.end();

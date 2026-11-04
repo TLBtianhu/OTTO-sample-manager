@@ -116,7 +116,7 @@ pub fn draw(c: *ui.Context, info: Info) Action {
 fn secondaryButtons(c: *ui.Context) Action {
     var action: Action = .{};
     const check_button = smallPressable(c);
-    ui.text(c, "检查更新", .{ .size = 10, .color = c.theme.muted });
+    ui.text(c, "检查更新", .{ .size = 14, .color = c.theme.muted });
     ui.end(c);
     const settings_button = smallPressable(c);
     ui.text(c, "设置", .{ .size = 10, .color = c.theme.muted });
