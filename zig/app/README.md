@@ -572,10 +572,13 @@ sentinels. It then overwrites the root with the newer installer and compares
 relative paths, sizes and SHA-256 for every file: `app` must equal a pristine new
 install, while `data` and `cache` must be byte-for-byte unchanged. The remaining
 cases prove that default `/S` removes only `app`, and that data/cache disappear
-only after an explicit choice. `-FaultDataLoss` simulates a lost settings file
-and must make the preservation check red. The test installers use `OTTO_TEST`,
-so they create no real shortcuts, registry entries, windows or focus changes;
-production uninstallers have no command-line data deletion option.
+only after an explicit choice. Each new install also proves that exactly one
+`Uninstall.exe` exists at the root (never in `app`), and that the start-menu
+shortcut and both uninstall registry values target it. `-FaultDataLoss` simulates
+a lost settings file and must make the preservation check red. The test installers
+use `OTTO_TEST`: shortcuts stay under the fake `APPDATA`, registry writes use a
+dedicated HKCU test key that is removed afterwards, and no windows or focus changes
+occur; production uninstallers have no command-line data deletion option.
 
 ### One command: health check
 

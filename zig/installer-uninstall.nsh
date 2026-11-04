@@ -9,6 +9,9 @@ Var OttoMainCheck
 Var OttoDataCheck
 Var OttoCacheCheck
 Var OttoAllCheck
+!ifdef OTTO_TEST
+  Var OttoStartMenu
+!endif
 
 Function un.onInit
   ; /S 会从临时副本运行，$EXEDIR 不是原安装位置；$INSTDIR 才保存安装根。
@@ -20,6 +23,7 @@ Function un.onInit
   StrCpy $OttoCleanData "0"
   StrCpy $OttoCleanCache "0"
 !ifdef OTTO_TEST
+  ReadEnvStr $OttoStartMenu "OTTO_TEST_START_MENU"
   ; 仅验收构建认识这个参数。生产卸载器不存在命令行清数据入口。
   ${GetOptions} $CMDLINE "/OTTO_TEST_CLEAN=" $0
   StrCmp $0 "data" 0 +3

@@ -74,16 +74,17 @@ B 站 [@_Candace_](https://space.bilibili.com/364700163)
 
 ```text
 %LOCALAPPDATA%\Programs\OTTO\
-  app\    otto-lite.exe / otto-thumb-host.exe / Uninstall.exe
+  Uninstall.exe  唯一卸载器（开始菜单与注册表指向这里）
+  app\    otto-lite.exe / otto-thumb-host.exe / README.txt / LICENSE
   data\   settings.json / library.otto
   cache\  缩略图等可再生缓存
 ```
 
 - 默认当前用户安装，**不需要管理员权限**；安装页可以更改根目录。
-- 安装器只写 `app\`，不创建或覆盖 `data\`、`cache\`。
-- 覆盖升级会替换 `app\`，**素材库、设置和缓存逐字节保留**。
-- 卸载默认只移除主程序；配置、素材库和缓存只有明确勾选才删除。
-- 静默卸载 `Uninstall.exe /S` 始终只删除 `app\`。
+- 安装器只写 `app\` 与根目录唯一卸载器，不创建或覆盖 `data\`、`cache\`。
+- 覆盖升级会替换 `app\` 并清除旧版 `app\Uninstall.exe`，**素材库、设置和缓存逐字节保留**。
+- 卸载默认只移除主程序与卸载入口；配置、素材库和缓存只有明确勾选才删除。
+- 静默卸载 `<根>\Uninstall.exe /S` 始终只删除程序侧，保留全部用户数据。
 - 安装版可手动检查更新；下载的安装包必须验证 minisign 签名后才会运行。
 
 ### 便携版

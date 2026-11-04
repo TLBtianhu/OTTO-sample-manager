@@ -19,7 +19,7 @@ param(
   [string]$OutDir = '',
   [string]$SignKey = 'C:\Users\30680\otto-keys\otto-lite.key',
   [switch]$NoSign,
-  # 可选：额外产出仅供 fresh-user 的测试安装器（无注册表/快捷方式，支持无界面清理选项）。
+  # 可选：额外产出仅供 fresh-user 的测试安装器（隔离快捷方式/专用测试注册键，支持无界面清理选项）。
   [string]$TestSetupOut = ''
 )
 
@@ -157,10 +157,12 @@ $installedReadme = @"
 OTTO Lite $Version（安装版）
 
 默认安装根是 %LOCALAPPDATA%\Programs\OTTO\（安装器中可改，不需要管理员权限）。
-程序只安装在 <根>\app\；设置与素材库在 <根>\data\，可再生的缓存位于 <根>\cache\。
+程序资产安装在 <根>\app\，唯一卸载器是 <根>\Uninstall.exe；设置与素材库在 <根>\data\，可再生的缓存位于 <根>\cache\。
+开始菜单 Uninstall OTTO Lite.lnk 与注册表卸载命令都指向根卸载器，app\ 内没有第二份。
 安装器与覆盖升级都不会创建或改动 data\cache；旧 %APPDATA%\OTTO 不读取、不迁移。
-卸载默认只删除 app\；在卸载选项页明确勾选后才会删除 data\ 或 cache\。
-静默卸载（Uninstall.exe /S）始终只删除主程序，保留全部用户数据。
+覆盖升级会整体替换 app\，同时清除旧版 app\Uninstall.exe。
+卸载默认只删除 app\ 与卸载入口；在卸载选项页明确勾选后才会删除 data\ 或 cache\。
+静默卸载（<根>\Uninstall.exe /S）始终只删除程序侧，保留全部用户数据。
 
 同目录的 otto-thumb-host.exe 是缩略图隔离进程（第三方 Shell handler 在它里面跑），
 不要单独删除：缺了它主程序会拒绝启动。
