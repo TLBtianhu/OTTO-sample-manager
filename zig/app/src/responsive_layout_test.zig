@@ -21,7 +21,7 @@ test "连续布局：各密度区间约束成立，行高来自唯一常量" {
 
 test "行高同源：样本行、树行、列表与浏览滚动共享布局来源" {
     // 编译期嵌入的接线快照：四个调用点都不能再私藏 44。
-    try testing.expect(std.mem.indexOf(u8, @embedFile("main.zig"), ".row_height = @floatFromInt(layout_plan.row.height)") != null);
+    try testing.expect(std.mem.indexOf(u8, @embedFile("frame_shared.zig"), ".row_height = @floatFromInt(layout_plan.row.height)") != null);
     try testing.expect(std.mem.indexOf(u8, @embedFile("row_ui.zig"), ".px = @floatFromInt(plan.height)") != null);
     try testing.expect(std.mem.indexOf(u8, @embedFile("library_tree_ui.zig"), ".px = @floatFromInt(responsive_layout.row_height)") != null);
     try testing.expect(std.mem.indexOf(u8, @embedFile("browse_action.zig"), "scroll.target(session, s.search.len(), @floatFromInt(s.layout.plan.row.height), view_height)") != null);
