@@ -33,6 +33,14 @@
 
 
 
+## 0.63.5
+
+- **统一新版应用图标**：文件夹 + 蓝色波形柱，生成 16/24/32/48/64/128/256 七档 RGBA ICO，四角均为真透明。
+- `otto-lite.exe`、`otto-thumb-host.exe`、NSIS 安装器、开始菜单/桌面快捷方式、卸载 DisplayIcon 与拖出图标全部使用同一套资源。
+- 主窗口创建后通过原生 Win32 `LoadImageW + WM_SETICON` 应用大/小图标；隐藏窗口 `WM_GETICON` 均非空，PE 与安装器提取图逐像素一致。
+- 图标验收覆盖各档 alpha、16px 结构、窗口可见性/焦点；默认启动验收不再主动触发 crash 对话框，旧 crash 用例改为显式 `-IncludeCrash`。
+- UI、布局、库格式与现有交互行为不变。
+
 ## 0.63.4
 
 - **架构清理：浏览 Session 与 poll/rescan 状态机分离**。目录行、路径存储、预算、选择、导航历史与生命周期留在 `browse.zig`；watcher、事件缓冲、序号水位与 `idle/rescan/replay` 协议集中到 `browse_poll.zig`。

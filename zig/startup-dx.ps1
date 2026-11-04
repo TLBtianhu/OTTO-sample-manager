@@ -1,5 +1,5 @@
-# Verify PE version/icon resources and the startup fatal-error path.
-# The crash-test MessageBox is detected by process id and closed immediately.
+# Verify PE version/icon pixels and a real hidden window's big/small icons.
+# Crash MessageBox checks are opt-in (-IncludeCrash); the default never shows one.
 # All data lives below TEMP; normal startup uses nanoui's hidden snapshot mode.
 # ASCII only: Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI.
 
@@ -7,7 +7,8 @@
 param(
   [string]$Exe = '',
   [string]$Helper = '',
-  [string]$OutDir = ''
+  [string]$OutDir = '',
+  [switch]$IncludeCrash
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,13 +42,100 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class OttoStartupDxNative {
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")]
   public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maximum);
+  [DllImport("user32.dll")]
+  public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam,
+    uint flags, uint timeoutMs, out IntPtr result);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern IntPtr LoadImage(
+    IntPtr instance, string name, uint type, int width, int height, uint flags);
+  [DllImport("user32.dll")]
+  public static extern bool DestroyIcon(IntPtr icon);
+
+  public static IntPtr LoadIconFile(string path, int width, int height) {
+    return LoadImage(IntPtr.Zero, path, 1, width, height, 0x0010);
+  }
+
+  public static IntPtr FindOttoWindow(uint processId) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+      uint owner;
+      GetWindowThreadProcessId(hWnd, out owner);
+      if (owner != processId) return true;
+      var name = new StringBuilder(64);
+      GetClassName(hWnd, name, name.Capacity);
+      if (name.ToString() != "NanoUIWindow") return true;
+      found = hWnd;
+      return false;
+    }, IntPtr.Zero);
+    return found;
+  }
+
+  public static IntPtr GetIcon(IntPtr hWnd, int kind) {
+    IntPtr result;
+    IntPtr answered = SendMessageTimeout(
+      hWnd, 0x007f, new UIntPtr((uint)kind), IntPtr.Zero,
+      0x0002, 1000, out result);
+    return answered == IntPtr.Zero ? IntPtr.Zero : result;
+  }
 }
 '@
 
+function Test-BitmapEqual($Left, $Right) {
+  if ($Left.Width -ne $Right.Width -or $Left.Height -ne $Right.Height) { return $false }
+  for ($y = 0; $y -lt $Left.Height; $y++) {
+    for ($x = 0; $x -lt $Left.Width; $x++) {
+      if ($Left.GetPixel($x, $y).ToArgb() -ne $Right.GetPixel($x, $y).ToArgb()) { return $false }
+    }
+  }
+  return $true
+}
+
+function Test-CornersTransparent($Bitmap) {
+  $points = @(
+    @(0, 0), @(($Bitmap.Width - 1), 0),
+    @(0, ($Bitmap.Height - 1)), @(($Bitmap.Width - 1), ($Bitmap.Height - 1))
+  )
+  foreach ($point in $points) {
+    if ($Bitmap.GetPixel($point[0], $point[1]).A -ne 0) { return $false }
+  }
+  return $true
+}
+
+function Get-SmallIconStructure($Bitmap) {
+  $blue = 0
+  $dark = 0
+  for ($y = 0; $y -lt $Bitmap.Height; $y++) {
+    for ($x = 0; $x -lt $Bitmap.Width; $x++) {
+      $c = $Bitmap.GetPixel($x, $y)
+      if ($c.A -lt 64) { continue }
+      if ([int]$c.B -ge [int]$c.R + 30 -and [int]$c.B -ge [int]$c.G + 10) { $blue++ }
+      $maximum = [Math]::Max($c.R, [Math]::Max($c.G, $c.B))
+      $minimum = [Math]::Min($c.R, [Math]::Min($c.G, $c.B))
+      if ($maximum -lt 200 -and $maximum - $minimum -lt 35) { $dark++ }
+    }
+  }
+  return [pscustomobject]@{ Blue = $blue; Dark = $dark }
+}
+
 # --- PE metadata and an icon extracted from the actual executable ------------
+$sourceIcon = Join-Path (Split-Path $root -Parent) 'resources\icon.ico'
+if (-not (Test-Path -LiteralPath $sourceIcon)) { throw "missing source icon: $sourceIcon" }
 foreach ($path in @($Exe, $Helper)) {
   $name = Split-Path -Leaf $path
   $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($path)
@@ -68,9 +156,58 @@ foreach ($path in @($Exe, $Helper)) {
   $bitmap = $icon.ToBitmap()
   $png = Join-Path $OutDir ($name + '.png')
   $bitmap.Save($png, [Drawing.Imaging.ImageFormat]::Png)
+  $referenceHandle = [OttoStartupDxNative]::LoadIconFile($sourceIcon, $bitmap.Width, $bitmap.Height)
+  if ($referenceHandle -eq [IntPtr]::Zero) { throw "LoadImageW failed for $sourceIcon" }
+  $referenceIcon = [Drawing.Icon]::FromHandle($referenceHandle)
+  $referenceBitmap = $referenceIcon.ToBitmap()
+  $pixelsEqual = Test-BitmapEqual $bitmap $referenceBitmap
+  $actualCorners = Test-CornersTransparent $bitmap
+  $referenceCorners = Test-CornersTransparent $referenceBitmap
+  $iconWidth = $bitmap.Width
+  $iconHeight = $bitmap.Height
+  $referenceBitmap.Dispose()
+  $referenceIcon.Dispose()
+  [void][OttoStartupDxNative]::DestroyIcon($referenceHandle)
   $bitmap.Dispose()
   $icon.Dispose()
   Add-Check "$name icon" ((Test-Path -LiteralPath $png) -and (Get-Item -LiteralPath $png).Length -gt 0) $png
+  Add-Check "$name PE icon pixels + alpha" ($pixelsEqual -and $actualCorners -and $referenceCorners) (
+    'size={0}x{1}; pixels_equal={2}; actual_corners_alpha0={3}; source_corners_alpha0={4}' -f
+    $iconWidth, $iconHeight, $pixelsEqual, $actualCorners, $referenceCorners)
+}
+
+# --- Source ICO directory, every frame's corners, and 16px structure ---------
+$iconBytes = [IO.File]::ReadAllBytes($sourceIcon)
+$iconCount = [BitConverter]::ToUInt16($iconBytes, 4)
+$declaredSizes = @()
+for ($i = 0; $i -lt $iconCount; $i++) {
+  $offset = 6 + $i * 16
+  $width = if ($iconBytes[$offset] -eq 0) { 256 } else { [int]$iconBytes[$offset] }
+  $height = if ($iconBytes[$offset + 1] -eq 0) { 256 } else { [int]$iconBytes[$offset + 1] }
+  $declaredSizes += ('{0}x{1}' -f $width, $height)
+}
+$expectedSizes = '16x16,24x24,32x32,48x48,64x64,128x128,256x256'
+Add-Check 'source ICO directory sizes' (($declaredSizes -join ',') -eq $expectedSizes) ($declaredSizes -join ',')
+foreach ($size in @(16, 24, 32, 48, 64, 128, 256)) {
+  $handle = [OttoStartupDxNative]::LoadIconFile($sourceIcon, $size, $size)
+  $frameIcon = if ($handle -eq [IntPtr]::Zero) { $null } else { [Drawing.Icon]::FromHandle($handle) }
+  $frame = if ($frameIcon) { $frameIcon.ToBitmap() } else { $null }
+  $frameOk = $frame -and $frame.Width -eq $size -and $frame.Height -eq $size
+  $cornersOk = $frame -and (Test-CornersTransparent $frame)
+  Add-Check "source ICO ${size}px decode + alpha" ($frameOk -and $cornersOk) (
+    'decoded={0}; corners_alpha0={1}' -f $frameOk, $cornersOk)
+  if ($size -eq 16 -and $frame) {
+    $smallPng = Join-Path $OutDir 'icon-16.png'
+    $frame.Save($smallPng, [Drawing.Imaging.ImageFormat]::Png)
+    $structure = Get-SmallIconStructure $frame
+    Add-Check 'source ICO 16px folder/blue-bar structure' (
+      $structure.Blue -ge 4 -and $structure.Dark -ge 20) (
+      'blue_chroma_pixels={0}; neutral_dark_pixels={1}; image={2}' -f
+      $structure.Blue, $structure.Dark, $smallPng)
+  }
+  if ($frame) { $frame.Dispose() }
+  if ($frameIcon) { $frameIcon.Dispose() }
+  if ($handle -ne [IntPtr]::Zero) { [void][OttoStartupDxNative]::DestroyIcon($handle) }
 }
 
 function New-Case([string]$Name, [bool]$Portable) {
@@ -95,7 +232,7 @@ $normalLog = Join-Path $normalDir 'data\crash.log'
 $snapshot = Join-Path $OutDir 'normal.png'
 $psi = [Diagnostics.ProcessStartInfo]::new()
 $psi.FileName = Join-Path $normalDir 'otto-lite.exe'
-$psi.Arguments = '--nanoui-snapshot="' + $snapshot + '" --nanoui-wait=1'
+$psi.Arguments = '--settings-probe --nanoui-snapshot="' + $snapshot + '" --nanoui-wait=3'
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $psi.RedirectStandardOutput = $true
@@ -104,6 +241,26 @@ Write-Host ('$ "{0}" {1}' -f $psi.FileName, $psi.Arguments)
 $process = [Diagnostics.Process]::Start($psi)
 $stdout = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEndAsync()
+$window = [IntPtr]::Zero
+$bigIcon = [IntPtr]::Zero
+$smallIcon = [IntPtr]::Zero
+for ($i = 0; $i -lt 250 -and -not $process.HasExited; $i++) {
+  $process.Refresh()
+  $window = [OttoStartupDxNative]::FindOttoWindow([uint32]$process.Id)
+  if ($window -ne [IntPtr]::Zero) {
+    $bigIcon = [OttoStartupDxNative]::GetIcon($window, 1)
+    $smallIcon = [OttoStartupDxNative]::GetIcon($window, 0)
+    if ($bigIcon -ne [IntPtr]::Zero -and $smallIcon -ne [IntPtr]::Zero) { break }
+  }
+  Start-Sleep -Milliseconds 20
+}
+$visible = $window -ne [IntPtr]::Zero -and [OttoStartupDxNative]::IsWindowVisible($window)
+$foreground = $window -ne [IntPtr]::Zero -and [OttoStartupDxNative]::GetForegroundWindow() -eq $window
+$hiddenIconsOk = $window -ne [IntPtr]::Zero -and $bigIcon -ne [IntPtr]::Zero -and
+  $smallIcon -ne [IntPtr]::Zero -and -not $visible -and -not $foreground
+Add-Check 'normal hidden HWND WM_GETICON big/small' $hiddenIconsOk (
+  'hwnd=0x{0:X}; big=0x{1:X}; small=0x{2:X}; visible={3}; foreground={4}' -f
+  $window.ToInt64(), $bigIcon.ToInt64(), $smallIcon.ToInt64(), $visible, $foreground)
 if (-not $process.WaitForExit(15000)) {
   $process.Kill()
   $process.WaitForExit()
@@ -117,7 +274,10 @@ if (-not $process.WaitForExit(15000)) {
 }
 $process.Dispose()
 
-# --- Trigger, identify and immediately close exactly one crash dialog --------
+# --- Optional crash dialog coverage; never run by the icon/default gate -------
+if (-not $IncludeCrash) {
+  Write-Output '[SKIP] crash MessageBox cases (pass -IncludeCrash to opt in)'
+} else {
 function Invoke-CrashCase([string]$Name, [string]$CaseExe, [string]$LocalBase, [string]$ExpectedLog) {
   $psi = [Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = $CaseExe
@@ -194,6 +354,7 @@ $portableLog = Join-Path $portableDir 'data\crash.log'
 Invoke-CrashCase 'portable' (Join-Path $portableDir 'otto-lite.exe') $portableLocal $portableLog
 Add-Check 'portable never writes LOCALAPPDATA crash.log' (
   -not (Test-Path -LiteralPath (Join-Path $portableLocal 'OTTO\crash.log'))) $portableLocal
+}
 
 if ($script:failures.Count -gt 0) {
   Write-Output ('== startup-dx: FAIL ({0}) ==' -f ($script:failures -join ', '))
