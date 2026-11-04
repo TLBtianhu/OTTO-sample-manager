@@ -4,7 +4,6 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const import_target = @import("import_target.zig");
-const library_io = @import("library_io.zig");
 const window_util = @import("window_util.zig");
 const win_window = @import("otto_win_window");
 const State = @import("main.zig").State;
@@ -95,19 +94,19 @@ pub fn removeCurrent(s: *State, c: *ui.Context) void {
     }
     if (s.remove.folder_path) |path| targets[targets.len - 1] = .{ .folder_path = path };
 
-    var result = core.removal.apply(s.gpa, s.import.library_ptr.*, targets) catch |err| {
+    var result = core.removal.apply(s.gpa, s.session.library(), targets) catch |err| {
         s.import.fail("移除失败：{s}", .{@errorName(err)});
         return;
     };
     defer result.deinit();
     if (result.report.samples == 0 and result.report.folders == 0) return;
 
-    var target = import_target.resolve(s.gpa, s.import.library_path, null) catch {
+    var target = import_target.resolve(s.gpa, s.session.path(), null) catch {
         s.import.fail("移除失败：OutOfMemory", .{});
         return;
     };
     defer target.deinit(s.gpa);
-    _ = library_io.saveWith(s.import.io, s.gpa, target.path, &result.library) catch |err| {
+    _ = s.session.save(target.path, &result.library) catch |err| {
         s.import.fail("移除失败：{s}", .{@errorName(err)});
         return;
     };
@@ -115,7 +114,7 @@ pub fn removeCurrent(s: *State, c: *ui.Context) void {
     // 保存已经成功，先停掉并清掉当前预览/播放，再销毁旧 Library/Live。
     // Panel 的 generation 递增后，工作线程旧结果也不会落回新选择。
     s.preview.sync(null, .{});
-    s.import.reloadSaved(target.path) catch |err| {
+    s.session.reloadSaved(target.path) catch |err| {
         s.import.fail("移除已保存，但重载失败：{s}", .{@errorName(err)});
         return;
     };

@@ -135,7 +135,7 @@ zig build -Drelease=true
 ```powershell
 cd zig\core   ; zig build test   # 94 项：数据层
 cd zig\ports  ; zig build test   # 192 项：Win32 接口
-cd zig\app    ; zig build test   # 413 项：应用层
+cd zig\app    ; zig build test   # 416 项：应用层
 ```
 
 ### 发布前验收

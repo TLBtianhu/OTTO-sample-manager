@@ -81,6 +81,8 @@ test {
     // 启动库加载的错误生命周期：失败时也只释放已初始化的库占位。
     _ = @import("app_boot.zig");
     _ = @import("library_io.zig");
+    // 库会话的唯一所有权、失败回滚、单次释放与浏览只读边界。
+    _ = @import("library_session_test.zig");
     // 导入流水线：id 规则、两条去重、Sample 装配、端到端（真临时目录）。
     _ = @import("import_cli.zig");
     _ = @import("import_cli_test.zig");
