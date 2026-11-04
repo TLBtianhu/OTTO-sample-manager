@@ -1,6 +1,6 @@
 //! 开流总帧数未知的非渐进预览：第一遍计数，第二遍按真帧数有界算峰值。
 const std = @import("std");
-const preview = @import("../preview.zig");
+const audio_session = @import("../preview_audio_session.zig");
 const decode = @import("decode.zig");
 const session_mod = @import("session.zig");
 const stream_peaks = @import("stream_peaks.zig");
@@ -16,7 +16,7 @@ pub fn build(
     stream: *decode.Stream,
     path: []const u8,
     options: decode.Options,
-) (decode.Error || player.Error)!preview.AudioSession {
+) (decode.Error || player.Error)!audio_session.AudioSession {
     const requested = residency.requested();
     if (requested == .full_decode) {
         try stream.retainAll();

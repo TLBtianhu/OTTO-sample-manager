@@ -40,7 +40,7 @@ const player_mod = @import("audio/player.zig");
 const session_mod = @import("audio/session.zig");
 const mf_audio = @import("providers/mf_audio.zig");
 const native_audio = @import("providers/native_audio.zig");
-const preview = @import("preview.zig");
+const audio_session = @import("preview_audio_session.zig");
 const audio_provider = @import("providers/audio.zig");
 
 const sleep_ms: u64 = 300;
@@ -223,7 +223,7 @@ fn sessionFailed(err: player_mod.Error) u8 {
 /// 会话已经建好之后的公共时间轴：play → (可选 seek) → 停 → 断言。
 fn playSession(
     init: std.process.Init,
-    session: *preview.AudioSession,
+    session: *audio_session.AudioSession,
     seek_at_ms: ?u64,
 ) !u8 {
     const play_started = std.Io.Clock.Timestamp.now(init.io, .awake);
@@ -265,7 +265,7 @@ fn playSession(
 }
 
 /// `--seek-at`：播 200 ms → seek → 立刻读位置 → 等自然播完。
-fn seekRun(init: std.process.Init, session: *preview.AudioSession, target_ms: u64) !u8 {
+fn seekRun(init: std.process.Init, session: *audio_session.AudioSession, target_ms: u64) !u8 {
     try sleepMs(init, seek_after_ms);
     const before = session.positionMs();
     // 目标超过时长时 Player/AudioSession 会钳到 duration；断言也跟着钳。

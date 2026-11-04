@@ -63,7 +63,9 @@
 //! `finish` 终检并交出所有权。两条路径共用同一个容器识别、下混、512 MiB 上限与
 //! 流式 Reader，不会因为"预览要渐进"而分叉出第二套解码器。
 //!
-//! ## 错误 → 四态（与 `preview.zig` 的规则逐字对应）
+//! ## 错误与 provider 四态的边界
+//! 本文件只返回具名解码错误，不 import 预览契约；`providers/audio_decline.zig`
+//! 在依赖边缘把错误映射成 `preview.Reason`，规则与 `preview.zig` 逐字对应。
 //!
 //!   * `FileNotFound`                                  → `file_missing`
 //!   * `InvalidPath` / `Unsupported` / `UnexpectedFormat` → `unsupported`
@@ -83,11 +85,10 @@
 
 const std = @import("std");
 const zig_audio = @import("zig_audio");
-const preview = @import("../preview.zig");
+const pcm_mod = @import("pcm.zig");
 const audio_file = @import("file.zig");
 const downmix = @import("downmix.zig");
 const file_reader_mod = @import("file_reader.zig");
-const session_mod = @import("session.zig");
 
 /// 整段 PCM 的上限。512 MiB 约等于 25 分钟 44.1 kHz/16-bit 立体声，和 MF 的
 /// 上限一致；再大就该流式（M2+）。
@@ -132,7 +133,7 @@ pub fn decode(
     allocator: std.mem.Allocator,
     path: []const u8,
     options: Options,
-) Error!session_mod.Decoded {
+) Error!pcm_mod.Decoded {
     var stream: Stream = undefined;
     try stream.init(allocator, path, options);
     defer stream.deinit();
@@ -290,7 +291,7 @@ pub const Stream = struct {
     }
 
     /// 终检 + 把 PCM 交出去。所有权转移之后 `self.pcm` 为空，`deinit` 不会重复释放。
-    pub fn finish(self: *Stream) Error!session_mod.Decoded {
+    pub fn finish(self: *Stream) Error!pcm_mod.Decoded {
         if (self.frames == 0) return error.Empty;
         // 库承诺 `read` 只按整帧交付；下混后也必须是整帧。
         if (self.pcm.items.len % self.out_block_bytes != 0) return error.Corrupt;
@@ -375,19 +376,4 @@ fn reservePcmLimit(
     // 空文件不预留：`Empty` 会在读完时给出，而不是在这里分配 0 字节。
     if (target == 0) return;
     try pcm.ensureTotalCapacityPrecise(allocator, @intCast(target));
-}
-
-/// 解码错误 → 四态原因。只有 OOM 不是原因（它是 `preview.Error`，调用方先挡）。
-/// 这个函数是音频链上**唯一**的映射表，wasapi-pcm 与 native-audio 都从这里取，
-/// 两份 provider 不会一个把 `Unsupported` 当 failed、另一个当 unsupported。
-///
-/// `Unsupported` 同时覆盖两种时机：`open` 就答不了（容器/编码不认），以及**读到一半**
-/// 才答不了（Opus 的多帧包）。两者都是"这个编码我没有"，不是
-/// "文件坏了"，所以都落 `unsupported`——谢绝，注册表继续问下一个。
-pub fn reason(err: Error) preview.Reason {
-    return switch (err) {
-        error.FileNotFound => .file_missing,
-        error.InvalidPath, error.Unsupported, error.UnexpectedFormat => .unsupported,
-        else => .failed,
-    };
 }

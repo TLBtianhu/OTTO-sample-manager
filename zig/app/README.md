@@ -191,8 +191,10 @@ strip. At full height it has three parts:
 - the registry decides the preview, not the view:
 
 ```
-src/preview.zig          the contract: Kind / Request / Outcome (5 branches) / Provider / Registry
-src/providers/thumb.zig  Windows shell thumbnail, gated by otto_caps
+src/preview.zig             the contract: Kind / Request / Outcome (5 branches) / Provider / Registry
+src/preview_audio_session.zig  AudioProgress vtable + PCM/waveform/playback/seek/lifecycle
+src/preview_bitmap.zig      shared BGRA payload shape (no reverse import into the contract)
+src/providers/thumb.zig     Windows shell thumbnail, gated by otto_caps
 src/providers/root.zig   the one provider list (order = preference)
 src/preview_snapshot.zig the Sample copy a worker may keep (no dangling strings)
 src/sample_facts.zig     name / size / duration / path / extension — not a provider

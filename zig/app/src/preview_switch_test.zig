@@ -66,7 +66,7 @@ fn makeSample(path: []const u8) core.model.Sample {
     };
 }
 
-test "连续切换 10 个文件：最后一个赢、旧结果不覆盖、无泄漏" {
+test "连续切换 10 个文件（含播放中）：最后一个赢、旧结果不覆盖、无泄漏" {
     if (!ffmpegAvailable()) return error.SkipZigTest;
 
     const kit = [_][]const u8{
@@ -102,10 +102,41 @@ test "连续切换 10 个文件：最后一个赢、旧结果不覆盖、无泄�
 
     // 像 UI 的 150ms 一拍那样：提交后立刻 poll 一次；3ms 的间隔足够让前几个
     // 开流完成、被接手，再被下一次切换取消。
-    for (&samples) |*sample| {
+    for (&samples, 0..) |*sample, index| {
         panel.sync(sample, .{});
         _ = panel.poll();
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(3), .awake) catch {};
+
+        if (index == 0) {
+            // 第一个短音频先真正起播，再由下一次 sync 在播放中切走。无端点时
+            // 至少必须落到具名设备错误，不能把“没播成”冒充播放中切换。
+            var waits: usize = 0;
+            while (panel.current == null and waits < 400) : (waits += 1) {
+                _ = panel.poll();
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+            }
+            try testing.expect(panel.current != null);
+            switch (panel.current.?) {
+                .audio => |*session| session.waitComplete(),
+                else => return error.ExpectedAudio,
+            }
+            _ = panel.playCurrent();
+            waits = 0;
+            while (!panel.isPlaying() and waits < 2000) : (waits += 1) {
+                _ = panel.poll();
+                switch (panel.current.?) {
+                    .audio => |*session| if (session.audioError() != null) break,
+                    else => return error.ExpectedAudio,
+                }
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+            const playing_before_switch = panel.isPlaying();
+            switch (panel.current.?) {
+                .audio => |*session| try testing.expect(playing_before_switch or session.audioError() != null),
+                else => return error.ExpectedAudio,
+            }
+            std.debug.print("otto-lite: preview-switch playing_before_switch={} next_generation=2\n", .{playing_before_switch});
+        }
     }
 
     // 等第 10 个答案落地并解完。viper.mp3 是 41 秒、无 Xing → 整段解码 ~150ms。

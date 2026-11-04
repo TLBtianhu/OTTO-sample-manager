@@ -1,17 +1,11 @@
 //! `preview.zig` 的测试：注册表顺序、谢绝（`none.*`）后的继续查找、最终原因优先级。
-//!
-//! 为什么单独一个文件：契约本身（`preview.zig`）原本是 635 行——已经超过单文件
-//! 600 行的上限，而波形字段只会让它更长。这一节只依赖契约的公开 API、不需要内部
-//! 实现，拆出来之后两边都留有余量。只在 `tests.zig` 里被 import，`--preview` / UI
-//! 不拉它。
+//! 音频会话的 seek / 懒 Player / 生命周期测试位于 `preview_audio_session_test.zig`。
 //!
 //! 假 provider 的计数是文件级 var：测试串行执行，每个测试开头清零。
 
 const std = @import("std");
 const core = @import("otto_core");
 const preview = @import("preview.zig");
-const session_mod = @import("audio/session.zig");
-const player = @import("audio/player.zig");
 
 const testing = std.testing;
 
@@ -351,106 +345,4 @@ test "countLines：末尾没有换行时按实际行数算" {
     try testing.expectEqual(@as(usize, 1), preview.countLines("名称: Kick"));
     try testing.expectEqual(@as(usize, 5), preview.countLines("a\nb\nc\nd\ne"));
     try testing.expectEqual(@as(usize, 2), preview.countLines("a\n"));
-}
-
-fn noEndpoint(
-    _: std.mem.Allocator,
-    _: []const u8,
-    _: u32,
-    _: u16,
-    _: u16,
-    _: bool,
-    _: ?*@import("audio/pcm_source.zig").Source,
-    _: u64,
-) player.Error!*player.Player {
-    return error.NoAudioEndpoint;
-}
-
-var real_players_created: u32 = 0;
-
-fn realPlayer(
-    allocator: std.mem.Allocator,
-    pcm: []const u8,
-    sample_rate: u32,
-    channels: u16,
-    bits: u16,
-    float: bool,
-    source: ?*@import("audio/pcm_source.zig").Source,
-    total_frames: u64,
-) player.Error!*player.Player {
-    const created = if (source) |value|
-        try player.Player.createSource(allocator, value, sample_rate, channels, bits, total_frames)
-    else
-        try player.Player.create(allocator, pcm, sample_rate, channels, bits, float);
-    real_players_created += 1;
-    return created;
-}
-
-test "AudioSession.seek：没有播放设备时也钳位并记住位置（下次 play 的起点）" {
-    var session: preview.AudioSession = .{
-        .pcm = &.{},
-        .sample_rate = 22050,
-        .channels = 1,
-        .bits = 16,
-        .duration_ms = 800,
-    };
-    defer session.deinit(testing.allocator);
-
-    try session.seek(600);
-    try testing.expectEqual(@as(u64, 600), session.positionMs());
-    // 超出时长：钳到 duration，不产生越界位置。
-    try session.seek(5000);
-    try testing.expectEqual(@as(u64, 800), session.positionMs());
-    // 0 是合法位置。
-    try session.seek(0);
-    try testing.expectEqual(@as(u64, 0), session.positionMs());
-
-    // 同一契约测试继续覆盖无设备与生命周期，保持既有测试总数。
-    // testing.allocator 在返回时断言 20 次开关（半数播放）无泄漏。
-    real_players_created = 0;
-    for (0..20) |index| {
-        const bytes = try testing.allocator.alloc(u8, 16);
-        @memset(bytes, 0);
-        var decoded: session_mod.Decoded = .{
-            .pcm = bytes,
-            .sample_rate = 22050,
-            .channels = 2,
-            .bits = 16,
-            .format = .pcm,
-            .frames = 4,
-            .duration_ms = 1,
-        };
-        defer decoded.deinit(testing.allocator);
-        var lazy_session = try session_mod.build(testing.allocator, &decoded);
-        defer lazy_session.deinit(testing.allocator);
-
-        // build 只解码/算峰值/渲染；没有播放意图时不创建 Player。
-        try testing.expect(lazy_session.player == null);
-        try testing.expect(lazy_session.waveform.pixels.len != 0);
-        if (index % 2 == 0) continue;
-        // 第 5 轮尽量走真实成功路径；其它轮注入无端点。真实 Player 尚未起播就 deinit。
-        lazy_session.lazy.factory = if (index == 5) realPlayer else noEndpoint;
-
-        if (index == 1) {
-            // 同步 API 保留具名错误；设备失败不能吃掉已经渲染的波形。
-            try testing.expectError(error.NoAudioEndpoint, lazy_session.play());
-            try testing.expectEqual(error.NoAudioEndpoint, lazy_session.audioError().?);
-        } else {
-            try lazy_session.startPlayback();
-            try testing.expect(lazy_session.isStartingAudio());
-            if (index == 3) {
-                var waits: usize = 0;
-                while (lazy_session.isStartingAudio() and waits < 2000) : (waits += 1) {
-                    _ = lazy_session.pump();
-                    std.Io.sleep(testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-                }
-                try testing.expect(waits < 2000);
-                try testing.expectEqual(error.NoAudioEndpoint, lazy_session.audioError().?);
-            }
-            // 其它奇数轮在创建途中直接 deinit：join worker，不能漏 Starter/Player。
-        }
-        try testing.expect(lazy_session.waveform.pixels.len != 0);
-    }
-    std.debug.print("otto-lite: lazy-lifecycle cycles=20 play_requests=10 real_player_created={d}\n", .{real_players_created});
-    if (real_players_created != 0) try testing.expectEqual(@as(u32, 1), real_players_created);
 }
