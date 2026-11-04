@@ -33,6 +33,9 @@ zig/keys/*.key
 *.key.enc
 zig/dist/
 
+# 图标生成的源图只留在工作区；可提交产物在 resources/icon.ico 与 drag-icon.png
+/artifacts/otto-icon-transparent.png
+
 # 第三方库的构建缓存不属于仓库（vendor 现在是普通文件）
 zig/vendor/**/.zig-cache/
 zig/vendor/**/zig-out/

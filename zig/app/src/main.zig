@@ -6,6 +6,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const app_boot = @import("app_boot.zig");
+const app_icon = @import("app_icon.zig");
 const bench_mod = @import("bench.zig");
 const bench_scroll = @import("bench_scroll.zig");
 const browse_mod = @import("browse.zig");
@@ -412,6 +413,9 @@ fn run(init: std.process.Init) !void {
         .non_activating = options.settings_probe or options.drop_probe != null or options.set_opacity != null,
         .content = .{ .view = .init(&state, State.view) },
     });
+    // PE 资源不会自动填进 nanoui 的空 WNDCLASSEX.hIcon；真实窗口必须单独设置。
+    // 离屏 / 隐藏快照也走同一函数：有 HWND 就设置，失败仅记具名日志，不影响启动。
+    app_icon.apply(window_util.nativeHandle(state.window));
     startup_dx.mark(.first_frame);
     // 文件拖入由根节点的 acceptDrop/dropAt 接收；探针只合成一次隐藏 HDROP。
     // **浏览模式不装**：拖入 = 导入 = 写库，而浏览模式对磁盘零写入。
