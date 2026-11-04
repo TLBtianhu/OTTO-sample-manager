@@ -1,11 +1,11 @@
-//! Stage 1 的目录导航。历史只在这里改变；枚举、分页、预算和 reconcile 仍归原 Session。
+//! Stage 1 的目录导航。历史只在这里改变；枚举/分页/预算归 Session，磁盘变化合入归 browse_poll。
 //! 每次切换都是 source epoch+1，旧监听先关闭，新监听先于新枚举架好。
 
 const std = @import("std");
 const core = @import("otto_core");
 const browse = @import("browse.zig");
 const selection_mod = @import("selection.zig");
-const reconcile = @import("browse_reconcile.zig");
+const poll = @import("browse_poll.zig");
 const crumbs = @import("browse_crumbs.zig");
 const types = @import("browse_types.zig");
 const browse_dir = @import("otto_browse_dir");
@@ -106,7 +106,7 @@ const Mode = enum { push, back, forward };
 /// F5：先捕获选中身份，再 epoch+1 全量重枚举；不改历史、不清空草稿。
 pub fn refresh(session: *browse.Session, selected: *selection_mod.Selection) Error!void {
     try session.tracker.capture(session.io, session.entries.items, selected, &session.unreadable);
-    reconcile.startRescan(session, session.last_event_seq);
+    poll.requestRescan(session);
 }
 
 /// 路径不可用后的交互重试：不轮询，成功才重开监听与枚举。
@@ -116,14 +116,12 @@ pub fn retryUnavailable(session: *browse.Session) void {
     if (stat.kind != .directory) return;
     session.closeWatcher();
     session.reopenWatcher();
-    if (session.watch_enabled and session.watcher == null) return;
+    if (session.changes.enabled and !session.hasWatcher()) return;
     session.unavailable = false;
     session.denied = false;
     session.path_error = null;
-    session.reconciling = false;
-    session.replay_after_rescan = false;
-    session.reconcile_again = false;
-    reconcile.startRescan(session, session.last_event_seq);
+    session.changes.resetRetry();
+    poll.requestRescan(session);
 }
 
 fn activate(
@@ -173,10 +171,5 @@ fn activate(
     selected.clear();
 
     // 新 watcher 的序号从 1 开始；旧目录事件绝不 replay 到新目录。
-    session.last_event_seq = 0;
-    session.rescan_seq = 0;
-    session.reconciling = true;
-    session.replay_after_rescan = false;
-    session.reconcile_again = false;
-    session.rescans += 1;
+    session.changes.beginNavigation();
 }

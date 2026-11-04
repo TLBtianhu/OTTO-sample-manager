@@ -118,7 +118,7 @@ test "删除选中的文件：那一行留成墓碑，选中项按身份移到�
 
     const session = try browse.Session.init(testing.allocator, testing.io, root, .{});
     defer session.deinit();
-    if (session.watcher == null) return error.SkipZigTest;
+    if (!session.hasWatcher()) return error.SkipZigTest;
 
     var selection = selection_mod.Selection{};
     defer selection.deinit(testing.allocator);
