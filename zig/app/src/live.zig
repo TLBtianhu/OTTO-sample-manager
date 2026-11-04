@@ -16,7 +16,7 @@
 //! 引用的样本——默认库在 `<dataDir>`，那里只有库文件 / `cache\thumbs` / settings，
 //! 监听它会把应用自己刚写的缓存当成新素材（空库同样满足这一条）。这时 watcher
 //! 是 null、`poll` 返回全零账；显式 `--watch` 不受影响。导入写出库之后
-//! `import_ui.reload` 按同一规则重建 `Live`；其余监听打开失败仍然是错误。
+//! `library_session.reloadSaved` 按同一规则重建 `Live`；其余监听打开失败仍然是错误。
 //!
 //! 线程模型：`ports.Watcher` 的后台线程只往固定队列里写；`poll()` 在调用方线程
 //! 排空队列 → 适配 → `Index.apply` / 重扫协作。重扫的扫描线程只把 `scan.Scan`

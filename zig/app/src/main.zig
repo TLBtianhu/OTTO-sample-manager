@@ -22,7 +22,7 @@ const empty_state = @import("empty_state.zig");
 const import_ui = @import("import_ui.zig");
 const list_header = @import("list_header.zig");
 const library_tree_ui = @import("library_tree_ui.zig");
-const live_mod = @import("live.zig");
+const library_session = @import("library_session.zig");
 const mem_probe = @import("mem_probe.zig");
 const opacity_probe = @import("opacity_probe.zig");
 const options_mod = @import("options.zig");
@@ -50,7 +50,7 @@ const tick_ms: u64 = 150;
 pub const State = struct {
     /// 选择表与拖拽快照的分配器（`init.gpa`，长生命周期；不是帧 arena）。
     gpa: std.mem.Allocator,
-    live: *live_mod.Live,
+    session: *library_session.LibrarySession,
     /// 浏览模式（`otto-lite <目录>` / `--browse <目录>`）：行来自这个会话，
     /// 不看 `live`；null = 库模式。只读：不写库、不写设置、不写源目录。
     browse: ?*browse_mod.Session = null,
@@ -183,7 +183,7 @@ pub const State = struct {
             .flash_remove = s.flash_remove,
             .can_remove = remove_ui.canRemove(s),
             .rows_with_image = s.reporter.printed_rows,
-            .dirty = if (s.browse != null) false else s.live.dirty(),
+            .dirty = if (s.browse != null) false else s.session.live().dirty(),
             .import_status = s.import.status(&status_buffer),
             .import_failed = s.import.phase == .failed,
             .update_status = s.update.status(&update_buffer),
@@ -315,7 +315,7 @@ pub const State = struct {
             // 启动置顶被前台锁拒绝时，窗口第一次成为前台后补一次（见 settings_ui）。
             s.settings.retryTopmostIfActivated(window_util.nativeHandle(s.window));
             s.refresh();
-            // 导入是异步的：结果回来先重载（换 Live/库指针），再刷新本帧的状态。
+            // 导入是异步的：结果回来由 session 重载，再刷新本帧的状态。
             const import_event = s.import.poll();
             if (import_event == .reloaded) s.afterReload();
             if (import_event != .none) if (s.window) |window| window.redraw();
@@ -351,8 +351,7 @@ pub const State = struct {
     /// 导入成功后重载：内存列表换成刚保存的那份库（理由见 `import_ui.zig` 文件头）。
     /// 选择清空、过滤重建、预览重提交——都走和启动时同一条初始化路径。
     pub fn afterReload(s: *State) void {
-        s.live = s.import.live();
-        s.samples = s.live.samples();
+        s.samples = s.session.live().samples();
         s.duration_trust.clear();
         s.thumbs.clearFailures();
         s.search.markStale();
@@ -378,12 +377,12 @@ pub const State = struct {
             changed = report.changed or report.rescanned;
             if (changed) s.samples = session.samples();
         } else {
-            const report_events = s.live.poll() catch |err| {
+            const report_events = s.session.live().poll() catch |err| {
                 std.debug.print("otto-lite: poll 失败：{s}\n", .{@errorName(err)});
                 return;
             };
             // 即使四个计数都是零，`apply` 的扩容也可能让切片搬家，所以无条件重取。
-            s.samples = s.live.samples();
+            s.samples = s.session.live().samples();
             changed = report_events.added != 0 or report_events.removed != 0 or
                 report_events.renamed != 0 or report_events.modified != 0 or
                 report_events.overflowed or report_events.rescanned;
@@ -513,16 +512,16 @@ fn run(init: std.process.Init) !void {
 
     var state = State{
         .gpa = init.gpa,
-        .live = boot.live,
+        .session = &boot.session,
         .browse = boot.browse,
         .address = browse_address.Bar.init(init.gpa, if (boot.browse) |session| session.rootPath() else ""),
-        .samples = if (boot.browse) |session| session.samples() else boot.live.samples(),
+        .samples = if (boot.browse) |session| session.samples() else boot.session.live().samples(),
         .duration_trust = duration_trust.Trust.init(init.gpa, init.io),
         .thumbs = boot.thumbs,
         .preview = boot.preview,
         .remove = remove_ui.Selection.init(init.gpa),
         .search = search_ui.Search.init(init.gpa),
-        .import = try import_ui.Import.init(init.gpa, init.io, &boot.library, &boot.live, boot.library_path),
+        .import = import_ui.Import.init(init.gpa, init.io, &boot.session),
         .update = try update_ui.Update.initForProcess(init.gpa, init.io, options.update_url orelse boot.settings.update_url, options.no_exec, options.update_current),
         .settings = try settings_ui.Panel.init(init.gpa, init.io, boot.settings, boot.settings_path, .{ .d3d = options.d3d, .read_only = boot.settings_read_only }),
         .transport = transport_mod.Transport.init(init.gpa),
@@ -562,7 +561,7 @@ fn run(init: std.process.Init) !void {
             state.samples = session.samples();
             state.selection.resize(state.gpa, state.samples.len) catch {};
         }
-        try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe, state.samples, boot.library.arena.queryCapacity());
+        try bench_scroll.runCli(init, boot.app, boot.thumbs, options, .init(&state, State.view), title, &state.row_probe, state.samples, boot.session.library().arena.queryCapacity());
     }
     startup_dx.mark(.create_window);
     state.window = try boot.app.newWindow(.{

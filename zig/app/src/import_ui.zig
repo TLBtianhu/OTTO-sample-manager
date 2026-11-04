@@ -1,4 +1,4 @@
-//! 「打开」与拖入的 UI 胶水：文件/文件夹选择 → 工作线程导入 → 重读刚保存的库并重建 `Live`。
+//! 「打开」与拖入的 UI 胶水：文件/文件夹选择 → 工作线程导入 → `LibrarySession` 重读并重建。
 //! 文件走 `import_files.run`，文件夹走 `import_cli.importRun`；视图只读这里的状态。
 //!
 //! ## 状态机
@@ -34,6 +34,7 @@ const import_cli = @import("import_cli.zig");
 const import_files = @import("import_files.zig");
 const import_target = @import("import_target.zig");
 const library_io = @import("library_io.zig");
+const library_session = @import("library_session.zig");
 const live_mod = @import("live.zig");
 
 pub const button_label = "打开";
@@ -56,12 +57,9 @@ const SpinLock = @import("spin_lock.zig").SpinLock;
 pub const Import = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    /// 指向 `main` 里的库 / Live 指针变量：重载时只换它们指向的堆对象。
-    library_ptr: **core.store.Library,
-    live_ptr: **live_mod.Live,
+    /// 唯一库会话；本对象只借用，绝不销毁或替换 Library / Live。
+    session: *library_session.LibrarySession,
 
-    /// 当前库路径（本对象拥有）。成功后换成刚保存的路径，下一次导入以它为底。
-    library_path: []u8,
     /// 本次（或上次）导入的保存目标；失败前也可能已经确定。本对象拥有。
     save_path: ?[]u8 = null,
 
@@ -89,23 +87,18 @@ pub const Import = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        library_ptr: **core.store.Library,
-        live_ptr: **live_mod.Live,
-        library_path: []const u8,
-    ) error{OutOfMemory}!Import {
+        session: *library_session.LibrarySession,
+    ) Import {
         return .{
             .allocator = allocator,
             .io = io,
-            .library_ptr = library_ptr,
-            .live_ptr = live_ptr,
-            .library_path = try allocator.dupe(u8, library_path),
+            .session = session,
         };
     }
 
     pub fn deinit(self: *Import) void {
         if (self.thread) |thread| thread.join();
         self.thread = null;
-        self.allocator.free(self.library_path);
         if (self.save_path) |path| self.allocator.free(path);
         if (self.folder_name) |name| self.allocator.free(name);
         self.* = undefined;
@@ -164,7 +157,7 @@ pub const Import = struct {
             self.allocator.free(old);
             self.save_path = null;
         }
-        var target = import_target.resolve(self.allocator, self.library_path, null) catch {
+        var target = import_target.resolve(self.allocator, self.session.path(), null) catch {
             self.fail("导入失败：OutOfMemory", .{});
             return;
         };
@@ -183,7 +176,7 @@ pub const Import = struct {
             };
             copied_count += 1;
         }
-        const base_copy = self.allocator.dupe(u8, self.library_path) catch {
+        const base_copy = self.allocator.dupe(u8, self.session.path()) catch {
             freeCopied(self.allocator, copied, copied_count);
             target.deinit(self.allocator);
             self.fail("导入失败：OutOfMemory", .{});
@@ -271,7 +264,7 @@ pub const Import = struct {
                 report.skipped_identity,
                 report.failed,
                 report.ms,
-                self.live_ptr.*.samples().len,
+                self.session.live().samples().len,
             },
         );
         return .reloaded;
@@ -308,54 +301,15 @@ pub const Import = struct {
         return true;
     }
 
-    /// 移除等其它库写操作也走同一条“先完整加载，再换 Live/Library”路径。
-    /// save_path 由本对象复制持有；失败时旧对象保持可用。
-    pub fn reloadSaved(self: *Import, save_path: []const u8) !void {
-        const copied = try self.allocator.dupe(u8, save_path);
-        if (self.save_path) |old| self.allocator.free(old);
-        self.save_path = copied;
-        try self.reload();
-    }
-
-    /// 重载刚保存的库：先建好新的 Library + Live，全部成功才拆旧的。
-    ///
-    /// 失败（新文件被删、磁盘错、内存不足）时旧对象原样可用，UI 继续显示旧列表
-    /// 并在表头报具名错误——不会出现"半换"。
+    /// 后台流水线已经保存；事务性加载、旧对象释放与路径更新全由 session 负责。
     fn reload(self: *Import) !void {
         const save_path = self.save_path orelse return error.MissingSavePath;
-        const old_live = self.live_ptr.*;
-        const old_library = self.library_ptr.*;
-        // Live 拥有 root；新监听要在旧对象销毁之前拿到它。
-        const root = try self.allocator.dupe(u8, old_live.root);
-        defer self.allocator.free(root);
-
-        const next_library = try self.allocator.create(core.store.Library);
-        errdefer self.allocator.destroy(next_library);
-        next_library.* = try library_io.loadWith(self.io, self.allocator, save_path);
-        errdefer next_library.deinit();
-
-        const next_live = try self.allocator.create(live_mod.Live);
-        errdefer self.allocator.destroy(next_live);
-        next_live.* = try live_mod.Live.init(self.allocator, self.io, next_library, root, old_live.watchForced());
-        errdefer next_live.deinit();
-
-        old_live.deinit();
-        self.allocator.destroy(old_live);
-        old_library.deinit();
-        self.allocator.destroy(old_library);
-        self.live_ptr.* = next_live;
-        self.library_ptr.* = next_library;
-
-        // 下一次导入以新库为底（JSON → .otto 之后就是原地保存）。
-        if (self.allocator.dupe(u8, save_path)) |path| {
-            self.allocator.free(self.library_path);
-            self.library_path = path;
-        } else |_| {}
+        try self.session.reloadSaved(save_path);
     }
 
-    /// 当前 Live（重载后指针换了）。
+    /// 当前 Live（session 重载后指针可能已换）。
     pub fn live(self: *const Import) *live_mod.Live {
-        return self.live_ptr.*;
+        return self.session.live();
     }
 
     /// 拖放解码或路径核实失败：与流水线错误一样留在表头，不弹窗。
@@ -437,9 +391,7 @@ fn testImport(phase: Phase) Import {
     return .{
         .allocator = testing.allocator,
         .io = undefined,
-        .library_ptr = undefined,
-        .live_ptr = undefined,
-        .library_path = &.{},
+        .session = undefined,
         .save_path = null,
         .phase = phase,
     };
@@ -523,22 +475,14 @@ test "start → 工作线程 → 重载：库指针、样本和落盘目标都�
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const library_path = try std.fmt.bufPrint(&path_buffer, "{s}\\library.json", .{watch_root});
 
-    var library_ptr = try testing.allocator.create(core.store.Library);
-    defer {
-        library_ptr.deinit();
-        testing.allocator.destroy(library_ptr);
-    }
-    library_ptr.* = try library_io.loadWith(testing.io, testing.allocator, library_path);
+    var session = try library_session.LibrarySession.init(testing.allocator, testing.io, library_path, false);
+    defer session.deinit();
+    const initial = try library_io.loadWith(testing.io, testing.allocator, library_path);
+    session.adoptInitial(initial);
+    try session.startLive(watch_root, false);
+    try testing.expectEqual(@as(usize, 0), session.live().samples().len);
 
-    var live_ptr = try testing.allocator.create(live_mod.Live);
-    defer {
-        live_ptr.deinit();
-        testing.allocator.destroy(live_ptr);
-    }
-    live_ptr.* = try live_mod.Live.init(testing.allocator, testing.io, library_ptr, watch_root, false);
-    try testing.expectEqual(@as(usize, 0), live_ptr.samples().len);
-
-    var import = try Import.init(testing.allocator, testing.io, &library_ptr, &live_ptr, library_path);
+    var import = Import.init(testing.allocator, testing.io, &session);
     defer import.deinit();
 
     import.start(folder);
@@ -553,10 +497,10 @@ test "start → 工作线程 → 重载：库指针、样本和落盘目标都�
     }
     try testing.expectEqual(Poll.reloaded, outcome);
     try testing.expectEqual(Phase.done, import.phase);
-    // 重载走的是刚保存的库：库指针和 Live 都换了，样本数来自新文件。
-    try testing.expectEqual(@as(usize, 1), library_ptr.samples.len);
-    try testing.expectEqual(@as(usize, 1), live_ptr.samples().len);
-    try testing.expect(std.mem.endsWith(u8, import.library_path, ".otto"));
+    // 重载走的是刚保存的库：session 的库、Live 与路径都来自新文件。
+    try testing.expectEqual(@as(usize, 1), session.library().samples.len);
+    try testing.expectEqual(@as(usize, 1), session.live().samples().len);
+    try testing.expect(std.mem.endsWith(u8, session.path(), ".otto"));
 
     var status_buffer: [128]u8 = undefined;
     try testing.expect(std.mem.startsWith(u8, import.status(&status_buffer).?, "已导入文件夹 "));

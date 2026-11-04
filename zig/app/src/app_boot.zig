@@ -21,14 +21,14 @@
 //! 必须先有 `State`（`main` 负责组装），否则就要么塞一个假指针、要么让本文件反向
 //! import `main.zig`。所以这里到"后端就绪"为止，`main` 组装完 `State` 再开窗。
 //!
-//! 所有权：`Boot` 持有全部堆对象，`deinit` 按**声明顺序的逆序**释放。
+//! 所有权：`Boot` 持有 `LibrarySession` 与其它堆对象，`deinit` 按依赖逆序释放。
 
 const std = @import("std");
 const nanoui = @import("nanoui");
 const core = @import("otto_core");
 const browse_mod = @import("browse.zig");
 const library_io = @import("library_io.zig");
-const live_mod = @import("live.zig");
+const library_session = @import("library_session.zig");
 const mem_budget = @import("mem_budget.zig");
 const mem_probe = @import("mem_probe.zig");
 const mode_mod = @import("mode.zig");
@@ -40,17 +40,11 @@ const startup_dx = @import("startup_dx.zig");
 const thumbs_mod = @import("thumbs.zig");
 const trace = @import("trace.zig");
 
-/// 启动完成后交给 `main` 的那一组长生命周期对象。全部由 `deinit` 释放。
+/// 启动完成后交给 `main` 的那一组长生命周期对象。库路径 / Library / Live 由 session 独占。
 pub const Boot = struct {
-    /// `init.gpa`：建/毁上面这些对象的分配器（`library` / `live` 是堆上的）。
-    gpa: std.mem.Allocator,
-    /// 浏览模式是一个**空的内存库**（不读、不写任何库文件）：只为类型正确。
-    library: *core.store.Library,
-    live: *live_mod.Live,
+    session: library_session.LibrarySession,
     /// 非 null = 浏览模式：行来自这个会话（`main.State.samples` 跟着它走）。
     browse: ?*browse_mod.Session = null,
-    /// 位置参数或形态默认值；`Import` 用它当载入路径。
-    library_path: []const u8,
     settings: settings_store.Settings,
     /// 设置文件路径（三种形态都在各自的数据目录；dev 在 `<项目>\.otto-dev`）。
     settings_path: ?[]const u8,
@@ -60,27 +54,15 @@ pub const Boot = struct {
     preview: *preview_panel.Panel,
     app: *nanoui.App,
 
-    /// 停后端、停工作线程、释放库。顺序与各对象的依赖方向相反（见文件头）。
+    /// 停后端、停工作线程，最后由 session 释放 Live 与它借用的库。
     pub fn deinit(self: *Boot) void {
         self.app.destroy();
         self.preview.deinit();
         self.thumbs.deinit();
         if (self.browse) |session| session.deinit();
-        self.live.deinit();
-        self.gpa.destroy(self.live);
-        self.library.deinit();
-        self.gpa.destroy(self.library);
+        self.session.deinit();
     }
 };
-
-/// 库指针从创建起就持有合法空库：加载失败时，上层 `errdefer` 也只能释放这个
-/// 已初始化对象，绝不会对 `gpa.create` 后的未初始化内存调用 `Library.deinit`。
-fn createLibrary(gpa: std.mem.Allocator) !*core.store.Library {
-    const library = try gpa.create(core.store.Library);
-    errdefer gpa.destroy(library);
-    library.* = try core.store.empty(gpa);
-    return library;
-}
 
 /// 库加载在工作线程上的那一段：普通启动把它与 `App.create`（进程里第一个
 /// HWND，本机 55–67 ms 的 win32k 一次性成本）重叠，省掉读文件 + JSON 解码的
@@ -103,8 +85,7 @@ const LibraryLoad = struct {
     const Job = struct {
         io: std.Io = undefined,
         gpa: std.mem.Allocator = undefined,
-        path: []const u8 = "",
-        target: *core.store.Library = undefined,
+        session: *library_session.LibrarySession = undefined,
         /// 工作线程写、主线程在 `join` 之后读，所以不需要锁。
         opened: ?library_io.Opened = null,
         failure: ?library_io.LoadError = null,
@@ -116,11 +97,10 @@ const LibraryLoad = struct {
     fn begin(
         self: *LibraryLoad,
         init: std.process.Init,
-        path: []const u8,
-        target: *core.store.Library,
+        session: *library_session.LibrarySession,
         overlap: bool,
     ) void {
-        self.job = .{ .io = init.io, .gpa = init.gpa, .path = path, .target = target };
+        self.job = .{ .io = init.io, .gpa = init.gpa, .session = session };
         // 1 MiB 栈（不是 std.Thread 默认的 16 MiB）：只做一次读文件 + 解码。
         if (overlap) {
             self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, loadMain, .{&self.job}) catch null;
@@ -138,16 +118,15 @@ const LibraryLoad = struct {
         job.opened = null;
         // 文件不存在是首次启动；版本不兼容也继续，但必须明确告诉用户旧库未载入。
         if (opened.empty_reason) |reason| switch (reason) {
-            .missing => std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{job.path}),
+            .missing => std.debug.print("otto-lite: 库不存在，按空库启动 file={s}\n", .{job.session.path()}),
             .incompatible_version => std.debug.print(
                 "otto-lite: 这个库是旧格式（v1），已按空库启动；你的音频文件不受影响 " ++
                     "legacy-library-empty version=1 file={s}\n",
-                .{job.path},
+                .{job.session.path()},
             ),
         };
-        // 释放 createLibrary 放的空库占位，再接管解码结果（也可能是新的空库）。
-        job.target.deinit();
-        job.target.* = opened.library;
+        // session 释放空库占位并接管解码结果（也可能是新的空库）。
+        job.session.adoptInitial(opened.library);
     }
 
     fn join(self: *LibraryLoad) void {
@@ -172,30 +151,11 @@ const LibraryLoad = struct {
 /// 免得和主线程的 `otto-trace` 行交错）。
 fn loadMain(job: *LibraryLoad.Job) void {
     const started = trace.now();
-    job.opened = library_io.openWith(job.io, job.gpa, job.path) catch |err| {
+    job.opened = library_io.openWith(job.io, job.gpa, job.session.path()) catch |err| {
         job.failure = err;
         return;
     };
     job.ms = (trace.now() - started) * 1000;
-}
-
-/// 建 `Live`（库的视图 + watcher）。浏览模式 = 空库 + `initIdle`。
-/// 单独成函数是因为它在两条启动顺序里位置不同（见 `boot` 里的注释）。
-fn makeLive(
-    init: std.process.Init,
-    library: *core.store.Library,
-    root: []const u8,
-    browse: bool,
-    force_watch: bool,
-) !*live_mod.Live {
-    const live = try init.gpa.create(live_mod.Live);
-    errdefer init.gpa.destroy(live);
-    if (browse) {
-        live.* = try live_mod.Live.initIdle(init.gpa, init.io, library);
-    } else {
-        live.* = try live_mod.Live.init(init.gpa, init.io, library, root, force_watch);
-    }
-    return live;
 }
 
 /// 按运行形态把一切建起来。`allocator` 是 `init.arena`（只放路径字符串、不释放）。
@@ -211,33 +171,35 @@ pub fn boot(
 ) !Boot {
     // 位置参数优先；没有就按运行形态给默认库（见 `mode.zig`）。格式按 magic 判断。
     const default_library_path = options.library_path orelse try mode_mod.resolveDefaultLibrary(allocator, init.io);
-    const library = try createLibrary(init.gpa);
-    errdefer {
-        library.deinit();
-        init.gpa.destroy(library);
-    }
+    const library_path = switch (target) {
+        // 空串 = 调用方没给位置参数（`browse_target` 用它表示"用形态默认值"）。
+        .library => |requested| if (requested.len > 0) requested else default_library_path,
+        .browse => default_library_path,
+    };
+    const read_only = switch (target) {
+        .library => false,
+        .browse => true,
+    };
+    // 从空库占位起，路径与对象就只有 session 一个 owner；启动错误也走同一释放口。
+    var session = try library_session.LibrarySession.init(init.gpa, init.io, library_path, read_only);
+    errdefer session.deinit();
 
     // 库加载：普通启动放到**工作线程**里，与后面的 `App.create`（进程里第一个
     // HWND，本机 55–67 ms 的 win32k 一次性成本）重叠；`--mem-probe` 与浏览模式
-    // 保持顺序读（原因见 `LibraryLoad`）。线程拿着 `library` 的指针，所以下面
-    // 紧跟一条"出错先 join、再释放库"的 errdefer。
+    // 保持顺序读（原因见 `LibraryLoad`）。线程借用 session，出错先 join 再释放。
     var load: LibraryLoad = .{};
     var browse_session: ?*browse_mod.Session = null;
-    var library_path: []const u8 = default_library_path;
     var overlap = false;
     switch (target) {
-        .library => |requested| {
-            // 空串 = 调用方没给位置参数（`browse_target` 用它表示"用形态默认值"）。
-            const path = if (requested.len > 0) requested else default_library_path;
-            library_path = path;
+        .library => {
             // 探针的"六时刻"要能把库的页归到 `library` 那一行：它不重叠。
             overlap = !probe.active;
-            load.begin(init, path, library, overlap);
+            load.begin(init, &session, overlap);
         },
         .browse => |dir| {
-            // 浏览模式：**没有库文件**。createLibrary 给的空库只为 `Import` 的类型；
-            // `Import` 在这条路上永远不会被调用（按钮隐藏、拖入不安装）。
-            const session = browse_mod.Session.init(init.gpa, init.io, dir, .{
+            // 浏览模式：**没有库文件**。session 的空内存库与 idle Live 只用于类型统一；
+            // 保存与重载入口均为只读，按钮隐藏、拖入也不安装。
+            const opened = browse_mod.Session.init(init.gpa, init.io, dir, .{
                 .limit = options.browse_limit,
                 .path_mode = if (options.browse_legacy_paths) .legacy else .compact,
             }) catch |err| {
@@ -247,13 +209,12 @@ pub fn boot(
                 );
                 std.process.exit(2);
             };
-            browse_session = session;
+            browse_session = opened;
         },
     }
-    // 加载线程拿着 `library` 的指针：出错返回时它必须比释放库先收掉。
-    // LIFO：本行声明在"释放库"那条之后，所以先执行。
+    // LIFO：先收浏览会话与加载线程，最后才允许 session 释放库。
     errdefer load.abandon();
-    errdefer if (browse_session) |session| session.deinit();
+    errdefer if (browse_session) |opened| opened.deinit();
     if (!overlap) {
         startup_dx.mark(.read_library);
         try load.adopt();
@@ -262,15 +223,9 @@ pub fn boot(
     }
 
     const root = try mode_mod.watchRoot(allocator, init.io, options.watch_dir, library_path);
-    // `live` 的位置随启动顺序走：探针/浏览在库就绪后立刻建（六时刻表原样：
-    // 库→live→…）；普通启动要等库加载 join（在 `App.create` 之后）才建。
-    var live_store: ?*live_mod.Live = null;
-    errdefer if (live_store) |live| {
-        live.deinit();
-        init.gpa.destroy(live);
-    };
+    // Live 的位置随启动顺序走：探针/浏览在库就绪后立刻建；普通启动等 join。
     if (!overlap) {
-        live_store = try makeLive(init, library, root, browse_session != null, options.watch_dir != null);
+        try session.startLive(root, options.watch_dir != null);
         trace.mark("setup.live");
     }
 
@@ -336,17 +291,13 @@ pub fn boot(
         startup_dx.mark(.read_library);
         try load.adopt();
         trace.markf("setup.library", "worker_ms={d:.2} overlapped=1", .{load.job.ms});
-        live_store = try makeLive(init, library, root, false, options.watch_dir != null);
+        try session.startLive(root, options.watch_dir != null);
         trace.mark("setup.live");
     }
-    const live = live_store.?;
 
     return .{
-        .gpa = init.gpa,
-        .library = library,
-        .live = live,
+        .session = session,
         .browse = browse_session,
-        .library_path = library_path,
         .settings = settings,
         .settings_path = settings_path,
         .settings_read_only = browse_session != null,
