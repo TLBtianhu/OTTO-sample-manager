@@ -79,7 +79,7 @@ fn drawCompact(panel: *Panel, c: *ui.Context) void {
     };
     switch (current.*) {
         .image => |bitmap| ui.textf(c, .{ .size = 12, .truncate = .ellipsis }, "图像预览 · {d}×{d}", .{ bitmap.width, bitmap.height }),
-        .text => |text| ui.text(c, text, .{ .size = 11, .truncate = .ellipsis }),
+        .text => |text| ui.text(c, text, .{ .size = 15, .truncate = .ellipsis }),
         .audio => |*session| {
             const line = ui.div(c).row().wFull().itemsCenter().gap(8);
             ui.text(c, "音频预览", .{ .size = 12, .truncate = .ellipsis });
@@ -87,7 +87,7 @@ fn drawCompact(panel: *Panel, c: *ui.Context) void {
             const playing = session.isPlaying();
             const starting = session.isStartingAudio();
             const label = if (starting) "取消" else if (playing) "停止" else if (session.audioError() != null) "重试" else "播放";
-            const button = ui.button(c, label, .{ .size = 11 });
+            const button = ui.button(c, label, .{ .size = 15 });
             line.end();
             if (button.clicked) {
                 if (starting or playing) session.stop() else _ = preview_audio.play(session);
@@ -113,7 +113,7 @@ fn drawOutcome(panel: *Panel, c: *ui.Context) void {
     switch (current.*) {
         .image => |bitmap| {
             caption(panel, c, "图像预览");
-            ui.textf(c, .{ .size = 13 }, "{d}×{d} 像素", .{ bitmap.width, bitmap.height });
+            ui.textf(c, .{ .size = 15 }, "{d}×{d} 像素", .{ bitmap.width, bitmap.height });
             ui.textf(c, .{ .size = 10, .color = c.theme.muted }, "{d} 字节 BGRA", .{bitmap.byteLen()});
         },
         .text => |text| {
@@ -140,12 +140,12 @@ fn drawOutcome(panel: *Panel, c: *ui.Context) void {
         }),
         .frames => {
             caption(panel, c, "帧预览");
-            ui.text(c, "帧预览待接入", .{ .size = 13, .color = c.theme.text });
+            ui.text(c, "帧预览待接入", .{ .size = 15, .color = c.theme.text });
             ui.text(c, "Media Foundation 抽帧是 M2", .{ .size = 10, .color = c.theme.muted });
         },
         .none => |reason| {
             caption(panel, c, "没有预览");
-            ui.text(c, reasonText(reason), .{ .size = 13, .color = c.theme.text });
+            ui.text(c, reasonText(reason), .{ .size = 15, .color = c.theme.text });
             ui.text(c, reasonDetail(reason), .{ .size = 10, .color = c.theme.muted, .wrap = true });
         },
     }

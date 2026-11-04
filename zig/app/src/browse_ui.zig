@@ -77,11 +77,11 @@ pub fn drawToolbar(
 
 fn navButton(c: *ui.Context, label: []const u8, enabled: bool) bool {
     if (!enabled) {
-        ui.text(c, label, .{ .size = 13, .color = c.theme.muted });
+        ui.text(c, label, .{ .size = 15, .color = c.theme.muted });
         return false;
     }
     const button = smallPressable(c);
-    ui.text(c, label, .{ .size = 13, .color = c.theme.accent });
+    ui.text(c, label, .{ .size = 15, .color = c.theme.accent });
     ui.end(c);
     return button.clicked;
 }
@@ -92,39 +92,39 @@ pub fn drawBanner(c: *ui.Context, info: browse.Info, shell_message: ?[]const u8)
     const row = ui.div(c).row().wFull().h(banner_height).itemsCenter().px(12).gap(6);
     defer row.end();
 
-    ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "浏览 {s} · {d} 个项目", .{ info.name, info.entries });
+    ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "浏览 {s} · {d} 个项目", .{ info.name, info.entries });
     if (shell_message) |message| {
         const failed = std.mem.indexOf(u8, message, "失败") != null;
         ui.textf(c, .{ .size = 10, .color = if (failed) c.theme.danger else c.theme.accent, .truncate = .ellipsis }, "· {s}", .{message});
     }
     if (info.path_error) |reason| {
-        ui.textf(c, .{ .size = 11, .color = c.theme.danger }, "· {s}", .{pathErrorText(reason)});
+        ui.textf(c, .{ .size = 15, .color = c.theme.danger }, "· {s}", .{pathErrorText(reason)});
     } else if (info.unavailable) {
         // 保持"路径不可用"的显示；恢复只在用户下一次交互时发生（没有定时轮询）。
-        ui.text(c, "· 路径不可用（点击或滚动时重试）", .{ .size = 11, .color = c.theme.danger });
+        ui.text(c, "· 路径不可用（点击或滚动时重试）", .{ .size = 15, .color = c.theme.danger });
     } else if (info.denied) {
-        ui.text(c, "· 没有访问权限", .{ .size = 11, .color = c.theme.danger });
+        ui.text(c, "· 没有访问权限", .{ .size = 15, .color = c.theme.danger });
     } else if (info.loading_more and info.mem_refused) {
-        ui.text(c, "· 已到内存上限，正在统计剩余…", .{ .size = 11, .color = c.theme.danger });
+        ui.text(c, "· 已到内存上限，正在统计剩余…", .{ .size = 15, .color = c.theme.danger });
     } else if (info.loading_more) {
-        ui.text(c, "· 正在加载更多…", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "· 正在加载更多…", .{ .size = 15, .color = c.theme.muted });
     } else if (info.enumerating) {
-        ui.text(c, "· 正在读取目录…", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "· 正在读取目录…", .{ .size = 15, .color = c.theme.muted });
     } else if (info.mem_refused) {
         // 拒绝加载必须有具名原因 + 剩余条数：不说清楚等于悄悄少显示。
-        ui.textf(c, .{ .size = 11, .color = c.theme.danger }, "· 已到内存上限，剩余 {d} 条未加载", .{info.remaining});
+        ui.textf(c, .{ .size = 15, .color = c.theme.danger }, "· 已到内存上限，剩余 {d} 条未加载", .{info.remaining});
     } else if (info.truncated) {
         if (info.entries >= browse.hard_limit) {
-            ui.textf(c, .{ .size = 11, .color = c.theme.danger }, "· 已到上限 {d} 条", .{browse.hard_limit});
+            ui.textf(c, .{ .size = 15, .color = c.theme.danger }, "· 已到上限 {d} 条", .{browse.hard_limit});
         } else {
-            ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "· 已加载 {d} 条，还有更多", .{info.entries});
+            ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "· 已加载 {d} 条，还有更多", .{info.entries});
         }
     }
     if (info.skipped > 0) {
-        ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "· 跳过 {d} 项", .{info.skipped});
+        ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "· 跳过 {d} 项", .{info.skipped});
     }
     if (info.tombstones > 0) {
-        ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "· {d} 行已删除", .{info.tombstones});
+        ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "· {d} 行已删除", .{info.tombstones});
     }
     // 「加载更多」是可点的小字，不是新的一行：它只在**真的还有页**时出现。
     if (info.has_more and !info.enumerating and !info.mem_refused and

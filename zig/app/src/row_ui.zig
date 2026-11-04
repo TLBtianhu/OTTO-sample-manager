@@ -67,7 +67,7 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
     if (drew_image) s.rows_with_image += 1;
     s.row_probe.add(index, drew_image);
     ui.div(c).w(8).h(1).end();
-    cellf(c, @floatFromInt(plan.ordinal.w), .{ .size = 11, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
+    cellf(c, @floatFromInt(plan.ordinal.w), .{ .size = 15, .color = if (is_cursor) c.theme.accent else null }, "{d:0>4}", .{row + 1});
 
     const shown = if (!is_directory and !is_deleted) s.duration_trust.display(sample) else null;
     for (plan.columns[0..plan.column_count]) |column| {
@@ -77,16 +77,16 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
             .name => {
                 // 辅助列消失前，名称始终保持求解器给出的最小可读宽度。
                 const text = if (plan.visible(.format)) sample.file_name else sample.displayName();
-                cell(c, width, text, .{ .size = 13, .truncate = .ellipsis });
+                cell(c, width, text, .{ .size = 15, .truncate = .ellipsis });
             },
             .duration => {
                 if (is_deleted) {
-                    cell(c, width, "已删除", .{ .size = 11, .color = c.theme.danger, .truncate = .ellipsis });
+                    cell(c, width, "已删除", .{ .size = 15, .color = c.theme.danger, .truncate = .ellipsis });
                 } else if (shown) |value| {
                     var buffer: [32]u8 = undefined;
-                    cellf(c, width, .{ .size = 11, .truncate = .ellipsis }, "{s}", .{duration_text.format(value.seconds, value.estimated, &buffer)});
+                    cellf(c, width, .{ .size = 15, .truncate = .ellipsis }, "{s}", .{duration_text.format(value.seconds, value.estimated, &buffer)});
                 } else {
-                    cell(c, width, "—", .{ .size = 11, .color = c.theme.muted });
+                    cell(c, width, "—", .{ .size = 15, .color = c.theme.muted });
                 }
             },
             .format => {
@@ -94,23 +94,23 @@ pub fn drawRow(s: *State, c: *ui.Context, row: usize, index: usize, sample: core
                     cell(c, width, if (is_link) "目录·链接" else "目录", .{ .size = 10, .color = c.theme.accent, .truncate = .ellipsis });
                 } else {
                     const ext = filter.trimExt(sample.file_ext);
-                    cellf(c, width, .{ .size = 11, .color = c.theme.muted, .truncate = .ellipsis }, "{s}", .{if (ext.len > 0) ext else "—"});
+                    cellf(c, width, .{ .size = 15, .color = c.theme.muted, .truncate = .ellipsis }, "{s}", .{if (ext.len > 0) ext else "—"});
                 }
             },
             .sample_rate => {
                 if (sample.sample_rate == 0 or is_directory) {
-                    cell(c, width, "—", .{ .size = 11, .color = c.theme.muted });
+                    cell(c, width, "—", .{ .size = 15, .color = c.theme.muted });
                 } else {
                     const khz: f32 = @as(f32, @floatFromInt(sample.sample_rate)) / 1000;
-                    cellf(c, width, .{ .size = 11, .color = c.theme.muted }, "{d:.1} kHz", .{khz});
+                    cellf(c, width, .{ .size = 15, .color = c.theme.muted }, "{d:.1} kHz", .{khz});
                 }
             },
             .size => {
                 if (is_directory) {
-                    cell(c, width, "—", .{ .size = 11, .color = c.theme.muted });
+                    cell(c, width, "—", .{ .size = 15, .color = c.theme.muted });
                 } else {
                     var buffer: [32]u8 = undefined;
-                    cellf(c, width, .{ .size = 11, .color = c.theme.muted }, "{s}", .{sample_facts.formatSize(sample.file_size, &buffer)});
+                    cellf(c, width, .{ .size = 15, .color = c.theme.muted }, "{s}", .{sample_facts.formatSize(sample.file_size, &buffer)});
                 }
             },
         }

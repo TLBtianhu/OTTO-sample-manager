@@ -272,7 +272,7 @@ pub const Panel = struct {
         const header = ui.div(c).row().wFull().itemsCenter().gap(8);
         ui.text(c, "设置", .{ .size = 15, .weight = .semibold });
         ui.spacer(c);
-        const close_it = ui.button(c, "关闭", .{ .variant = .ghost, .size = 11, .width = .{ .px = 48 } });
+        const close_it = ui.button(c, "关闭", .{ .variant = .ghost, .size = 15, .width = .{ .px = 48 } });
         header.end();
         ui.divider(c);
 
@@ -284,38 +284,38 @@ pub const Panel = struct {
         // 不透明度：标签 + 百分比在同一行，滑块占满卡片内宽（380 点面板下
         // 卡片内宽 300 点，滑块与上面的文本框同宽，不会撑破）。
         const opacity_row = ui.div(c).row().wFull().itemsCenter().gap(8);
-        ui.text(c, "窗口不透明度", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "窗口不透明度", .{ .size = 15, .color = c.theme.muted });
         ui.spacer(c);
-        ui.textf(c, .{ .size = 11, .color = c.theme.muted }, "{d:.0}%", .{self.opacity_percent});
+        ui.textf(c, .{ .size = 15, .color = c.theme.muted }, "{d:.0}%", .{self.opacity_percent});
         opacity_row.end();
         // 拖动（按下）期间每帧都在改：不等关闭面板，这就是"热生效"。
         if (ui.slider(c, &self.opacity_percent, .{ .min = 0, .max = 100, .width = .fill })) {
             self.setOpacityFromSlider(hwnd);
         }
-        const reset_size = ui.button(c, "恢复默认大小（380×700）", .{ .variant = .ghost, .size = 11 });
+        const reset_size = ui.button(c, "恢复默认大小（380×700）", .{ .variant = .ghost, .size = 15 });
 
-        ui.text(c, "更新源", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "更新源", .{ .size = 15, .color = c.theme.muted });
         _ = ui.textField(c, &self.url_field, .{
             .placeholder = "空 = 未配置",
             .width = .fill,
-            .size = 11,
+            .size = 15,
             // 点进去就全选：改一个已经存在的值不用先按 Ctrl+A。
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "缩略图内存预算 (MiB，上限 32)", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "缩略图内存预算 (MiB，上限 32)", .{ .size = 15, .color = c.theme.muted });
         _ = ui.textField(c, &self.l2_field, .{
             .placeholder = "32",
             .width = .fill,
-            .size = 11,
+            .size = 15,
             .select_all_on_focus = true,
         });
 
-        ui.text(c, "磁盘缓存预算 (MiB)", .{ .size = 11, .color = c.theme.muted });
+        ui.text(c, "磁盘缓存预算 (MiB)", .{ .size = 15, .color = c.theme.muted });
         _ = ui.textField(c, &self.l3_field, .{
             .placeholder = "256",
             .width = .fill,
-            .size = 11,
+            .size = 15,
             .select_all_on_focus = true,
         });
 
