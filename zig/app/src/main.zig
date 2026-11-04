@@ -11,22 +11,18 @@ const bench_scroll = @import("bench_scroll.zig");
 const browse_mod = @import("browse.zig");
 const browse_address = @import("browse_address.zig");
 const browse_drives = @import("browse_drives.zig");
-const browse_ui = @import("browse_ui.zig");
-const browse_action = @import("browse_action.zig");
+const browse_frame = @import("browse_frame.zig");
 const browse_shell = @import("browse_shell.zig");
 const commands = @import("commands.zig");
 const console_mod = @import("console.zig");
 const drop_ui = @import("drop_ui.zig");
 const duration_trust = @import("duration_trust.zig");
-const empty_state = @import("empty_state.zig");
 const import_ui = @import("import_ui.zig");
-const list_header = @import("list_header.zig");
-const library_tree_ui = @import("library_tree_ui.zig");
+const library_frame = @import("library_frame.zig");
 const library_session = @import("library_session.zig");
 const mem_probe = @import("mem_probe.zig");
 const opacity_probe = @import("opacity_probe.zig");
 const options_mod = @import("options.zig");
-const open_ui = @import("open_ui.zig");
 const preview_panel = @import("preview_panel.zig");
 const row_probe = @import("row_probe.zig");
 const row_ui = @import("row_ui.zig");
@@ -123,166 +119,17 @@ pub const State = struct {
             row_ui.resyncInput(s, c);
             // Ctrl+C 在构建树之前处理；路径不可用时只在下一次用户交互重试。
             if (c.shortcut(.{ .key = 'c', .ctrl = true })) row_ui.copySelection(s, c);
-            if (s.browse) |session| {
-                const focused = if (s.window) |window| window.isFocused() else false;
-                const gained_focus = focused and !s.window_focused;
-                s.window_focused = focused;
-                if (gained_focus or hasInteraction(c.input)) session.retryUnavailable();
-            }
         }
-
-        const root_box = ui.div(c).sizeFull().column();
-        defer root_box.end();
-        if (s.browse == null) s.drop.accept(c, root_box.index);
 
         if (s.browse) |session| {
-            const action = browse_ui.drawToolbar(c, session.info(), &s.address, &s.drives);
-            if (!busy) browse_action.handleToolbar(s, c, action);
-        }
-
-        // 搜索框在列表上方：先处理键盘/重建映射再画它，本帧输入的字符在同一帧就参与过滤；
-        // 浏览模式没有这个按钮：那条路不写库。
-        const import_button: ?search_ui.Trailing = if (s.browse != null) null else .{
-            .label = import_ui.button_label,
-            .width = import_ui.button_width,
-            .disabled = s.import.busy(),
-        };
-        if (!busy) {
-            if (s.browse != null) browse_action.handleKeys(s, c) else _ = remove_ui.handleKey(s, c);
-            var action: search_ui.Outcome = .{};
-            // 地址栏拥有键盘时，全局搜索/列表快捷键必须让路；这里只画搜索框，不处理 Enter/Esc。
-            if (s.browse != null and s.address.keyboardOwned()) {
-                _ = s.search.draw(c, import_button);
-            } else {
-                action = s.search.frame(c, s.samples, &s.selection, import_button);
-            }
-            if (action.filter_changed) {
-                s.remove.clearFolder();
-                row_ui.noteSelection(s);
-            }
-            if (action.activate) row_ui.activateCursor(s, c);
-            if (action.toggle_play) c.changed = s.preview.togglePlay(row_ui.previewRow(s)) or c.changed;
-            if (action.trailing_clicked) open_ui.toggle(&s.open_menu, c);
+            browse_frame.view(s, c, session, layout_plan, busy);
         } else {
-            _ = s.search.draw(c, import_button);
+            library_frame.view(s, c, layout_plan, busy);
         }
-
-        if (!busy and s.browse == null) open_ui.frame(c, &s.open_menu, &s.import, window_util.nativeHandle(s.window));
-
-        var status_buffer: [128]u8 = undefined;
-        var update_buffer: [160]u8 = undefined;
-        var update_action_buffer: [32]u8 = undefined;
-        var ext_buffer: [128]u8 = undefined;
-        const header_action = list_header.draw(c, .{
-            .total = s.samples.len,
-            .matched = s.search.matchCount(),
-            .selected = s.selection.count(),
-            .ext_filter = s.search.extSummary(&ext_buffer),
-            .flash_left = s.flash_left,
-            .flash_count = s.flash_count,
-            .flash_remove = s.flash_remove,
-            .can_remove = remove_ui.canRemove(s),
-            .rows_with_image = s.reporter.printed_rows,
-            .dirty = if (s.browse != null) false else s.session.live().dirty(),
-            .import_status = s.import.status(&status_buffer),
-            .import_failed = s.import.phase == .failed,
-            .update_status = s.update.status(&update_buffer),
-            .update_action_label = s.update.actionLabel(&update_action_buffer),
-            .compact = layout_plan.profile == .compact_with_overflow,
-            .overflow_open = s.overflow_open,
-        });
-        if (!busy) {
-            if (header_action.overflow_clicked) {
-                s.overflow_open = !s.overflow_open;
-                c.changed = true;
-            }
-            if (header_action.check_clicked) s.update.begin();
-            if (header_action.remove_clicked) remove_ui.removeCurrent(s, c);
-            if (header_action.update_clicked and s.update.clickButton()) std.process.exit(0);
-            if (header_action.settings_clicked) s.settings.openPanel(c);
-        }
-        // 浏览模式的状态条：目录名、文件数、已加载/还有更多 / 内存上限 / 路径不可用。
-        // 它必须**看得见**——这些状态只写日志等于没说。
-        var load_more_clicked = false;
-        if (s.browse) |session| {
-            load_more_clicked = browse_ui.drawBanner(c, session.info(), s.shell.message()).load_more_clicked;
-        }
-        if (!busy and load_more_clicked) {
-            if (s.browse) |session| {
-                _ = session.loadMore() catch {};
-                c.changed = true;
-            }
-        }
-        // 列表容器：空白处按下再松开 = 清空选择（行是它的后代，点行时容器不会 clicked）。
-        const body = ui.div(c).sizeFull();
-        const body_it = body.interaction();
-
-        // 列表只遍历行映射：第 row 行 → 第 index 个样本（选择/预览/拖拽仍只认样本下标）。
-        const list_id = c.peekId(null);
-        const scroll_target = browse_action.scrollTarget(s, c, list_id);
-        var rows = ui.list(c, .{ .count = s.search.len(), .row_height = @floatFromInt(layout_plan.row.height), .scroll_to = scroll_target });
-        // 本帧建出来的行范围（含 list 的 overscan）。预取与验收都用它，不改列表行为。
-        var first_row: usize = 0;
-        var last_row: usize = 0;
-        var built_rows: usize = 0;
-        while (rows.next()) |row| {
-            if (s.search.folderAt(row)) |folder| {
-                const it = library_tree_ui.draw(c, folder, remove_ui.folderSelected(s, folder.path));
-                if (!busy and it.clicked) remove_ui.folderClicked(s, c, row);
-                continue;
-            }
-            const index = s.search.sampleAt(row) orelse continue;
-            const it = row_ui.drawRow(s, c, row, index, s.samples[index]);
-            if (!busy) row_ui.rowInput(s, c, index, it);
-            if (built_rows == 0) first_row = row;
-            last_row = row;
-            built_rows += 1;
-        }
-        rows.end();
-        browse_action.rememberScroll(s, c, list_id);
-
-        // 库非空但过滤到 0 行：给一段明确文案（不是一片空白）。
-        if (!busy and s.samples.len > 0 and s.search.len() == 0) s.search.drawNoMatches(c);
-
-        const empty_clicked = if (s.browse) |session| blk: {
-            if (s.samples.len == 0) browse_ui.drawEmpty(c, session.info());
-            break :blk false;
-        } else empty_state.draw(c, s.samples.len, s.import.busy());
-        if (!busy and empty_clicked) open_ui.toggle(&s.open_menu, c);
-
-        if (!busy) {
-            if (body_it.clicked) {
-                s.selection.clear();
-                s.remove.clearFolder();
-                row_ui.cancelPress(s);
-                row_ui.noteSelection(s);
-                c.changed = true;
-            }
-            // 松手（或按钮已经不在了）就放弃这次按压：定时器若还没跑，会看到空计划。
-            if (c.input.released or !c.input.down) row_ui.cancelPress(s);
-        }
-        // 列表到此为止：预览条必须是它的兄弟，不能变成列表的子节点。
-        body.end();
-
-        // 预览条：只在选中行变化时提交请求（`sync` 自己判重）；工作线程读完由
-        // `tick` 接手。事实摘要的时长与列表行同一条 `duration_trust.display`。
-        const preview_sample = row_ui.previewRow(s);
-        s.preview.sync(preview_sample, row_ui.previewDuration(s, preview_sample));
-        s.preview.draw(c, layout_plan.preview_height);
-
-        s.reporter.report(s.thumbs, s.rows_with_image);
-        // 设置面板是最后一层：遮罩 + 卡片覆盖列表，点击优先级由树序保证。
-        s.settings.draw(c, s.thumbs, &s.update, s.window);
-
-        // 帧尾：记下这一帧的视口，然后（有空的话）补一轮预取。每帧最多一次；
-        // 滚动中队列几乎从不清空，所以真正跑起来的是停下之后的那一拍。
-        // 拖放循环里的重画不预取（按约定那一帧不碰口岸），拖完由 tick / 下一帧补。
-        if (built_rows > 0) s.prefetch.noteWindow(first_row, last_row);
-        if (!busy) s.maybePrefetch();
     }
 
     /// 队列空闲时才把视口上下几十行提前入队；拖放循环里不预取。
-    fn maybePrefetch(s: *State) void {
+    pub fn maybePrefetch(s: *State) void {
         const now = trace.now();
         if (!s.prefetch.due(now)) return;
         // 可见行还在排队：这一拍跳过，下一拍再看。队列空闲是"真的闲下来"的唯一判据。
@@ -306,51 +153,56 @@ pub const State = struct {
         s.thumbs.prefetch(s.samples, indices[0..used]);
     }
 
-    /// 自续期定时器回调：poll 一次，有实际变更就重画；然后重新挂 150ms。
-    /// 也负责让 Ctrl+C 的表头提示在 1.5 秒后恢复。
+    /// 自续期定时器回调：按原顺序 poll 并累计 dirty，本拍末尾统一重画一次；
+    /// 然后重新挂 150ms。也负责让 Ctrl+C 的表头提示在 1.5 秒后恢复。
     fn tick(ctx: ?*anyopaque) callconv(.c) void {
         const s: *State = @ptrCast(@alignCast(ctx.?));
         // 拖放循环里不许再碰 UI（连轮询也不做）：等它返回后下一次 tick 再补。
         if (!s.transport.busy) {
+            var dirty = false;
             // 启动置顶被前台锁拒绝时，窗口第一次成为前台后补一次（见 settings_ui）。
             s.settings.retryTopmostIfActivated(window_util.nativeHandle(s.window));
-            s.refresh();
+            if (s.refresh()) dirty = true;
             // 导入是异步的：结果回来由 session 重载，再刷新本帧的状态。
             const import_event = s.import.poll();
-            if (import_event == .reloaded) s.afterReload();
-            if (import_event != .none) if (s.window) |window| window.redraw();
-            if (s.import.tick()) if (s.window) |window| window.redraw();
+            if (import_event == .reloaded) s.applyReload();
+            if (import_event != .none) dirty = true;
+            if (s.import.tick()) dirty = true;
             // 更新检查也是异步的：结果回来就换表头那一行并重画。
-            if (s.update.poll()) if (s.window) |window| window.redraw();
+            if (s.update.poll()) dirty = true;
             if (s.shell.poll()) |result| {
                 std.debug.print("otto-lite: shell-open status={s} code={d}\n", .{ @tagName(result.status), result.code });
-                if (s.window) |window| window.redraw();
+                dirty = true;
             }
             // 预览是异步的：工作线程交回结果就换画面并打一行账。`poll` 只在
             // UI 线程调；`sync` 在 view 里提交，这里不重复提交。
             if (s.preview.poll()) {
                 var preview_line: [96]u8 = undefined;
                 std.debug.print("otto-lite: preview {s}\n", .{s.preview.describe(&preview_line)});
-                if (s.window) |window| window.redraw();
+                dirty = true;
             }
             // 音频播放期间每拍重画一次，位置文字才会走；自然播完时
             // `playbackChanged` 再补一帧，把按钮从"停止"换回"播放"。
-            if (s.preview.isPlaying() or s.preview.playbackChanged()) {
-                if (s.window) |window| window.redraw();
-            }
+            if (s.preview.isPlaying() or s.preview.playbackChanged()) dirty = true;
             if (s.flash_left > 0) {
                 s.flash_left -= 1;
-                if (s.flash_left == 0) if (s.window) |window| window.redraw();
+                if (s.flash_left == 0) dirty = true;
             }
             // 150ms 一拍：滚轮停下之后不再有 view，预取靠这一拍补上（同一套闸门）。
             s.maybePrefetch();
+            if (dirty) if (s.window) |window| window.redraw();
         }
         nanoui.App.after(tick_ms, ctx, tick);
     }
 
-    /// 导入成功后重载：内存列表换成刚保存的那份库（理由见 `import_ui.zig` 文件头）。
-    /// 选择清空、过滤重建、预览重提交——都走和启动时同一条初始化路径。
+    /// 导入/移除成功后的对外重载入口：保留调用方原本立即请求重画的行为。
     pub fn afterReload(s: *State) void {
+        s.applyReload();
+        if (s.window) |window| window.redraw();
+    }
+
+    /// 只应用重载后的视图状态；tick 自己累计 dirty，避免中途重复 redraw。
+    fn applyReload(s: *State) void {
         s.samples = s.session.live().samples();
         s.duration_trust.clear();
         s.thumbs.clearFailures();
@@ -359,27 +211,25 @@ pub const State = struct {
         s.selection.clear();
         s.selection.resize(s.gpa, s.samples.len) catch {};
         s.preview.sync(null, .{});
-        if (s.window) |window| {
-            window_util.setTitle(window, s.samples.len);
-            window.redraw();
-        }
+        if (s.window) |window| window_util.setTitle(window, s.samples.len);
     }
 
-    fn refresh(s: *State) void {
+    /// 返回本拍是否需要重画；标题仍在模型变化时立即同步，redraw 由 tick 统一发。
+    fn refresh(s: *State) bool {
         var changed = false;
         if (s.browse) |session| {
             // 浏览模式：行来自目录会话（批次 + 监听事件，在帧边界合并应用）。
             // `poll` 自己会把选中项按身份找回来，所以这里不碰 `s.selection`。
             const report = session.poll(&s.selection) catch |err| {
                 std.debug.print("otto-lite: 浏览目录 poll 失败：{s}\n", .{@errorName(err)});
-                return;
+                return false;
             };
             changed = report.changed or report.rescanned;
             if (changed) s.samples = session.samples();
         } else {
             const report_events = s.session.live().poll() catch |err| {
                 std.debug.print("otto-lite: poll 失败：{s}\n", .{@errorName(err)});
-                return;
+                return false;
             };
             // 即使四个计数都是零，`apply` 的扩容也可能让切片搬家，所以无条件重取。
             s.samples = s.session.live().samples();
@@ -400,11 +250,8 @@ pub const State = struct {
         const ready_changed = ready != s.last_ready;
         if (ready_changed) s.last_ready = ready;
 
-        if (!changed and !ready_changed) return;
-
-        const window = s.window orelse return;
-        if (changed) window_util.setTitle(window, s.samples.len);
-        window.redraw();
+        if (changed) if (s.window) |window| window_util.setTitle(window, s.samples.len);
+        return changed or ready_changed;
     }
 
     /// 这一行是不是"已被删除"的墓碑（只有浏览模式有；库模式永远 false）。
@@ -460,16 +307,6 @@ pub const State = struct {
         if (s.window) |window| window.redraw();
     }
 };
-
-/// 这一帧有没有"人真的动了一下"：点击/松手/滚轮/键盘/文本/拖入/触控缩放都算。
-/// 只用于浏览模式的"路径不可用 → 下一次交互时重试"，不是定时器。
-fn hasInteraction(input: anytype) bool {
-    return input.pressed or input.released or input.secondary or
-        input.scroll.x != 0 or input.scroll.y != 0 or
-        input.key != null or input.chars.len != 0 or
-        input.drop != null or input.a11y_press != 0 or
-        input.zoom != 1 or input.pan.x != 0 or input.pan.y != 0;
-}
 
 pub const panic = std.debug.FullPanic(startup_dx.panic);
 
