@@ -1,319 +1,164 @@
 # OTTO Sample Manager
 
-一个面向鬼畜 / 人力调音工作流的桌面音频素材管理器。  
-适用于 Melodyne（主）、Vegas、FL Studio 等场景，把常用素材的**导入、预览、整理、拖拽复用、预解码**，节省加载时间，并且有**♿️一键活字印刷♿️**功能，极大提升人力鬼畜的效率。
+一个用 **纯 Zig + Windows 原生 API** 编写的桌面媒体素材管理器，面向 Melodyne、Vegas、FL Studio 等制作流程。
 
-作者：  
-b站 @杨薇柏_Official（https://space.bilibili.com/1042301441/）  
-b站 @_Candace_(https://space.bilibili.com/364700163)
+OTTO 负责把常用素材**导入、搜索、预览、整理并复用**；素材库只保存路径、索引和用户整理结果，**不复制或接管原始媒体文件**。
 
----
+当前版本：**0.63.0**
+下载：[GitHub Releases](https://github.com/TLBtianhu/OTTO-sample-manager/releases/latest)
 
-## 软件截图
-
-| 主界面 | 活字印刷 |
-| :---: | :---: |
-| <img src="docs/screenshots/main-interface.png" alt="OTTO Sample Manager 主界面" width="431"> | <img src="docs/screenshots/movable-type-printing.png" alt="活字印刷生成功能" width="431"> |
-| 素材分组、目录树、搜索与底部播放器 | 从歌词文本生成有序单字素材 |
-
-| 设置 | 导入 |
-| :---: | :---: |
-| <img src="docs/screenshots/settings.png" alt="OTTO Sample Manager 设置菜单" width="431"> | <img src="docs/screenshots/import-menu.png" alt="OTTO Sample Manager 导入菜单" width="431"> |
-| 搜索、文件夹、副本、内存与更新设置 | 导入文件、文件夹或移除全部导入 |
+作者：
+B 站 [@杨薇柏_Official](https://space.bilibili.com/1042301441/)
+B 站 [@_Candace_](https://space.bilibili.com/364700163)
 
 ---
 
-## 项目特色
+## 当前界面
 
-制冰时对素材处理的常见问题：
+![OTTO 当前主界面：目录树、素材列表、搜索与预览](docs/screenshots/current-main.png)
 
-- 素材散落在多个文件夹里，整理困难
-- 导入后试听、比对和筛选效率低
-- 频繁拖入 DAW / 调音软件时，工作流中断
-- 重复使用素材时容易弄乱原始文件
-- 一旦素材量变大，界面和响应速度很容易变差
-- 用melodyne拼字时，找素材是最大的工程量之一
-
-OTTO Sample Manager：
-
-- 保留原有素材目录结构
-- 快速导入和批量管理采样
-- 统一试听与波形预览
-- 面向实际制作流程优化拖拽与复用体验
-- 尽量减少重复解码、重复 IO 和无意义缓存
-- （♿️重点♿️）**一键活字印刷，省去找素材的时间**
-
----
-
-## 项目定位
-
-核心优先级是：
-
-1. **性能**：导入快、解码快、列表响应快  
-2. **工作流**：方便试听、分组、拖拽、重复使用  
-3. **界面**：保持简洁，轻量资源管理器  
+默认窗口为 **540×960**；最小窗口为 **384×768**。窗口缩到下限时，预览仍保留完整布局，不会退化成一条无法使用的细条。
 
 ---
 
 ## 主要功能
 
-### 1. 目录树导入
-- 支持按目录导入音频素材
-- 保留根目录结构
-- 支持多个根目录叠加管理
+### 导入与整理
+
+- 点击「打开」可同时选择**多个文件**或**一个文件夹**。
+- 也可以直接从资源管理器把文件或文件夹**拖进 OTTO**。
+- 多文件作为平铺素材导入；文件夹保留目录节点和层级。
+- 支持目录树、搜索、类型筛选、多选与批量操作。
+- 素材以文件身份跟踪，重扫、排序或分页后不会把操作错落到其他行。
+
+### 预览与复用
+
+- 音频试听、暂停、seek 与波形预览。
+- WAV / AIFF / FLAC / MP3 / Ogg Vorbis / Opus 由自带的 **zig-audio** 解码。
+- 图片及系统支持的媒体格式按 provider 能力预览。
+- 支持拖出到宿主，以及浏览模式下的 Shell「打开方式」。
+- 波形、缩略图与 PCM 均有明确的内存预算和生命周期，不靠无限缓存换速度。
+
+### 从库中移除
+
+选中素材或文件夹后，点击「从库中移除」或按 Delete：
+
+- **只从 OTTO 的显示和素材库记录中移除**。
+- **不删除、不移动、不改名磁盘上的源文件**。
+- 文件夹会连同其中的素材一起移除。
+- 排除记录持久保存，重启、重扫和文件监听都不会让项目复活。
+- 显式重新导入表示恢复意图，会清除对应排除记录并重新入库。
+- 正在预览或播放的项目被移除时，会安全停止并清理状态。
+
+### 只读目录浏览
+
+浏览模式用于直接查看磁盘目录，导航、多选、滚动位置和「打开方式」都可使用，但：
+
+- 不写源目录。
+- 不写素材库。
+- 不写设置。
+- 不提供「从库中移除」。
+
+预览、播放、Shell 打开和交给宿主是不同操作，不会互相冒充。
 
 ---
 
-### 2. 音频预览与波形显示
-- 支持播放 / 暂停
-- 底部播放器显示进度
-- 支持拖动进度条 seek
-- 内置波形缓存用于快速预览
+## 安装、数据与升级
 
----
+### 安装版
 
-### 3. 拖拽到调音软件
-- 支持拖入 Melodyne 3、FL Studio 等软件
-- 优化“试听 → 拖出”的连续操作体验
-
----
-
-### 4. 自动副本机制（主要特点）
-防止外部软件污染原素材（尤其是 Melodyne 对复用素材会一起操作）：
-
-- 第一次拖出：使用原文件
-- 第二次开始：生成副本
-- 打包版副本存储在 **用户数据目录 / Copy**（Windows 默认为 `%APPDATA%/sample-manager/Copy`）
-- 副本不在 UI 显示
-
----
-
-### 5. 活字印刷生成（歌词自动组装 🔥）
-
-核心新功能：**从歌词自动生成可用素材序列**
-
-工作流：
-
-```
-歌词 txt → 拼音解析 → 匹配声库 → 自动生成新分组 → 有序音频素材
-```
-
-功能说明：
-
-- 输入歌词 txt（多行文本）
-- 自动逐字转为**无声调拼音**
-- 选择一个已有分组作为“声库”（如：电棍 / 张顺飞等）
-- 自动新建分组（默认使用 txt 文件名）
-- 按歌词顺序匹配单字素材并复制
-- 自动生成有序文件：
-
-```
-001_我_wo.wav
-002_想_xiang.wav
-003_要_yao.wav
-...
-```
-
-#### 拼音匹配规则（已优化）
-
-支持以下素材命名形式：
-
-- `ba.wav`（标准拼音）
-- `ba2.wav`（数字声调）
-- `bà.wav / bá.wav`（带音调）
-
-匹配逻辑：
-
-1. 优先按汉字匹配  
-2. 再按拼音匹配（统一归一化处理）  
-
-归一化规则：
-
-- 去数字：`ba2 → ba`
-- 去音调：`bà → ba`
-- 全部转小写
-
-👉 因此三种形式都会匹配成功
-
-#### 特点
-
-- 自动生成完整素材序列（核心工作流）
-- 重复候选素材：直接取第一个
-- 缺失素材：不会中断，会统计提示
-- 生成结果**永久保存**
-
-#### 文件存储位置
-
-生成素材存储在：
-
-```
-用户数据目录 / Copy / lyrics-assemblies /
-```
-
-说明：
-
-- 与普通副本共享 Copy 体系
-- 但**不会被清理**
-- 属于长期资产（不是临时文件）
-- 覆盖升级或普通卸载应用时不会删除该目录
-
----
-
-## 技术栈
-
-- **Zig 0.17**，零第三方运行时、零 C 依赖（不用 `@cImport`）
-- 原生 Win32：DWM 合成、DirectWrite 文字、WIC 图片、Media Foundation、WASAPI
-- UI 基于 [nanoui](https://github.com/TLBtianhu/nanoui)（本项目的 fork 分支 `otto-091`）
-- 音频解码：自带的 [zig-audio](https://github.com/TLBtianhu/zig-audio)（WAV / AIFF / FLAC / MP3 / Vorbis / Opus 全部自解码）
-- 安装包 NSIS + minisign 双签名
-
-> 历史实现保留在分支上：`tauri`（Rust + WebView2）与 `electron`（更早的 Electron 版），
-> 都不再是发布入口。仓库里 `electron/`、`native/`、`src/` 等目录属于那条线，`zig/` 才是现在的产品。
-
----
-
-## 构建与运行
-
-### 环境要求
-
-- Windows 10/11 x64
-- Zig 0.17（`zig` 在 PATH 里，或改 `zig\*.ps1` 里的路径）
-- PowerShell 7（`pwsh`）
-- 出安装包需要 Node.js 与 NSIS（`zig\package.ps1` 会自动检查）
-
-### 构建
-
-```powershell
-cd zig\app
-zig build -Drelease=true        # 产出 zig\app\zig-out\bin\otto-lite.exe（约 3.7 MB）
-```
-
-### 测试
-
-```powershell
-cd zig\core   ; zig build test   # 数据层
-cd zig\ports  ; zig build test   # Win32 接口
-cd zig\app    ; zig build test   # 应用层
-```
-
-### 一条命令跑全部门禁
-
-```powershell
-zig\health.ps1 -Quick     # 10 项（构建 / 测试 / 形态 / provider 矩阵 / 签名…）
-zig\health.ps1           # 加上滚动与内存
-zig\health.ps1 -Fresh    # 再加"全新用户"安装→升级→卸载
-```
-
-### 出安装包
-
-```powershell
-zig\package.ps1 -Version 0.60.0    # zig\dist\ 下出 portable.zip + setup.exe，各自带 .sig
-```
-
-### 运行时数据在哪
-
-| 形态 | 程序与数据目录 |
-| --- | --- |
-| 便携版（zip 解压） | 程序在解压目录；数据在 `<exe>\data` |
-| 安装版 | 默认根 `%LOCALAPPDATA%\Programs\OTTO`；程序在 `<根>\app`，设置在 `<根>\data\settings.json`，库在 `<根>\data\library.otto`，缓存根为 `<根>\cache` |
-| 开发版（`zig build` 产物） | exe 在 `<项目>\zig-out\bin\otto-lite.exe` 时，数据、缓存与 `crash.log` 都在 `<项目>\.otto-dev` |
-
-安装版的默认根是当前用户目录，**不需要管理员权限**；图形安装页可以更改根，静默安装也支持把 `/D=<根>` 放在命令行最后。安装器只写 `app\`，不会创建或覆盖 `data\`、`cache\`，也不读取或迁移旧 `%APPDATA%\OTTO`。
+默认安装根：
 
 ```text
 %LOCALAPPDATA%\Programs\OTTO\
   app\    otto-lite.exe / otto-thumb-host.exe / Uninstall.exe
   data\   settings.json / library.otto
-  cache\  缩略图等可再生的缓存
+  cache\  缩略图等可再生缓存
 ```
 
-覆盖升级会全量替换 `app\`，`data\` 与 `cache\` 逐字节保留。卸载页默认只勾选**主程序**；**配置与素材库（data）**、**缓存（cache）**默认不勾，只有明确勾选才删除。选择**全选**会再确认一次。静默卸载 `Uninstall.exe /S` 始终只删除 `app\`，保留全部数据。
+- 默认当前用户安装，**不需要管理员权限**；安装页可以更改根目录。
+- 安装器只写 `app\`，不创建或覆盖 `data\`、`cache\`。
+- 覆盖升级会替换 `app\`，**素材库、设置和缓存逐字节保留**。
+- 卸载默认只移除主程序；配置、素材库和缓存只有明确勾选才删除。
+- 静默卸载 `Uninstall.exe /S` 始终只删除 `app\`。
+- 安装版可手动检查更新；下载的安装包必须验证 minisign 签名后才会运行。
+
+### 便携版
+
+- 解压即可运行，数据在 `<exe>\data`。
+- 不依赖系统注册，也不会自动覆盖运行中的程序。
+
+### 开发版
+
+当 exe 位于 `<项目>\zig-out\bin\otto-lite.exe` 时：
+
+- 设置、缓存、更新下载和 `crash.log` 都写入 `<项目>\.otto-dev`。
+- 不写 `%LOCALAPPDATA%\OTTO\dev`，也不回退到 `%TEMP%\OTTO-dev`。
+- `.otto-dev` 已被 Git 忽略，`zig-out` 本身不承载运行数据。
+
+---
+
+## 技术栈
+
+- **Zig 0.17**，无 C 源码、无实际 `@cImport`。
+- 默认目标为 **x86_64_v2**，避免发布包继承构建机器的 AVX512 指令。
+- 原生 Win32 / DirectWrite / WIC / Media Foundation / WASAPI。
+- UI 使用 [nanoui](https://github.com/TLBtianhu/nanoui) 的 Windows 分支。
+- 音频解码使用自带的 [zig-audio](https://github.com/TLBtianhu/zig-audio)。
+- 安装包使用 NSIS，发布物附带 minisign 签名。
+
+历史 Tauri / Electron 实现保留在其他分支；它们不是当前发布入口。首页只描述当前 Zig 主线已经实现并验收的能力。
+
+---
+
+## 构建与测试
+
+### 环境
+
+- Windows 10/11 x64
+- Zig 0.17
+- PowerShell 7
+- 打包时另需 Node.js 与 NSIS
+
+### 构建
+
+```powershell
+cd zig\app
+zig build -Drelease=true
+```
+
+### 测试
+
+```powershell
+cd zig\core   ; zig build test   # 94 项：数据层
+cd zig\ports  ; zig build test   # 192 项：Win32 接口
+cd zig\app    ; zig build test   # 413 项：应用层
+```
+
+### 发布前验收
+
+```powershell
+zig\health.ps1 -Quick     # 构建 / 测试 / 三形态 / provider / 透明度 / 签名
+zig\membudget.ps1         # 可见工作集、缓存与 PCM 预算
+zig\browse.ps1            # 浏览模式 49 项验收
+zig\remove_accept.ps1     # 真实隐藏窗口：移除、重启不复活、显式重导入恢复
+zig\fresh-user.ps1        # 安装 → 覆盖升级 → 卸载与数据保留
+```
+
+### 打包
+
+```powershell
+zig\package.ps1 -Version 0.63.0
+```
+
+产物在 `zig\dist`：便携 zip、安装 exe 及各自的 `.sig`。
 
 ---
 
 ## 开发文档
 
-- [`zig/app/README.md`](zig/app/README.md)：应用层全部能力、验收口径、性能数字
-- [`zig/core/README.md`](zig/core/README.md)：数据层
-- [`zig/CHARTER.md`](zig/CHARTER.md)：不可协商的规则（内存预算、只读浏览、命名…）
-- [`zig/ROADMAP.md`](zig/ROADMAP.md)：通往 1.0 的阶段与判据
-- [`zig/PERF.md`](zig/PERF.md) / [`zig/MEMORY.md`](zig/MEMORY.md)：性能与内存的实测账本
-- [`zig/CHANGELOG.md`](zig/CHANGELOG.md)：每个版本改了什么
----
-
-## 使用方法
-
-### 1. 导入素材
-导入你的音频目录（建议提前按项目 / 角色 / 音源整理好）
-
----
-
-### 2. 浏览
-按结构查看素材，支持批量选择
-
----
-
-### 3. 试听
-点击素材即可播放：
-
-- 播放 / 暂停
-- 查看进度
-- 拖动 seek
-
----
-
-### 4. 拖拽使用
-直接拖入 Melodyne / FL Studio 使用
-
----
-
-### 5. 重复使用保护
-多次拖出自动使用副本，避免污染原文件
-
----
-
-### 6. 活字印刷生成（歌词转素材）
-
-步骤：
-
-1. 点击顶部 **“活字印刷生成”**
-2. 选择歌词 txt 文件
-3. 选择声库分组（如“电棍”）
-4. 确认生成分组名称
-5. 自动生成素材序列
-
-结果：
-
-- 自动创建新分组
-- 自动按顺序生成音频
-- 可直接用于人力调音 / 拼接
-
----
-
-## 更新检查
-
-Windows NSIS 安装版支持两种更新检查方式：
-
-- 不会启动时联网；只在设置里手动点「检查更新」（或用 `--check-update <url>` 命令行）
-- 在顶部右侧 `⚙` 设置菜单中手动点击 `检查更新`
-
-设置菜单中会显示：
-
-- `当前版本：x.x.x`
-- `检查更新`、`下载并自动重启`与下载进度
-
-手动检查会有明确反馈：
-
-- 有新版本：用户点击 `下载并自动重启` 后，下载完成立即静默安装并重启
-- 没有新版本：设置内显示当前已是最新版本
-- 检查失败：设置内显示错误摘要，并可重试
-- 便携版：不会替换运行中的 EXE，只会打开 Release 下载页
-
-### 更新来源与安全说明
-当前通过 GitHub Releases 发布 Windows NSIS 安装包与便携 zip，各自带 minisign 签名（`.sig`）。
-安装版下载更新后，用应用内置的 minisign 公钥验证安装包签名；签名不匹配时不安装。
-
-发布包与签名由同一次 `zig\package.ps1` 生成，并在发布前校验版本号、文件大小与签名；
-该签名用于保护应用内更新链路，与 Windows Authenticode 发布者签名不是同一机制。
-更新走覆盖式升级：新安装包直接盖在旧程序目录上，素材库与设置保持不变。
-和 updater 签名。该签名用于保护应用内更新链路，与 Windows Authenticode 发布者签名不是同一机制。
+- [`zig/app/README.md`](zig/app/README.md)：应用层能力与验收口径
+- [`zig/core/README.md`](zig/core/README.md)：素材库数据层
+- [`zig/CHARTER.md`](zig/CHARTER.md)：内存、只读浏览、命名等约束
+- [`zig/PERF.md`](zig/PERF.md) / [`zig/MEMORY.md`](zig/MEMORY.md)：性能与内存记录
+- [`zig/CHANGELOG.md`](zig/CHANGELOG.md)：逐版本变更
