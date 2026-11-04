@@ -2,7 +2,7 @@
 //! 播放进度竖线。
 //!
 //! 为什么单独一个文件：`preview_panel.zig` 已经贴着单文件行数上限；这一节只依赖
-//! `preview.AudioSession` 的公开字段，拆出来两边都留有余量，五个分支的 switch
+//! `audio_session.AudioSession` 的公开字段，拆出来两边都留有余量，五个分支的 switch
 //! 仍然在视图那一枝（`preview_view.zig`）里（视图依然是"按 Outcome 分支画"，
 //! 不按媒体类型分叉）。
 //!
@@ -23,6 +23,7 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const preview = @import("preview.zig");
+const audio_session = @import("preview_audio_session.zig");
 const media_key = @import("media_key.zig");
 const player_mod = @import("audio/player.zig");
 const waveform = @import("audio/waveform.zig");
@@ -46,7 +47,7 @@ pub const Identity = struct {
 /// 由 UI 线程调用：`play()/stop()` 只投递命令，设备与播放线程都在 `audio/player.zig`。
 pub fn draw(
     c: *ui.Context,
-    session: *preview.AudioSession,
+    session: *audio_session.AudioSession,
     provider: ?[]const u8,
     identity: Identity,
 ) void {
@@ -103,7 +104,7 @@ fn caption(c: *ui.Context, provider: ?[]const u8) void {
 
 /// 请求播放；首次 WASAPI 初始化在后台进行，视图显示“正在启动音频…”。
 /// 返回请求是否被接受；设备错误由 `pump` 落地成具名状态与日志。
-pub fn play(session: *preview.AudioSession) bool {
+pub fn play(session: *audio_session.AudioSession) bool {
     session.startPlayback() catch |err| {
         std.debug.print(
             "otto-lite: 音频播放失败（{s} hresult=0x{x:0>8}）\n",
@@ -140,7 +141,7 @@ pub fn toggle(outcome: *preview.Outcome, name: []const u8) bool {
 ///
 /// 整条波形是可点击的：x 比例 → 毫秒 → `AudioSession.seek()`。点击帧里先处理
 /// seek 再画进度线，所以线在同一帧就到点击位置；未播放时只是把播放头放过去。
-fn drawWave(c: *ui.Context, session: *preview.AudioSession, identity: Identity) void {
+fn drawWave(c: *ui.Context, session: *audio_session.AudioSession, identity: Identity) void {
     const bitmap = session.waveform;
     if (bitmap.width == 0 or bitmap.height == 0 or bitmap.pixels.len == 0) return;
 
@@ -192,7 +193,7 @@ fn drawWave(c: *ui.Context, session: *preview.AudioSession, identity: Identity) 
 /// 波形点击：把鼠标相对矩形左边缘的 x 换成比例，再换成目标毫秒。
 /// `it.rect` 是上一帧的布局矩形（nanoui 的命中就是按上一帧算的），用它做换算
 /// 与用户看到的波形一致。失败只打日志，不弹窗。
-fn seekFromClick(c: *ui.Context, session: *preview.AudioSession, rect: ?ui.Rect) void {
+fn seekFromClick(c: *ui.Context, session: *audio_session.AudioSession, rect: ?ui.Rect) void {
     const r = rect orelse return;
     if (r.w <= 0) return;
     const target = waveform.positionMsAt(c.input.mouse.x - r.x, r.w, session.durationMs());

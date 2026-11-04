@@ -15,6 +15,7 @@ const builtin = @import("builtin");
 const zig_audio = @import("zig_audio");
 const preview = @import("../preview.zig");
 const decode = @import("decode.zig");
+const audio_decline = @import("../providers/audio_decline.zig");
 const pcm = @import("pcm.zig");
 
 const testing = std.testing;
@@ -117,7 +118,7 @@ test "WAV PCM24 / float32：库内降到 i16，样本数与源帧数一致" {
         defer testing.allocator.free(path);
         const result = try std.process.run(testing.allocator, testing.io, .{
             .argv = &.{
-                ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
+                ffmpeg, "-v",       "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
                 "-c:a", case.codec, path,
             },
         });
@@ -197,7 +198,7 @@ test "WAV PCM8 / PCM32：库内按 WAV 约定转换，样本数不变" {
         defer testing.allocator.free(path);
         const result = try std.process.run(testing.allocator, testing.io, .{
             .argv = &.{
-                ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
+                ffmpeg, "-v",       "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
                 "-c:a", case.codec, path,
             },
         });
@@ -258,5 +259,5 @@ test "四态映射：unsupported / file_missing / failed 的边界只有一份" 
 
 /// 把编译期已知的错误值换成四态原因（`decode.reason` 的输入类型是 `decode.Error`）。
 fn fromError(err: decode.Error) preview.Reason {
-    return decode.reason(err);
+    return audio_decline.reason(err);
 }

@@ -1,11 +1,11 @@
-//! 解码产物 → `preview.AudioSession` 的**唯一**装配点。
+//! 解码产物 → `audio_session.AudioSession` 的**唯一**装配点。
 //!
 //! 为什么单独一个文件：zig-audio（WAV/FLAC/MP3/AIFF）与 Media Foundation
 //! （MP3/AAC/WMA）的解码器完全不同，但解码之后的四件事必须逐字节一致：
 //!
 //!   1. 算波形峰值（`peaks.compute`，512 桶 min/max）；
 //!   2. 把峰值渲染成 BGRA 波形位图（`waveform.render`，240×56）；
-//!   3. 把 PCM / 采样率 / 声道 / 位深 / 时长装进 `preview.AudioSession`，并把
+//!   3. 把 PCM / 采样率 / 声道 / 位深 / 时长装进 `audio_session.AudioSession`，并把
 //!      PCM 的所有权转移给它；Player 留到第一次播放再建。
 //!
 //! 如果每个 provider 复制一份这段代码，几份就会在"桶数、波形尺寸、失败时谁释放
@@ -14,7 +14,7 @@
 //! `audio/pcm.zig`：它不再叫 Wav，因为解出来的可能是 WAV / FLAC / MP3 / AIFF /
 //! MF 的任意一种容器。
 //!
-//! 所有权约定（与 `preview.AudioSession` 文件头一致）：
+//! 所有权约定（与 `audio_session.AudioSession` 文件头一致）：
 //!   * `build` 成功时把 `decoded.pcm` 交给会话，并把 `decoded.pcm` 置空；
 //!   * `build` 失败时 `decoded` 仍完整归调用方，调用方照常 `deinit`——不会出现
 //!     "波形算到一半失败，PCM 已经被会话吃掉"的半所有权状态；
@@ -23,7 +23,7 @@
 //! 不 import nanoui、不碰窗口；只依赖预览契约、峰值、波形与播放器。
 
 const std = @import("std");
-const preview = @import("../preview.zig");
+const audio_session = @import("../preview_audio_session.zig");
 const peaks_mod = @import("peaks.zig");
 const pcm = @import("pcm.zig");
 const player = @import("player.zig");
@@ -48,7 +48,7 @@ pub const SampleFormat = pcm.SampleFormat;
 pub fn build(
     allocator: std.mem.Allocator,
     decoded: *Decoded,
-) player.Error!preview.AudioSession {
+) player.Error!audio_session.AudioSession {
     const io = std.Io.Threaded.global_single_threaded.io();
     const peaks_started = std.Io.Clock.Timestamp.now(io, .awake);
     const peaks = try peaks_mod.compute(
@@ -85,7 +85,7 @@ pub fn build(
         );
     }
     const player_ms = @as(f64, @floatFromInt(player_started.untilNow(io).raw.nanoseconds)) / 1_000_000.0;
-    const session: preview.AudioSession = .{
+    const session: audio_session.AudioSession = .{
         .pcm = decoded.pcm,
         .sample_rate = decoded.sample_rate,
         .channels = decoded.channels,

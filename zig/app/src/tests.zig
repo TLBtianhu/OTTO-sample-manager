@@ -101,6 +101,8 @@ test {
     // 预览契约与注册表顺序；`providers/root.zig` 里的 comptime 检查也会在这里跑。
     _ = @import("preview.zig");
     _ = @import("preview_test.zig");
+    // 音频会话：seek、懒 Player、20 次创建/取消/释放无泄漏。
+    _ = @import("preview_audio_session_test.zig");
     _ = @import("preview_snapshot.zig");
     _ = @import("sample_facts.zig");
     // 行内时长文本（精确 / ≈估算 / 未知）与 app 侧的可信度 side table。

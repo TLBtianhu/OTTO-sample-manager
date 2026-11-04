@@ -12,7 +12,7 @@
 //!      没有音频端点 / 设备初始化失败 → `none.failed`。`unsupported` 是谢绝，
 //!      `file_missing` / `failed` 是认领后失败：注册表按四态规则决定继续问下一位
 //!      还是到此为止。
-//!   3. 把 `AudioSession` 交给视图；播放/停止/position 都在 `preview.AudioSession`
+//!   3. 把 `AudioSession` 交给视图；播放/停止/position 都在 `audio_session.AudioSession`
 //!      的方法里，波形是会话里一张已经画好的位图，视图不认识 WASAPI，也不认识解码。
 //!
 //! ## 为什么不再有 `audio/wav.zig`
@@ -42,9 +42,11 @@ const builtin = @import("builtin");
 const core = @import("otto_core");
 const coarse = @import("../audio/coarse.zig");
 const decode_mod = @import("../audio/decode.zig");
+const audio_decline = @import("audio_decline.zig");
 const player = @import("../audio/player.zig");
 const progressive = @import("../audio/progressive.zig");
 const session_mod = @import("../audio/session.zig");
+const audio_session = @import("../preview_audio_session.zig");
 const preview = @import("../preview.zig");
 
 /// 注册表里的这一项。`kind = .audio`：预览请求产出可播放的会话；
@@ -85,7 +87,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) decode_mod.Error!ses
 pub fn sessionFromDecoded(
     allocator: std.mem.Allocator,
     decoded: *session_mod.Decoded,
-) player.Error!preview.AudioSession {
+) player.Error!audio_session.AudioSession {
     return session_mod.build(allocator, decoded);
 }
 
@@ -149,11 +151,11 @@ fn openIcon(allocator: std.mem.Allocator, request: preview.Request) preview.Erro
     return .{ .image = bitmap };
 }
 
-/// 读取/解码错误 → 四态原因。映射表在 `audio/decode.zig`，wasapi-pcm 与
+/// 读取/解码错误 → 四态原因。映射表在 `providers/audio_decline.zig`，wasapi-pcm 与
 /// native-audio 不会各写一份。只有 OOM 是 `preview.Error`。
 fn decline(err: decode_mod.Error) preview.Error!preview.Outcome {
     if (err == error.OutOfMemory) return error.OutOfMemory;
-    const reason = decode_mod.reason(err);
+    const reason = audio_decline.reason(err);
     std.debug.print(
         "otto-lite: WAV 预览谢绝 error={s} reason={s}\n",
         .{ @errorName(err), @tagName(reason) },

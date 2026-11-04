@@ -32,7 +32,7 @@ const core = @import("otto_core");
 const native_audio = @import("native_audio.zig");
 const providers = @import("root.zig");
 const preview = @import("../preview.zig");
-const decode_mod = @import("../audio/decode.zig");
+const audio_decline = @import("audio_decline.zig");
 
 const testing = std.testing;
 const vector_dir = "C:\\src\\zig-audio-vectors\\ogg";
@@ -79,7 +79,7 @@ test "多帧包（60ms = 3×20ms，code 3）：库仍 Unsupported，provider 谢
     // provider 这一层：同一个错误值走 `reason` 映射表 → unsupported（谢绝），
     // 不是"文件坏了"。
     try testing.expectError(error.Unsupported, native_audio.decode(testing.allocator, multi_frame_path));
-    try testing.expectEqual(preview.Reason.unsupported, decode_mod.reason(error.Unsupported));
+    try testing.expectEqual(preview.Reason.unsupported, audio_decline.reason(error.Unsupported));
 
     var sample = sampleFor(multi_frame_path, ".opus");
     const outcome = try native_audio.provider.open(testing.allocator, .{ .sample = &sample, .max_px = 128 });
@@ -245,7 +245,7 @@ test "多帧包放在流的最后：先解出接近 2 秒的样本、再中途 U
     // `decode` 已经往 `pcm` 里写过数据之后——半截 PCM 由 `errdefer` 释放，
     // `testing.allocator` 是泄漏探针（有残留这条测试直接红）。
     try testing.expectError(error.Unsupported, native_audio.decode(testing.allocator, path));
-    try testing.expectEqual(preview.Reason.unsupported, decode_mod.reason(error.Unsupported));
+    try testing.expectEqual(preview.Reason.unsupported, audio_decline.reason(error.Unsupported));
     var sample = sampleFor(path, ".opus");
     const outcome = try native_audio.provider.open(testing.allocator, .{ .sample = &sample, .max_px = 128 });
     defer outcome.deinit(testing.allocator);

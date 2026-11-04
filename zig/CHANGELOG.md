@@ -33,6 +33,14 @@
 
 
 
+## 0.63.3
+
+- **架构清理：预览契约与音频会话分离**。`preview.zig` 从 587 行降至 292 行，只保留 Request / Outcome / Provider / Registry / decline。
+- 新增 `preview_audio_session.zig` 统一拥有渐进解码、PCM、波形、播放、seek、懒 Player 与释放顺序；共享位图类型独立到 `preview_bitmap.zig`。
+- 解码错误到四态的映射移到 provider 边缘，`decode` 不再依赖 preview 或会话装配层，切断旧的间接循环依赖。
+- 预览切换、播放中移除、渐进取消、懒 Player 与 20 次生命周期释放均有回归验收。
+- UI、布局、provider 顺序、缓存键、库格式和现有交互行为不变。
+
 ## 0.63.2
 
 - **架构清理：库帧与浏览帧分离**。`main.State.view` 只做共享准备与模式分派；库专属 drop/open/remove 与浏览专属地址栏/导航/banner 各自归位。

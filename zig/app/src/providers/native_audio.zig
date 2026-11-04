@@ -77,6 +77,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("otto_core");
 const decode_mod = @import("../audio/decode.zig");
+const audio_decline = @import("audio_decline.zig");
 const file_reader_mod = @import("../audio/file_reader.zig");
 const player = @import("../audio/player.zig");
 const progressive = @import("../audio/progressive.zig");
@@ -170,7 +171,7 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
     return .{ .audio = started.session };
 }
 
-/// 解码错误 → 谢绝原因。映射表在 `audio/decode.zig`，这里只做日志。
+/// 解码错误 → 谢绝原因。映射表在 `providers/audio_decline.zig`，这里只做日志。
 ///
 /// **`Unsupported` 既可能来自 `open`，也可能来自读到一半的 `read`**（Opus 的多帧包，
 /// 见文件头）。两者是同一个错误值，所以这条谢绝路径不需要
@@ -179,7 +180,7 @@ fn open(allocator: std.mem.Allocator, request: preview.Request) preview.Error!pr
 /// 要收拾。
 fn decline(err: DecodeError, path: []const u8) preview.Error!preview.Outcome {
     if (err == error.OutOfMemory) return error.OutOfMemory;
-    const reason = decode_mod.reason(err);
+    const reason = audio_decline.reason(err);
     std.debug.print(
         "otto-lite: 纯 Zig 音频预览谢绝 file={s} error={s} reason={s}\n",
         .{ path, @errorName(err), @tagName(reason) },

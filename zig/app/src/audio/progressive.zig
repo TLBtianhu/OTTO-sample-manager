@@ -5,7 +5,7 @@
 //! 切走先 cancel+join，旧任务不会与新文件同时驻留。驻留档位见 `residency.zig`。
 
 const std = @import("std");
-const preview = @import("../preview.zig");
+const audio_session = @import("../preview_audio_session.zig");
 const decode_mod = @import("decode.zig");
 const peaks_mod = @import("peaks.zig");
 const player = @import("player.zig");
@@ -45,7 +45,7 @@ pub const StartError = decode_mod.Error || player.Error;
 /// 一次预览的产物。`progressive = true` 表示波形还会长；`false` 表示第一版就是
 /// 最终版（短文件 / 总帧数未知的容器，见文件头）。
 pub const Start = struct {
-    session: preview.AudioSession,
+    session: audio_session.AudioSession,
     progressive: bool,
 };
 
@@ -126,7 +126,7 @@ pub fn start(
     defer if (bitmap_owned) allocator.free(bitmap.pixels);
 
     const channels = self.stream.channels;
-    const session: preview.AudioSession = .{
+    const session: audio_session.AudioSession = .{
         .pcm = &.{},
         .sample_rate = self.stream.sample_rate,
         .channels = channels,
@@ -236,7 +236,7 @@ const Engine = struct {
         return self;
     }
 
-    fn interface(self: *Engine) preview.AudioProgress {
+    fn interface(self: *Engine) audio_session.AudioProgress {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
@@ -426,7 +426,7 @@ const Engine = struct {
     }
 
     /// UI 线程：把最终结果移进会话并画最终波形。返回画面是否真的变了。
-    fn adopt(self: *Engine, session: *preview.AudioSession) bool {
+    fn adopt(self: *Engine, session: *audio_session.AudioSession) bool {
         if (self.adopted) return false;
         self.adopted = true;
         self.lock.acquire();
@@ -517,7 +517,7 @@ fn cast(ctx: *anyopaque) *Engine {
     return @ptrCast(@alignCast(ctx));
 }
 
-fn pumpImpl(ctx: *anyopaque, session: *preview.AudioSession) bool {
+fn pumpImpl(ctx: *anyopaque, session: *audio_session.AudioSession) bool {
     const self = cast(ctx);
     if (self.adopted) return false;
     if (self.done.load(.acquire)) {
@@ -559,7 +559,7 @@ fn pumpImpl(ctx: *anyopaque, session: *preview.AudioSession) bool {
     return changed;
 }
 
-fn waitImpl(ctx: *anyopaque, session: *preview.AudioSession) void {
+fn waitImpl(ctx: *anyopaque, session: *audio_session.AudioSession) void {
     const self = cast(ctx);
     if (self.adopted) return;
     if (self.thread) |thread| {
@@ -589,7 +589,7 @@ fn requestPlayImpl(ctx: *anyopaque, wanted: bool) void {
     cast(ctx).want_play.store(wanted, .release);
 }
 
-const vtable: preview.AudioProgress.VTable = .{
+const vtable: audio_session.AudioProgress.VTable = .{
     .pump = pumpImpl,
     .wait = waitImpl,
     .cancel = cancelImpl,

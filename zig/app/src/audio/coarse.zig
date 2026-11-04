@@ -19,7 +19,7 @@
 //! 本文件只碰音频文件与像素，不碰窗口、不 import nanoui。
 
 const std = @import("std");
-const preview = @import("../preview.zig");
+const bitmap_mod = @import("../preview_bitmap.zig");
 const file = @import("file.zig");
 const peaks_mod = @import("peaks.zig");
 const waveform = @import("waveform.zig");
@@ -48,7 +48,7 @@ pub const Error = file.Error || wav_header.Error || std.mem.Allocator.Error || e
 
 /// 生成一张 WAV 的行内图标（BGRA、透明背景）。像素归调用方，用同一个 allocator
 /// 释放。`max_px` 是请求的长边；图标固定画成正方形（行内槽就是正方形）。
-pub fn wavIcon(allocator: std.mem.Allocator, path: []const u8, max_px: u32) Error!preview.Bitmap {
+pub fn wavIcon(allocator: std.mem.Allocator, path: []const u8, max_px: u32) Error!bitmap_mod.Bitmap {
     const started = win.GetTickCount64();
 
     var reader = try file.openReader(allocator, path);

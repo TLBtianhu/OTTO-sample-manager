@@ -1,4 +1,4 @@
-//! 波形渲染：`peaks.Peaks` → BGRA 位图，形状与 `preview.Bitmap` 完全一致
+//! 波形渲染：`peaks.Peaks` → BGRA 位图，形状与 `bitmap_mod.Bitmap` 完全一致
 //! （每像素 4 字节、`stride == width * 4`、顶行在前、alpha 预乘）。
 //!
 //! 为什么不给 nanoui 加画布 API：见报告——nanoui 已经有 `ui.image` 这条成熟路径
@@ -18,7 +18,7 @@
 
 const std = @import("std");
 const peaks_mod = @import("peaks.zig");
-const preview = @import("../preview.zig");
+const bitmap_mod = @import("../preview_bitmap.zig");
 
 /// 默认尺寸（像素）：240 是预览条"整条区域"的可用宽度（380 窗口 − 边距 − 图位），
 /// 56 够画出包络，又给两行事实和播放键留出纵向空间。
@@ -42,7 +42,7 @@ pub fn render(
     width: u32,
     height: u32,
     color: Color,
-) Error!preview.Bitmap {
+) Error!bitmap_mod.Bitmap {
     return renderPrefix(allocator, peaks, width, height, color, peaks.len());
 }
 
@@ -59,7 +59,7 @@ pub fn renderPrefix(
     height: u32,
     color: Color,
     complete_buckets: usize,
-) Error!preview.Bitmap {
+) Error!bitmap_mod.Bitmap {
     // 0 宽/0 高在 UI 里没有意义（`ui.image` 会直接拒绝），夹到 1 免得除零。
     const w: u32 = @max(1, width);
     const h: u32 = @max(1, height);
@@ -67,7 +67,7 @@ pub fn renderPrefix(
     const pixels = try allocator.alloc(u8, stride * @as(usize, h));
     errdefer allocator.free(pixels);
 
-    const bitmap: preview.Bitmap = .{
+    const bitmap: bitmap_mod.Bitmap = .{
         .pixels = pixels,
         .width = w,
         .height = h,
