@@ -1,6 +1,6 @@
 .{
     .name = .otto_lite,
-    .version = "0.63.6",
+    .version = "0.63.7",
     .fingerprint = 0x5672452d5e9089f6,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{

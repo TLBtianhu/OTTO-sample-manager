@@ -149,8 +149,7 @@ Section "Uninstall"
   SetOutPath "$TEMP"
 
   ; /S 下两个变量在 un.onInit 固定为 0，所以这里只删除 app 与卸载器。
-  ; 先兼容清理旧版 app\Uninstall.exe，再按选择清理数据，最后删除根卸载器。
-  Delete "$OttoRoot\app\Uninstall.exe"
+  ; app 整体删除已覆盖旧版卸载器；随后按选择清理数据，最后删除根卸载器。
   RMDir /r "$OttoRoot\app"
   ${If} $OttoCleanData == "1"
     RMDir /r "$OttoRoot\data"
