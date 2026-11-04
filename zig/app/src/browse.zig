@@ -1,16 +1,15 @@
-//! 目录浏览：后台懒枚举/续页、90 MiB 具名拒绝、事件驱动重扫、按文件身份恢复选中。
-//! Source 负责 FindFirstFileExW 与批次；Budget 负责实测行开销；事件只在 poll 合并应用，
-//! 风暴/溢出后重扫并 replay；Tracker 以卷序列号+文件索引（无身份才退到路径）跟踪选中。
+//! 目录浏览 Session：目录行、路径存储、后台懒枚举/续页、90 MiB 预算、选择与导航生命周期。
+//! Source 负责 FindFirstFileExW 与批次；Budget 负责实测行开销；browse_poll 独占监听事件、
+//! 重扫/replay 协议；Tracker 以卷序列号+文件索引（无身份才退到路径）跟踪选中。
 //! 路径由共享 PathStore 持有完整绝对路径，长路径/UNC/Unicode 与排序语义不变。
 //! 全程只读；路径不可用保留具名原因，只在下一次交互重试，不做定时轮询。
 
 const std = @import("std");
 const core = @import("otto_core");
 const selection_mod = @import("selection.zig");
-const watch = @import("otto_watch");
 const source_mod = @import("browse_source.zig");
 const select_mod = @import("browse_select.zig");
-const reconcile_mod = @import("browse_reconcile.zig");
+const poll_mod = @import("browse_poll.zig");
 const budget_mod = @import("browse_budget.zig");
 const bench_win = @import("bench_win.zig");
 const browse_target = @import("browse_target.zig");
@@ -71,10 +70,11 @@ pub const Session = struct {
     path_error: ?[]const u8 = null,
     /// 这次会话允许"加载更多"到多少条（总硬上限 200000）。
     limit: usize,
-    watch_enabled: bool,
 
     /// 枚举线程与批次交接（`browse_source.zig`）。
     source: *source_mod.Source,
+    /// 监听、事件合入与重扫/replay 协议（`browse_poll.zig`）。
+    changes: *poll_mod.State,
     /// 正在枚举（已发出请求、还没拿到 done）。界面显示"正在读取目录…"。
     enumerating: bool = true,
     /// 正在加载下一页（与 `enumerating` 的区别只在状态条文案）。
@@ -97,29 +97,11 @@ pub const Session = struct {
     swapping: bool = false,
     /// 已经加载的页数（含首批；`--pages` 探针用它验收）。
     pages: u32 = 0,
-    /// 重扫次数 / reconcile 补事件次数（探针用，不参与 UI）。
-    rescans: u64 = 0,
-    reconciles: u64 = 0,
 
     // ---- 会话计时 ----
     started_ns: i128,
     first_page_ns: ?i128 = null,
     done_ns: ?i128 = null,
-
-    // ---- 监听 ----
-    watcher: ?*watch.Watcher = null,
-    event_buffer: []watch.Event = &.{},
-    events_total: u64 = 0,
-    /// 已应用/已观察到的最大事件序号（监听队列的单调序号，缺口 = 丢失）。
-    last_event_seq: u64 = 0,
-    /// 本次重扫请求时的序号水位：> 它的事件要在重扫完成后补应用。
-    rescan_seq: u64 = 0,
-    /// 重扫在飞：**不消费**监听队列，把事件留给 reconcile。
-    reconciling: bool = false,
-    /// 本帧刚收尾一次重扫：下个事件步骤要把队列里的事件全部补应用。
-    replay_after_rescan: bool = false,
-    /// reconcile 期间又看到 overflow / 序号缺口：合并成**一次**后续重扫。
-    reconcile_again: bool = false,
 
     // ---- 消费侧（只有 UI 线程碰） ----
     entries: std.ArrayListUnmanaged(Entry) = .empty,
@@ -128,8 +110,6 @@ pub const Session = struct {
     view_rows: std.ArrayListUnmanaged(core.model.Sample) = .empty,
     /// 合成 id 的字节（每条一段，指向这里；`view_rows` 每轮重建）。
     ids: std.ArrayListUnmanaged(u8) = .empty,
-    /// 监听事件先加进来的路径（借用 `entries` 里的 path 切片）：分页去重用。
-    event_paths: std.ArrayListUnmanaged([]const u8) = .empty,
     /// 选中项的身份跟踪（`browse_select.zig`）。
     tracker: select_mod.Tracker,
     /// 全量重枚举之前记下的选中项，以及导航历史恢复状态。
@@ -164,9 +144,9 @@ pub const Session = struct {
             // 盘根（`C:\`）没有最后一段：退回完整路径，别在状态条上显示空名字。
             .name = if (core.model.baseName(absolute).len > 0) core.model.baseName(absolute) else absolute,
             .limit = @max(1, @min(options.limit, types.hard_limit)),
-            .watch_enabled = options.watch,
             .path_store = path_store_mod.Store.init(allocator, options.path_mode),
             .source = undefined,
+            .changes = undefined,
             .started_ns = types.nowNs(io),
             .tracker = select_mod.Tracker.init(allocator),
             .history = undefined,
@@ -176,15 +156,9 @@ pub const Session = struct {
         self.history = try history_mod.History.init(allocator, absolute);
         errdefer self.history.deinit();
 
-        // 监听先于枚举且保持非递归。
-        if (options.watch) self.watcher = openWatcher(allocator, absolute);
-        errdefer if (self.watcher) |watcher| {
-            watcher.deinit();
-            allocator.destroy(watcher);
-        };
-
-        self.event_buffer = try allocator.alloc(watch.Event, storm_threshold + 1);
-        errdefer allocator.free(self.event_buffer);
+        // 监听先于枚举且保持非递归；协议状态与缓冲归 browse_poll。
+        self.changes = try poll_mod.State.init(allocator, absolute, options.watch);
+        errdefer self.changes.deinit();
 
         // 基线要在生产线程起跑**之前**量：之后的工作集里就有行了。
         self.budget = budget_mod.Budget.initWithCap(options.memory_budget_bytes);
@@ -198,14 +172,13 @@ pub const Session = struct {
         self.source.deinit();
         self.closeWatcher();
         self.clearEntries();
-        self.event_paths.deinit(self.allocator);
+        self.changes.deinit();
         self.entries.deinit(self.allocator);
         self.view_rows.deinit(self.allocator);
         self.ids.deinit(self.allocator);
         self.tracker.deinit();
         self.history.deinit();
         self.path_store.deinit();
-        if (self.event_buffer.len > 0) self.allocator.free(self.event_buffer);
         self.allocator.free(self.root);
         self.allocator.destroy(self);
     }
@@ -250,7 +223,7 @@ pub const Session = struct {
             .unreadable = self.unreadable,
             .first_page_ms = if (self.first_page_ns) |ns| types.nsToMs(ns - self.started_ns) else 0,
             .enum_ms = if (self.done_ns) |ns| types.nsToMs(ns - self.started_ns) else 0,
-            .events = self.events_total,
+            .events = self.changes.events_total,
             .tombstones = self.tombstones,
             .has_more = self.has_more,
             .loading_more = self.loading_more,
@@ -258,8 +231,8 @@ pub const Session = struct {
             .remaining = self.remaining,
             .limit = self.limit,
             .bytes_per_row = self.budget.per_row orelse 0,
-            .rescans = self.rescans,
-            .reconciles = self.reconciles,
+            .rescans = self.changes.rescans,
+            .reconciles = self.changes.reconciles,
             .pages = self.pages,
             .sort = self.sort_key.text(),
             .epoch = self.source.currentEpoch(),
@@ -364,8 +337,8 @@ pub const Session = struct {
         // 2. 枚举线程发布的批次。
         if (try self.pumpBatches(&report)) report.changed = true;
 
-        // 3. 监听事件（重扫期间不取，留给 reconcile）。
-        try reconcile_mod.pump(self, &report);
+        // 3. 监听事件（重扫期间不取，留给 replay）。
+        try poll_mod.pump(self, &report);
 
         // 一页或一批事件收尾才排序：O(n log n)，不是每 512 行重排一次。
         if (report.changed and !self.enumerating and !self.swapping and self.needs_sort) {
@@ -449,11 +422,8 @@ pub const Session = struct {
                         self.path_error = null;
                     },
                 }
-                if (self.reconciling and !node.append) {
-                    // 重扫的 done 到了：事件步骤把队列里的补应用一遍。
-                    self.reconciling = false;
-                    self.replay_after_rescan = true;
-                }
+                // 重扫 done 到达后，下一事件步骤 replay 队列中的补事件。
+                self.changes.batchDone(node.append);
                 changed = true;
                 continue;
             }
@@ -475,11 +445,9 @@ pub const Session = struct {
     }
 
     fn appendRow(self: *Session, entry: Entry) void {
-        for (self.event_paths.items) |known| {
-            if (std.mem.eql(u8, known, entry.path)) {
-                self.pathAllocator().free(entry.path);
-                return;
-            }
+        if (!self.changes.acceptsBatchRow(entry.path)) {
+            self.pathAllocator().free(entry.path);
+            return;
         }
         self.entries.appendAssumeCapacity(entry);
         self.needs_sort = true;
@@ -488,7 +456,7 @@ pub const Session = struct {
     /// 探针/测试用：强制一次重扫，并可让生产线程在枚举到 `pause_after` 条时暂停。
     pub fn forceRescan(self: *Session, pause_after: usize, pause_ms: u64) void {
         self.source.setPause(pause_after, pause_ms);
-        reconcile_mod.startRescan(self, self.last_event_seq);
+        poll_mod.requestRescan(self);
     }
 
     pub fn rescanPaused(self: *const Session) bool {
@@ -537,7 +505,7 @@ pub const Session = struct {
 
     fn clearEntries(self: *Session) void {
         // 去重表借用条目的 path 切片：先清表，再释放字符串。
-        self.event_paths.clearRetainingCapacity();
+        self.changes.clearEventPaths();
         for (self.entries.items) |entry| self.pathAllocator().free(entry.path);
         self.entries.clearRetainingCapacity();
         self.view_rows.clearRetainingCapacity();
@@ -550,42 +518,21 @@ pub const Session = struct {
     }
 
     pub fn closeWatcher(self: *Session) void {
-        if (self.watcher) |watcher| {
-            watcher.deinit();
-            self.allocator.destroy(watcher);
-            self.watcher = null;
-        }
+        self.changes.close();
     }
 
     pub fn reopenWatcher(self: *Session) void {
-        if (self.watch_enabled) self.watcher = openWatcher(self.allocator, self.root);
+        self.changes.reopen(self.root);
+    }
+
+    pub fn hasWatcher(self: *const Session) bool {
+        return self.changes.watcher != null;
     }
 
     fn rebuildSamples(self: *Session) error{OutOfMemory}!void {
         return view.rebuild(self);
     }
 };
-
-fn openWatcher(allocator: std.mem.Allocator, root: []const u8) ?*watch.Watcher {
-    const watcher = allocator.create(watch.Watcher) catch return null;
-    watcher.* = watch.Watcher.init(allocator, root, .{
-        .capacity = types.watch_capacity,
-        .recursive = false,
-    }) catch |err| {
-        allocator.destroy(watcher);
-        if (err != error.OutOfMemory) {
-            std.debug.print("otto-lite: 浏览目录监听不可用（{s}），本次只显示静态列表\n", .{@errorName(err)});
-        }
-        return null;
-    };
-    watcher.start() catch |err| {
-        watcher.deinit();
-        allocator.destroy(watcher);
-        std.debug.print("otto-lite: 浏览目录监听线程起不来（{s}）\n", .{@errorName(err)});
-        return null;
-    };
-    return watcher;
-}
 
 fn mapInitError(err: anyerror) InitError {
     return switch (err) {

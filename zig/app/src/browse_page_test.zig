@@ -133,7 +133,7 @@ test "重扫窗口里新增的文件：reconcile 之后行数与磁盘一致" {
 
     const session = try browse.Session.init(testing.allocator, testing.io, root, .{});
     defer session.deinit();
-    if (session.watcher == null) return error.SkipZigTest;
+    if (!session.hasWatcher()) return error.SkipZigTest;
     var selection = selection_mod.Selection{};
     defer selection.deinit(testing.allocator);
 
@@ -196,7 +196,7 @@ test "目录消失再回来：不可用正确翻转，交互重试后行数与�
 
     const session = try browse.Session.init(testing.allocator, testing.io, root, .{});
     defer session.deinit();
-    if (session.watcher == null) return error.SkipZigTest;
+    if (!session.hasWatcher()) return error.SkipZigTest;
     var selection = selection_mod.Selection{};
     defer selection.deinit(testing.allocator);
 

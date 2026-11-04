@@ -1,5 +1,5 @@
 # 变更记录
-测试：`core 94 / ports 192 / app 416`。
+测试：`core 94 / ports 192 / app 417`。
 全新克隆构建通过（0.7.0 实测：core / ports / app 三个目标全绿，`otto-lite 0.7.0 (dev)`）。
 
 
@@ -32,6 +32,14 @@
 
 
 
+
+## 0.63.4
+
+- **架构清理：浏览 Session 与 poll/rescan 状态机分离**。目录行、路径存储、预算、选择、导航历史与生命周期留在 `browse.zig`；watcher、事件缓冲、序号水位与 `idle/rescan/replay` 协议集中到 `browse_poll.zig`。
+- 原 `browse_events.zig` 与 `browse_reconcile.zig` 合并迁入新模块，不再分散维护两套事件处理入口。
+- 保持事件顺序：选择身份捕获 → 枚举批次 → 监听事件 → 排序 → 视图重建 → 身份恢复 → 预算观测；重扫期间不消费监听队列，replay 缺口只合并一次后续重扫。
+- 新增真实 RDCW 与确定性 overflow 回归测试；源目录、库和设置仍零写入。
+- UI、布局、库格式、分页、排序、选择与滚动恢复行为不变。
 
 ## 0.63.3
 

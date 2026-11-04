@@ -67,6 +67,8 @@ test {
     _ = @import("browse_test.zig");
     // Stage 1：分页 / 内存拒绝 / 重扫 reconcile / 目录消失再回来（真 RDCW）。
     _ = @import("browse_page_test.zig");
+    // 四类事件依序合入 + overflow 后重扫（真 RDCW + 现有队列注入）。
+    _ = @import("browse_poll_test.zig");
     // Stage 1：目录导航 / 唯一历史 / 身份选中恢复 / 排序。
     _ = @import("browse_nav_test.zig");
     _ = @import("browse_address_model.zig");
