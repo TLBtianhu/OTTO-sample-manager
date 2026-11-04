@@ -8,7 +8,7 @@ OTTO 负责把常用素材**导入、搜索、预览、整理并复用**；素�
 下载：[GitHub Releases](https://github.com/TLBtianhu/OTTO-sample-manager/releases/latest)
 
 作者：
-B 站 TLB天狐
+B 站 [TLB天狐](https://space.bilibili.com/446725356)
 B 站 [@杨薇柏_Official](https://space.bilibili.com/1042301441/)
 B 站 [@_Candace_](https://space.bilibili.com/364700163)
 
