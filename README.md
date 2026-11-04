@@ -8,6 +8,7 @@ OTTO 负责把常用素材**导入、搜索、预览、整理并复用**；素�
 下载：[GitHub Releases](https://github.com/TLBtianhu/OTTO-sample-manager/releases/latest)
 
 作者：
+B 站 TLB天狐
 B 站 [@杨薇柏_Official](https://space.bilibili.com/1042301441/)
 B 站 [@_Candace_](https://space.bilibili.com/364700163)
 
@@ -15,7 +16,7 @@ B 站 [@_Candace_](https://space.bilibili.com/364700163)
 
 ## 当前界面
 
-![OTTO 当前主界面：目录树、素材列表、搜索与预览](docs/screenshots/current-main.png)
+![OTTO 当前主界面：真实测试素材、目录树、搜索与 MP3 波形预览](docs/screenshots/current-main.png)
 
 默认窗口为 **540×960**；最小窗口为 **384×768**。窗口缩到下限时，预览仍保留完整布局，不会退化成一条无法使用的细条。
 
