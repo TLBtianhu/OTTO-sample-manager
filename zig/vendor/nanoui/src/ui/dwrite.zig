@@ -39,42 +39,36 @@ const GlyphRun = extern struct {
 const Key = struct { face: usize, simulations: u32 };
 pub const Bitmap = struct { bytes: []const u8, rgb: []const u8, w: u32, h: u32, stride: u32, x: f32, y: f32 };
 
-/// An `IUnknown` whose only job is to let DirectWrite use our font bytes **in
-/// place**: `CreateInMemoryFontFileReference` copies the whole file when its
-/// owner is null, and a CJK collection is ~20 MB — a copy of it is the single
-/// biggest avoidable private allocation a Windows window used to make.
-///
-/// Lifetime: the owner is a global that is never freed (it holds nothing); the
-/// byte slice DirectWrite borrows is a face in `fontdb`, which outlives every
-/// face here (`TextSystem.deinit` releases the atlas' faces before `db.deinit`).
+/// A non-null owner makes DirectWrite borrow the database's bytes instead of
+/// copying the whole file. It owns nothing itself; TextSystem.deinit releases
+/// this cache's faces before the database frees those bytes.
 const Owner = extern struct {
     vtable: [*]const *const anyopaque,
     refs: u32 = 1,
 };
-
-var owner_vtable: [3]*const anyopaque = .{
-    @ptrCast(&ownerQuery),
-    @ptrCast(&ownerAddRef),
-    @ptrCast(&ownerRelease),
-};
+var owner_vtable: [3]*const anyopaque = .{ @ptrCast(&ownerQuery), @ptrCast(&ownerAddRef), @ptrCast(&ownerRelease) };
 var font_owner: Owner = .{ .vtable = &owner_vtable };
 
 fn ownerQuery(self: *Owner, iid: *const Guid, out: *?*anyopaque) callconv(.winapi) i32 {
     const unknown: Guid = .{ .a = 0, .b = 0, .c = 0, .d = .{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
-    if (std.meta.eql(iid.*, unknown)) {
-        out.* = @ptrCast(self);
-        return 0;
+    if (!std.meta.eql(iid.*, unknown)) {
+        out.* = null;
+        return @bitCast(@as(u32, 0x80004002)); // E_NOINTERFACE
     }
-    out.* = null;
-    return @bitCast(@as(u32, 0x80004002)); // E_NOINTERFACE
+    out.* = @ptrCast(self);
+    _ = ownerAddRef(self);
+    return 0;
 }
-
 fn ownerAddRef(self: *Owner) callconv(.winapi) u32 {
     return @atomicRmw(u32, &self.refs, .Add, 1, .monotonic) + 1;
 }
-
 fn ownerRelease(self: *Owner) callconv(.winapi) u32 {
     return @atomicRmw(u32, &self.refs, .Sub, 1, .monotonic) - 1;
+}
+
+/// The singleton's outstanding references, checked by the teardown test.
+pub fn testOwnerReferences() u32 {
+    return if (@import("builtin").is_test) @atomicLoad(u32, &font_owner.refs, .monotonic) else 0;
 }
 
 pub const Cache = struct {
@@ -83,12 +77,6 @@ pub const Cache = struct {
     loader: ?*Com = null,
     params: ?*Com = null,
     blending: blending.Params = .{},
-    /// Test/audit override for the recommended rendering mode. Null is the
-    /// normal product path; keeping this explicit makes A/B pixels use the
-    /// same face, size, gamma and compositing code.
-    rendering_override: ?u32 = null,
-    /// Test/audit override for grid fitting; null keeps DirectWrite's recommendation.
-    grid_override: ?u32 = null,
     cleartype: bool = false,
     aliased: bool = false,
     bgr: bool = false,
@@ -99,6 +87,8 @@ pub const Cache = struct {
     scratch: std.ArrayList(u8) = .empty,
     /// Audits reject a silent fallback to the unhinted portable rasterizer.
     failures: usize = 0,
+    /// Regression tests use the old null-owner copy to compare its pixels.
+    force_copy: bool = false,
 
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
         if (enabled) {
@@ -170,10 +160,11 @@ pub const Cache = struct {
         const factory = self.factory.?;
         const loader = self.loader.?;
         var file: ?*Com = null;
-        // A non-null owner is what stops DirectWrite copying the bytes: it
-        // borrows them for as long as the file (and its faces) live, which the
-        // owner below makes safe. No GDI family-name substitution either way.
-        if (loader.method(4, *const fn (*Com, *Com, [*]const u8, u32, ?*Com, *?*Com) callconv(.winapi) i32)(loader, factory, rf.font.data.ptr, @intCast(rf.font.data.len), @ptrCast(&font_owner), &file) < 0) return error.DirectWriteFontFile;
+        // Borrow the font database's bytes for the font file's lifetime. A
+        // null owner is retained only as the old rendering path's test
+        // control; it makes DirectWrite allocate its own whole-file copy.
+        const owner: ?*Com = if (self.force_copy) null else @ptrCast(&font_owner);
+        if (loader.method(4, *const fn (*Com, *Com, [*]const u8, u32, ?*Com, *?*Com) callconv(.winapi) i32)(loader, factory, rf.font.data.ptr, @intCast(rf.font.data.len), owner, &file) < 0) return error.DirectWriteFontFile;
         const ff = file orelse return error.DirectWriteFontFile;
         defer ff.release();
         var supported: i32 = 0;
@@ -208,17 +199,13 @@ pub const Cache = struct {
         var grid: u32 = 0;
         const hr = f.method(44, *const fn (*Com, f32, f32, f32, ?*const anyopaque, i32, u32, u32, ?*Com, *u32, *u32) callconv(.winapi) i32)(f, size, 96 * scale, 96 * scale, null, 0, 0, 0, self.params, &rendering, &grid);
         if (hr < 0 or rendering == 0 or rendering == 6) rendering = 5;
-        // At small physical ems, Natural's fractional advances make UI text
-        // less like Windows' grid-fitted ClearType. GDI Natural preserves
-        // horizontal hinting while matching native pen positions more closely.
-        // Coverage is tagged below so this path bypasses Natural's extra
-        // enhanced-contrast correction; larger text keeps the recommended mode.
-        if (self.rendering_override) |forced| {
-            rendering = forced;
-        } else if (size * scale <= 16 and rendering >= 4) {
-            rendering = 3; // DWRITE_RENDERING_MODE_GDI_NATURAL
+        // At small physical ems, Natural's fractional advances and horizontal
+        // smoothing leave stems between pixels. GDI Classic keeps the same face
+        // and RGB coverage but grid-fits the stems and pen positions. Larger
+        // text keeps DirectWrite's recommended mode.
+        if (size * scale <= 16 and rendering >= 4) {
+            rendering = 2; // DWRITE_RENDERING_MODE_GDI_CLASSIC
         }
-        if (self.grid_override) |forced| grid = forced;
         return .{ .rendering = rendering, .grid = grid };
     }
 
@@ -274,9 +261,7 @@ pub const Cache = struct {
                     const value: f32 = @floatFromInt(v[if (self.bgr) 2 - ch else ch]);
                     self.rgb.items[i * 4 + ch] = @intFromFloat(@round(mean + (value - mean) * self.clear_level));
                 }
-                // 254 selects the native-GDI polarity gamma in both CPU/D3D;
-                // 255 applies DirectWrite Natural's contrast correction.
-                self.rgb.items[i * 4 + 3] = if (m.rendering == 2 or m.rendering == 3) 254 else 255;
+                self.rgb.items[i * 4 + 3] = 255;
             }
         } else {
             for (0..len) |i| self.rgb.items[i * 4 + 3] = 128;

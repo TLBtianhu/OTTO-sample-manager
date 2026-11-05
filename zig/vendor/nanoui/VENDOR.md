@@ -1,12 +1,13 @@
-﻿# nanoui（vendored）
+# nanoui（vendored）
 
 - 来源：https://github.com/TLBtianhu/nanoui（fork）
-- 当前提交：8a502ad（分支 otto-sync，合并上游 main 80007b9，即上游 0.10.0）
+- 当前提交：00e5813（分支 otto-091，合并上游 main d1330a8，即上游 0.12.0）
 - 同步日期：2026-11-03
 - 同步方式：obocopy <nanoui 工作树> zig\vendor\nanoui /MIR /XD .git .zig-cache zig-out
 
 ## 我们保留的补丁（相对上游）
 - 原始 BGRA 像素绘制、字体索引缓存、mmap 字体、GDI 上屏、帧日志/追踪；
+- `file_url` 导出，以及建帧中收到 `WM_DROPFILES` 时保留 HDROP 到帧间处理的重入修复；
 - drop 事件与 Options.non_activating 的 Windows 实现；
 - Content union 拆到 content.zig；Sink.upload(side)。
 

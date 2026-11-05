@@ -4,7 +4,6 @@ const std = @import("std");
 const w = @import("win32.zig");
 const Surface = @import("surface.zig").Surface;
 const types = @import("../ui/types.zig");
-const file_url = @import("../file_url.zig");
 
 /// One WM_DROPFILES, however many files it carries. The URLs and their UTF-8
 /// storage live for the frame, as they do on the Mac; the HDROP does not.
@@ -65,7 +64,50 @@ fn readUrls(a: std.mem.Allocator, hdrop: w.HDROP) ![]const []const u8 {
 fn fileUrlUtf16(a: std.mem.Allocator, units: []const u16) ![]u8 {
     const path = try std.unicode.utf16LeToUtf8Alloc(a, units);
     defer a.free(path);
-    return file_url.fromWindowsPath(a, path);
+    return fileUrl(a, path);
+}
+
+/// A Windows path as the file URL `ui.Drop.urls` promises. Extended-length
+/// prefixes are syntax for Win32, not part of the URL; a UNC's server becomes
+/// the URL's authority. Every other path byte is UTF-8 and URL-escaped.
+fn fileUrl(a: std.mem.Allocator, path: []const u8) ![]u8 {
+    var rest = path;
+    var prefix: []const u8 = "file:///";
+    if (std.mem.startsWith(u8, rest, "\\\\?\\UNC\\")) {
+        rest = rest[8..];
+        prefix = "file://";
+    } else {
+        if (std.mem.startsWith(u8, rest, "\\\\?\\")) rest = rest[4..];
+        if (std.mem.startsWith(u8, rest, "\\\\")) {
+            rest = rest[2..];
+            prefix = "file://";
+        }
+    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try out.ensureTotalCapacity(a, prefix.len + rest.len * 3);
+    out.appendSliceAssumeCapacity(prefix);
+    for (rest) |ch| {
+        if (ch == '\\') {
+            out.appendAssumeCapacity('/');
+        } else if (isPathChar(ch)) {
+            out.appendAssumeCapacity(ch);
+        } else {
+            const hex = "0123456789ABCDEF";
+            out.appendAssumeCapacity('%');
+            out.appendAssumeCapacity(hex[ch >> 4]);
+            out.appendAssumeCapacity(hex[ch & 15]);
+        }
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// RFC 3986's pchar; its colon also keeps a Windows drive letter intact.
+fn isPathChar(ch: u8) bool {
+    return switch (ch) {
+        'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', '/', ':', '@' => true,
+        else => false,
+    };
 }
 
 fn expectFileUrl(expected: []const u8, path: []const u8) !void {
@@ -77,11 +119,11 @@ fn expectFileUrl(expected: []const u8, path: []const u8) !void {
     try std.testing.expectEqualStrings(expected, url);
 }
 
-test "Windows drop converts UTF-16 Chinese paths and escapes URL bytes" {
+test "file URL converts UTF-16 Chinese paths and escapes URL bytes" {
     try expectFileUrl("file:///C:/Users/%E4%B8%AD%E6%96%87/%E6%8A%A5%E5%91%8A%20%231%3F100%25.txt", "C:\\Users\\中文\\报告 #1?100%.txt");
 }
 
-test "Windows drop keeps a long path without its extended-length prefix" {
+test "file URL keeps a long path without its extended-length prefix" {
     const a = std.testing.allocator;
     const tail: [280]u8 = @splat('a');
     var path_buf: [320]u8 = undefined;
@@ -91,7 +133,7 @@ test "Windows drop keeps a long path without its extended-length prefix" {
     try expectFileUrl(expected, path);
 }
 
-test "Windows drop converts UNC and extended UNC paths" {
+test "file URL converts UNC and extended UNC paths" {
     try expectFileUrl("file://server/share/dir/%E4%B8%AD%E6%96%87.txt", "\\\\server\\share\\dir\\中文.txt");
     try expectFileUrl("file://server/share/long.txt", "\\\\?\\UNC\\server\\share\\long.txt");
 }
