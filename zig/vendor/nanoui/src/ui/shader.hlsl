@@ -318,23 +318,26 @@ Pixel glyph_pixel(Varyings v, float clip_cover) {
     // A truncated line fading out: `border_width` points before `radius`.
     if (v.i_misc.y > 0.0) opacity *= clamp((v.i_misc.x - v.v_world.x) / v.i_misc.y, 0.0, 1.0);
     float gray = atlas.SampleLevel(sampler_atlas, v.v_uv, 0).r;
-    if (rgb_text > 0.5) {
+    uint2 side;
+    atlas.GetDimensions(side.x, side.y);
+    // Both sizes are physical pixels: rect is points, while the uv span is
+    // the whole atlas sprite, padding included. At 2x DPI a one-texel sprite
+    // is 0.5 points wide, not one point. scaleItems bakes animation scale
+    // into rect, so only an unscaled quad may use per-channel coverage.
+    float2 screen_pixels = v.i_rect.zw * scale;
+    float2 atlas_texels = (v.i_uv.zw - v.i_uv.xy) * float2(side);
+    bool one_to_one = all(abs(screen_pixels - atlas_texels) < float2(0.001, 0.001));
+    if (rgb_text > 0.5 && one_to_one) {
         // Native glyphs are nearest-sampled, as raster.zig does. The RGB
         // texel's alpha is a tag: 1 ClearType, 128/255 native grayscale.
-        uint2 side;
-        atlas.GetDimensions(side.x, side.y);
         int2 at = clamp(int2(v.v_uv * float2(side)), int2(0, 0), int2(side) - 1);
         float4 native = native_atlas.Load(int3(at, 0));
         float lightness = 0.30 * v.i_color.r + 0.59 * v.i_color.g + 0.11 * v.i_color.b;
         if (native.a > 0.75) {
-            float gdi_gamma = lightness >= 0.5 ? 0.78 : 1.28;
-            float3 coverage = float3(pow(native.r, gdi_gamma), pow(native.g, gdi_gamma), pow(native.b, gdi_gamma)) * opacity;
-            if (native.a > 0.998) {
-                coverage = float3(
-                    text_coverage(native.r, v.i_color.r, lightness, true),
-                    text_coverage(native.g, v.i_color.g, lightness, true),
-                    text_coverage(native.b, v.i_color.b, lightness, true)) * opacity;
-            }
+            float3 coverage = float3(
+                text_coverage(native.r, v.i_color.r, lightness, true),
+                text_coverage(native.g, v.i_color.g, lightness, true),
+                text_coverage(native.b, v.i_color.b, lightness, true)) * opacity;
             Pixel o;
             o.color = float4(v.i_color.rgb * coverage, dot(coverage, float3(1.0, 1.0, 1.0)) / 3.0);
             o.coverage = float4(coverage, o.color.a);

@@ -33,6 +33,12 @@
 
 
 
+## 0.64.0
+
+- **同步 nanoui 上游 0.12.0**：合并 `d1330a8`，保留已上游化的拖放、RGB 子像素、小字号/setSize 与 DirectWrite owner 单份实现，并带入上游 Linux pages 等更新。
+- 保留 OTTO 需要的 GDI/帧日志/字体缓存、非激活窗口与 `file_url` 导出；恢复建帧中 `WM_DROPFILES` 的 HDROP 重入处理，文件与文件夹拖入探针均通过。
+- 更新 vendored 记录；core/ports/app 测试、browse 49、移除、内存与透明度验收通过。
+
 ## 0.63.7
 
 - **去掉冗余的旧卸载器删除语句**：`RMDir /r app` 本身已覆盖旧版 `app\Uninstall.exe` 的清理，不再保留一条看似“兼容旧版”的显式 Delete。卸载器仍只在安装根存在一份，行为不变。

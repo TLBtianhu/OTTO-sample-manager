@@ -2,6 +2,9 @@
 //! glyph positions independently; this change does not replace shaping.
 const std = @import("std");
 const ui = @import("ui.zig");
+const dwrite = @import("dwrite.zig");
+const tt_font = @import("tt/font.zig");
+const atlas_mod = @import("atlas_tt.zig");
 const gpa = std.testing.allocator;
 
 const Sample = struct {
@@ -12,12 +15,6 @@ const Sample = struct {
         ui.text(c, words, .{ .size = self.style.size, .weight = self.style.weight, .color = self.color });
     }
     fn empty(_: *Sample, _: *ui.Context) void {}
-};
-
-const LinkedSample = struct {
-    fn view(_: *LinkedSample, c: *ui.Context) void {
-        ui.text(c, "采样管理", .{ .size = 13 });
-    }
 };
 
 fn init(t: *ui.Tester, sample: *Sample, scale: f32, background: ui.Color) !void {
@@ -48,11 +45,11 @@ fn compare(t: *ui.Tester, sample: Sample) !void {
     const bg = t.theme.background;
     const fg = sample.color;
     const rendering = native.mode(face, rf.size, t.scale).rendering;
-    // Direct2D uses a different Classic edge-contrast equation. Its exact
-    // pixel reference below is for Natural; Classic has a dedicated mode and
-    // integer-phase test plus the independent System.Drawing optical audit.
+    // Direct2D uses a different Classic edge-contrast equation. This exact
+    // pixel reference is for Natural; Classic has a mode and integer-phase
+    // regression below instead.
     if (rendering <= 3) return;
-    const expected = try renderReference(run, pixels.width, pixels.height, @round((f.leading / 2 + f.ascent) * t.scale), .{ fg.r, fg.g, fg.b, fg.a }, .{ bg.r, bg.g, bg.b, bg.a }, if (native.aliased) 3 else if (native.cleartype) 1 else 2, 0, @ptrCast(native.params.?));
+    const expected = try renderReference(run, pixels.width, pixels.height, @round((f.leading / 2 + f.ascent) * t.scale), .{ fg.r, fg.g, fg.b, fg.a }, .{ bg.r, bg.g, bg.b, bg.a }, if (native.aliased) 3 else if (native.cleartype) 1 else 2, @ptrCast(native.params.?));
     defer gpa.free(expected);
     for (0..pixels.width * pixels.height) |i| for (0..3) |channel| {
         const at = i * 4 + channel;
@@ -78,47 +75,34 @@ test "Windows Natural final color pixels match Direct2D at six sizes and five DP
     };
 }
 
-test "Windows small physical ems use GDI Natural and one integer position" {
+test "Windows small physical ems use GDI Classic and integer positions, large ems stay Natural" {
     var sample: Sample = .{};
     var t: ui.Tester = undefined;
     try init(&t, &sample, 1, .white);
     defer t.deinit();
-    const f = t.text.font(.{ .size = 13.5 });
-    const rf = t.text.run_fonts.items[f.id];
     const native = &t.text.atlas.native;
-    const face = native.fonts.get(.{ .face = @intFromPtr(rf.font), .simulations = 0 }) orelse return error.MissingNativeFace;
-    try std.testing.expectEqual(@as(u32, 3), native.mode(face, rf.size, t.scale).rendering);
-    try std.testing.expectEqual(@as(u8, 1), try native.positions(gpa, rf, t.scale));
-    const sp = t.text.glyph(t.text.layout("T", .{ .size = 13.5 }).glyphs[0], 0, 0) orelse return error.MissingBitmap;
-    const ax: usize = @intFromFloat(@round(sp.uv[0] * @as(f32, @floatFromInt(t.text.atlas.size))));
-    const ay: usize = @intFromFloat(@round(sp.uv[1] * @as(f32, @floatFromInt(t.text.atlas.size))));
-    const tag = t.text.atlas.native_pixels[((ay + 1) * t.text.atlas.size + ax + 1) * 4 + 3];
-    try std.testing.expectEqual(@as(u8, 254), tag);
-}
+    if (native.aliased) return error.SkipZigTest;
 
-test "Windows linked UI faces use the base collection face's optical scale" {
-    var sample: LinkedSample = .{};
-    var t: ui.Tester = undefined;
-    var theme = ui.Theme.light;
-    theme.font = "Segoe UI";
-    try t.init(gpa, .init(&sample, LinkedSample.view), .{ .scale = 1, .theme = theme });
-    defer t.deinit();
-    const primary = t.text.font(.{ .size = 13 });
-    var found = false;
-    for (t.text.layout("采样管理", .{ .size = 13 }).glyphs) |glyph| {
-        if (glyph.font == primary.id) continue;
-        const face = t.text.run_faces.items[glyph.font];
-        const scale = t.text.db.linkedScale(face);
-        try std.testing.expect(scale > 1);
-        try std.testing.expectApproxEqAbs(13 * scale, t.text.run_fonts.items[glyph.font].size, 0.0001);
-        found = true;
-    }
-    try std.testing.expect(found);
+    // Exactly 16 physical ems still grid-fits; positions() creates the face.
+    const small = t.text.font(.{ .size = 16 });
+    const small_rf = t.text.run_fonts.items[small.id];
+    try std.testing.expectEqual(@as(u8, 1), try native.positions(gpa, small_rf, t.scale));
+    const small_face = native.fonts.get(.{ .face = @intFromPtr(small_rf.font), .simulations = 0 }) orelse return error.MissingNativeFace;
+    try std.testing.expectEqual(@as(u32, 2), native.mode(small_face, small_rf.size, t.scale).rendering);
+
+    // The cutoff must not change DirectWrite's recommended Natural mode above
+    // the small-em range.
+    const large = t.text.font(.{ .size = 20 });
+    const large_rf = t.text.run_fonts.items[large.id];
+    _ = try native.positions(gpa, large_rf, t.scale);
+    const large_face = native.fonts.get(.{ .face = @intFromPtr(large_rf.font), .simulations = 0 }) orelse return error.MissingNativeFace;
+    try std.testing.expect(native.mode(large_face, large_rf.size, t.scale).rendering >= 4);
 }
 
 test "Windows grayscale and aliased coverage match native rendering" {
     for ([_]bool{ false, true }) |aliased| {
-        var sample: Sample = .{ .color = .hex(0x2378bb) };
+        // Keep this independent Natural reference above the Classic cutoff.
+        var sample: Sample = .{ .style = .{ .size = 20 }, .color = .hex(0x2378bb) };
         var t: ui.Tester = undefined;
         try init(&t, &sample, 1.25, .white);
         defer t.deinit();
@@ -209,6 +193,51 @@ test "Windows falls back to portable coverage when DirectWrite is unavailable" {
     try std.testing.expect(ink > 0);
 }
 
+fn readTestFont() ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "C:\\Windows\\Fonts\\segoeui.ttf", gpa, .limited(64 << 20));
+}
+
+test "DirectWrite borrowed font bytes match the legacy copied path" {
+    const data = try readTestFont();
+    defer gpa.free(data);
+    const borrowed_font = try tt_font.Font.init(data, 0);
+    const copied_font = try tt_font.Font.init(data, 0);
+    const glyph = borrowed_font.glyphIndex('A');
+    const borrowed_run: atlas_mod.RunFont = .{ .font = &borrowed_font, .size = 26 };
+    const copied_run: atlas_mod.RunFont = .{ .font = &copied_font, .size = 26 };
+
+    var borrowed: dwrite.Cache = .{};
+    defer borrowed.deinit(gpa);
+    var copied: dwrite.Cache = .{ .force_copy = true };
+    defer copied.deinit(gpa);
+    const actual = (try borrowed.rasterize(gpa, borrowed_run, glyph, 1, 0.25)) orelse return error.MissingBitmap;
+    const expected = (try copied.rasterize(gpa, copied_run, glyph, 1, 0.25)) orelse return error.MissingBitmap;
+    try std.testing.expectEqual(expected.w, actual.w);
+    try std.testing.expectEqual(expected.h, actual.h);
+    try std.testing.expectEqual(expected.stride, actual.stride);
+    try std.testing.expectEqual(expected.x, actual.x);
+    try std.testing.expectEqual(expected.y, actual.y);
+    try std.testing.expectEqualSlices(u8, expected.bytes, actual.bytes);
+    try std.testing.expectEqualSlices(u8, expected.rgb, actual.rgb);
+}
+
+test "twenty DirectWrite open and close cycles balance font owner references" {
+    const data = try readTestFont();
+    defer gpa.free(data);
+    const f = try tt_font.Font.init(data, 0);
+    const run: atlas_mod.RunFont = .{ .font = &f, .size = 18 };
+    const baseline = dwrite.testOwnerReferences();
+    for (0..20) |_| {
+        {
+            var cache: dwrite.Cache = .{};
+            defer cache.deinit(gpa);
+            _ = (try cache.rasterize(gpa, run, f.glyphIndex('A'), 1, 0)) orelse return error.MissingBitmap;
+            try std.testing.expect(dwrite.testOwnerReferences() > baseline);
+        }
+        try std.testing.expectEqual(baseline, dwrite.testOwnerReferences());
+    }
+}
+
 // Independent Direct2D software renderer. No window, atlas sampling or
 // copy of the implementation's gamma/contrast equations is used here.
 const Com = extern struct {
@@ -255,7 +284,7 @@ pub const Run = extern struct {
     bidi: u32 = 0,
 };
 
-fn renderReference(run: Run, width: usize, height: usize, baseline: f32, fg: [4]f32, bg: [4]f32, antialias: u32, measuring: u32, params: *Com) ![]u8 {
+fn renderReference(run: Run, width: usize, height: usize, baseline: f32, fg: [4]f32, bg: [4]f32, antialias: u32, params: *Com) ![]u8 {
     const dc = CreateCompatibleDC(null) orelse return error.ReferenceDC;
     defer _ = DeleteDC(dc);
     var bits: ?[*]u8 = null;
@@ -280,7 +309,7 @@ fn renderReference(run: Run, width: usize, height: usize, baseline: f32, fg: [4]
     t.method(36, *const fn (*Com, *Com) callconv(.winapi) void)(t, params);
     t.method(48, *const fn (*Com) callconv(.winapi) void)(t);
     t.method(47, *const fn (*Com, *const [4]f32) callconv(.winapi) void)(t, &bg);
-    t.method(29, *const fn (*Com, Point, *const Run, *Com, u32) callconv(.winapi) void)(t, .{ .x = 0, .y = baseline }, &run, b, measuring);
+    t.method(29, *const fn (*Com, Point, *const Run, *Com, u32) callconv(.winapi) void)(t, .{ .x = 0, .y = baseline }, &run, b, 0);
     if (t.method(49, *const fn (*Com, ?*u64, ?*u64) callconv(.winapi) i32)(t, null, null) < 0) return error.ReferenceDraw;
     return gpa.dupe(u8, (bits orelse return error.ReferenceBitmap)[0 .. width * height * 4]);
 }

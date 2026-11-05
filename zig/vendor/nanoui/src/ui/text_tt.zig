@@ -64,8 +64,6 @@ pub const TextSystem = struct {
     wraps: @import("wrap_cache.zig").WrapCache(Line) = .{},
     family: ?[]const u8 = null,
     mono_family: ?[]const u8 = null,
-    /// Test/audit scale for linked fallback faces; 1 keeps the current path.
-    fallback_scale: f32 = 1,
     /// Every size times this (`Context.setZoom`).
     zoom: f32 = 1,
 
@@ -113,12 +111,6 @@ pub const TextSystem = struct {
         freeLayouts(self.gpa, &self.previous);
         self.wraps.clear(self.gpa);
         self.atlas.reset();
-    }
-
-    pub fn setFallbackScale(self: *TextSystem, scale: f32) void {
-        if (scale == self.fallback_scale) return;
-        self.fallback_scale = scale;
-        self.dropCaches();
     }
 
     /// Scales every text by `z`: a change drops every cached font, shaping and wrap.
@@ -243,8 +235,7 @@ pub const TextSystem = struct {
             var g = rf.font.glyphIndex(if (cp == '\t') ' ' else cp);
             if (g == 0 and cp >= 0x20) {
                 if (self.db.fallback(cp, f.weight)) |face| {
-                    const linked_scale = self.db.linkedScale(face) * self.fallback_scale;
-                    const fid = self.runFont(face, size * linked_scale, style.italic, f.weight);
+                    const fid = self.runFont(face, size, style.italic, f.weight);
                     if (fid != 0xffff) {
                         id = fid;
                         rf = self.run_fonts.items[fid];
@@ -252,7 +243,7 @@ pub const TextSystem = struct {
                     }
                 }
             }
-            const k = rf.size / rf.font.units_per_em;
+            const k = size / rf.font.units_per_em;
             // Tabular digits: each in a cell as wide as the widest, unkerned.
             const digit = style.tabular and cp >= '0' and cp <= '9';
             if (prev) |p| if (p.id == id and !digit and !p.digit) {

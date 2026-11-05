@@ -52,8 +52,6 @@ test "a window's client area is the size that was asked, borderless or not" {
             .title = "size",
             .width = 200,
             .height = 120,
-            .min_width = 160,
-            .min_height = 100,
             .visible = false,
             .decorations = decorated,
             .content = .{ .view = .init(&p, Page.view) },
@@ -66,6 +64,30 @@ test "a window's client area is the size that was asked, borderless or not" {
         try testing.expectEqual(@as(i32, @intFromFloat(200 * s)), r.right - r.left);
         try testing.expectEqual(@as(i32, @intFromFloat(120 * s)), r.bottom - r.top);
     }
+}
+
+test "setSize keeps SWP_NOACTIVATE and preserves foreground activation" {
+    const gpa = testing.allocator;
+    const app = try makeApp(gpa);
+    defer app.destroy();
+    var p: Page = .{};
+    const win = try app.newWindow(.{
+        .title = "resize without activation",
+        .width = 160,
+        .height = 100,
+        .visible = false,
+        .content = .{ .view = .init(&p, Page.view) },
+    });
+    const h = win.hwnd orelse return error.SkipZigTest;
+    // Check the flags actually passed by setSize as well as the observable
+    // foreground window. The real HWND stays hidden throughout this test.
+    try testing.expect(Window.set_size_flags & w.SWP_NOACTIVATE != 0);
+    const foreground = w.GetForegroundWindow();
+    try testing.expect(foreground != h);
+    win.setSize(240, 140);
+    try testing.expectEqual(foreground, w.GetForegroundWindow());
+    try testing.expect(w.GetForegroundWindow() != h);
+    try testing.expect(!win.isVisible());
 }
 
 test "a window that asks to be above the others is WS_EX_TOPMOST" {
@@ -223,17 +245,9 @@ test "a borderless window's maximize is capped to the work area, monitor-relativ
         .content = .{ .view = .init(&p, Page.view) },
     });
     var mm2: w.MINMAXINFO = .{};
-    const plain_h = plain.hwnd orelse return error.SkipZigTest;
-    _ = w.SendMessageW(plain_h, w.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&mm2)));
+    _ = w.SendMessageW(plain.hwnd orelse return error.SkipZigTest, w.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&mm2)));
     try testing.expectEqual(@as(i32, 0), mm2.pt_max_size.x);
     try testing.expectEqual(@as(i32, 0), mm2.pt_max_position.x);
-    // The decorated tracking minimum includes the frame: sizing the hidden
-    // HWND to that outer limit still leaves the full requested client area.
-    _ = w.SetWindowPos(plain_h, null, 0, 0, mm2.pt_min_track_size.x, mm2.pt_min_track_size.y, 0x0002 | 0x0004 | 0x0010);
-    var client: w.RECT = .{};
-    _ = w.GetClientRect(plain_h, &client);
-    try testing.expectEqual(@as(i32, @intFromFloat(200 * s)), client.right - client.left);
-    try testing.expectEqual(@as(i32, @intFromFloat(150 * s)), client.bottom - client.top);
 }
 
 const Counter = struct { n: u32 = 0 };

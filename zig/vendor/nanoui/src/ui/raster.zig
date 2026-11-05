@@ -35,7 +35,8 @@ pub fn draw(out: gpu.Pixels, instances: []const gpu.Instance, mask: Mask, pictur
 /// `out` is kept. Over the pixels of an earlier frame, with the `damage`
 /// between the two, it makes the same pixels as drawing it all.
 pub fn drawRegion(out: gpu.Pixels, instances: []const gpu.Instance, mask: Mask, pictures: Pictures, scale: f32, clear: types.Color, region: [4]usize) void {
-    const alpha = if (mask.native_pixels.len > 0) clear.a else 1;
+    // Opaque, but on the Mac and for a transparent window (a clear of nothing).
+    const alpha = if (mask.native_pixels.len > 0 or clear.a == 0) clear.a else 1;
     const px: [4]u8 = .{ unit(clear.b * alpha), unit(clear.g * alpha), unit(clear.r * alpha), unit(alpha) };
     for (instances) |*inst_chk| if (inst_chk.kind == gpu.Kind.layer_begin) {
         const words: []u32 = @alignCast(std.mem.bytesAsSlice(u32, out.bytes[0 .. out.width * out.height * 4]));
@@ -457,10 +458,9 @@ fn glyph(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, scale: f32, b: [4]
                     const lightness = 0.30 * c[0] + 0.59 * c[1] + 0.11 * c[2];
                     // ClearType requires an opaque destination. Transparent
                     // pixels retain genuine grayscale coverage and alpha.
-                    if (native[3] >= 254 and out.bytes[at + 3] == 255) {
+                    if (native[3] == 255 and out.bytes[at + 3] == 255) {
                         for (0..3) |channel| {
-                            const coverage = if (native[3] == 254) @import("text_blend.zig").gdiCoverage(@as(f32, @floatFromInt(native[channel])) / 255, lightness) else mask.text_params.coverage(@as(f32, @floatFromInt(native[channel])) / 255, c[channel], lightness, true);
-                            const cov = coverage * opacity;
+                            const cov = mask.text_params.coverage(@as(f32, @floatFromInt(native[channel])) / 255, c[channel], lightness, true) * opacity;
                             const dest = at + 2 - channel; // output is BGRA
                             out.bytes[dest] = unit(c[channel] * cov + @as(f32, @floatFromInt(out.bytes[dest])) / 255 * (1 - cov));
                         }

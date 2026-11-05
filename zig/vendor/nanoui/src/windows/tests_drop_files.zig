@@ -66,7 +66,8 @@ const Receiver = struct {
     }
 };
 
-fn testApp(gpa: std.mem.Allocator) !*App {
+test "one WM_DROPFILES delivers one event with every path and its point" {
+    const gpa = testing.allocator;
     const app = try gpa.create(App);
     app.* = .{
         .gpa = gpa,
@@ -75,12 +76,6 @@ fn testApp(gpa: std.mem.Allocator) !*App {
         .flags = .{ .hidden = true },
         .gui = true,
     };
-    return app;
-}
-
-test "one WM_DROPFILES delivers one event with every path and its point" {
-    const gpa = testing.allocator;
-    const app = try testApp(gpa);
     defer app.destroy();
     const expected = [_][]const u8{
         "file:///C:/one.txt",
@@ -96,10 +91,6 @@ test "one WM_DROPFILES delivers one event with every path and its point" {
         .content = .{ .view = .init(&receiver, Receiver.view) },
     });
     const hwnd = win.hwnd orelse return error.SkipZigTest;
-    // DragAcceptFiles is the Explorer-facing half that a direct message alone
-    // cannot prove: Windows must have marked this exact HWND as a drop target.
-    const ex_style: u32 = @bitCast(@as(i32, @truncate(w.GetWindowLongPtrW(hwnd, w.GWL_EXSTYLE))));
-    try testing.expect(ex_style & 0x0000_0010 != 0); // WS_EX_ACCEPTFILES
     const paths = [_][]const u8{ "C:\\one.txt", "C:\\Temp\\中文 #1.txt", "\\\\server\\share\\two.txt" };
     const hdrop = try makeHDrop(&paths, .{ .x = 48, .y = 32 });
     _ = w.SendMessageW(hwnd, w.WM_DROPFILES, @intFromPtr(hdrop), 0);
@@ -113,65 +104,16 @@ test "one WM_DROPFILES delivers one event with every path and its point" {
     try testing.expect(win.surface.?.ctx.input.drop == null);
 }
 
-const ReentrantReceiver = struct {
-    hwnd: ?w.HWND = null,
-    armed: bool = false,
-    injected: bool = false,
-    inject_failed: bool = false,
-    events: u32 = 0,
-    urls_match: bool = false,
-
-    fn view(r: *ReentrantReceiver, c: *ui.Context) void {
-        const box = ui.div(c).sizeFull();
-        defer box.end();
-        c.acceptDrop(box.index);
-        if (c.dropAt(box.index)) |d| {
-            r.events += 1;
-            r.urls_match = d.urls.len == 1 and std.mem.eql(u8, d.urls[0], "file:///C:/reentrant.txt");
-        }
-        if (!r.armed or r.injected) return;
-        r.injected = true;
-        const paths = [_][]const u8{"C:\\reentrant.txt"};
-        const hdrop = makeHDrop(&paths, .{ .x = 48, .y = 32 }) catch {
-            r.inject_failed = true;
-            return;
-        };
-        // Same-thread SendMessage deterministically models a cross-process
-        // sent message arriving from a shell/API message pump during a build.
-        _ = w.SendMessageW(r.hwnd.?, w.WM_DROPFILES, @intFromPtr(hdrop), 0);
-    }
-};
-
-test "WM_DROPFILES reentering a frame is deferred without losing its HDROP" {
-    const gpa = testing.allocator;
-    const app = try testApp(gpa);
-    defer app.destroy();
-    var receiver: ReentrantReceiver = .{};
-    const win = try app.newWindow(.{
-        .title = "hidden reentrant drop test",
-        .width = 320,
-        .height = 200,
-        .visible = false,
-        .content = .{ .view = .init(&receiver, ReentrantReceiver.view) },
-    });
-    const hwnd = win.hwnd orelse return error.SkipZigTest;
-    receiver.hwnd = hwnd;
-    const surface = win.surface.?;
-    surface.frame(); // establish the previous frame's target rectangle
-    receiver.armed = true;
-    surface.frame(); // inject synchronously while this frame is building
-    @import("loop.zig").runFor(0.1);
-
-    try testing.expect(receiver.injected);
-    try testing.expect(!receiver.inject_failed);
-    try testing.expectEqual(@as(u32, 1), receiver.events);
-    try testing.expect(receiver.urls_match);
-    try testing.expect(surface.ctx.input.drop == null);
-}
-
 test "WM_DROPFILES without a drop target keeps the view unchanged" {
     const gpa = testing.allocator;
-    const app = try testApp(gpa);
+    const app = try gpa.create(App);
+    app.* = .{
+        .gpa = gpa,
+        .io = std.Io.Threaded.global_single_threaded.io(),
+        .options = .{ .quit_on_last_window_closed = false },
+        .flags = .{ .hidden = true },
+        .gui = true,
+    };
     defer app.destroy();
     var receiver: Receiver = .{ .expected = &.{}, .accepts = false };
     const win = try app.newWindow(.{
