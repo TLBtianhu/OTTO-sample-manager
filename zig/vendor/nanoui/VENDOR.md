@@ -1,8 +1,8 @@
 # nanoui（vendored）
 
 - 来源：https://github.com/TLBtianhu/nanoui（fork）
-- 当前提交：00e5813（分支 otto-091，合并上游 main d1330a8，即上游 0.12.0）
-- 同步日期：2026-11-03
+- 当前提交：332d2b9（分支 otto-091，合并上游 main e26765e）
+- 同步日期：2026-11-07
 - 同步方式：obocopy <nanoui 工作树> zig\vendor\nanoui /MIR /XD .git .zig-cache zig-out
 
 ## 我们保留的补丁（相对上游）
@@ -12,5 +12,6 @@
 - Content union 拆到 content.zig；Sink.upload(side)。
 
 ## 上游新能力（本次同步带入，OTTO 暂未使用）
+- iOS 多窗口、页面、选择手柄、按键重复与打包；macOS Metal 链接停顿修复。
 - WebView2 页面（page_webview2*.zig）、nanolight 启动器（pps/nanolight）、kv 持久化。
 - IME 修复（#63）：输入法会保留组合中的按键；不涉及我们改过的文件。
