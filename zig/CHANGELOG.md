@@ -33,6 +33,12 @@
 
 
 
+## 0.64.1
+
+- **同步 nanoui 上游 `e26765e`**：带入 iOS 多窗口、页面、选择手柄、按键重复与打包，以及 macOS Metal 链接停顿修复；OTTO 的 Windows 路径不受影响。
+- `file_url` 导出和建帧中 `WM_DROPFILES` 的 HDROP 重入处理已补回 fork 本体，后续同步不会再丢；文件与文件夹拖入探针均通过。
+- core/ports/app 测试、browse 49、移除与内存预算通过。
+
 ## 0.64.0
 
 - **同步 nanoui 上游 0.12.0**：合并 `d1330a8`，保留已上游化的拖放、RGB 子像素、小字号/setSize 与 DirectWrite owner 单份实现，并带入上游 Linux pages 等更新。
